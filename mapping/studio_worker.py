@@ -8,11 +8,7 @@ import subprocess
 import sys
 import traceback
 
-
-def saveJson(_path, _value):
-    pending = _path.with_suffix(_path.suffix + ".pending")
-    pending.write_text(json.dumps(_value, indent=2, allow_nan=False) + "\n", encoding="utf-8")
-    pending.replace(_path)
+from json_io import saveJson
 
 
 def parsePairs(_text, _count):

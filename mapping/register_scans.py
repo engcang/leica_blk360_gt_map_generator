@@ -11,14 +11,9 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 import numpy as np
 import open3d as o3d
 
+from json_io import saveJson
 from native_backend import PIPELINE_ID, align, backendInfo
 from registration_quality import evaluatePair, qualityDocument
-
-
-def saveJson(_path, _value):
-    pending = _path.with_suffix(_path.suffix + ".pending")
-    pending.write_text(json.dumps(_value, indent=2, allow_nan=False) + "\n", encoding="utf-8")
-    pending.replace(_path)
 
 
 def saveCache(_path, **_arrays):

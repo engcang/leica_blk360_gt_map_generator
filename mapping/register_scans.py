@@ -5,12 +5,14 @@ import os
 import pathlib
 import time
 
-os.environ.setdefault("OMP_NUM_THREADS", "8")
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+from parallel_runtime import configureThreads, cpuCount, orderedParallel, pairWorkers
+
+configureThreads()
 
 import numpy as np
 import open3d as o3d
 
+from fine_registration import cloudFingerprint, refinePair
 from json_io import saveJson
 from native_backend import PIPELINE_ID, align, backendInfo
 from registration_quality import evaluatePair, qualityDocument
@@ -328,6 +330,7 @@ def refineGraph(_result, _output, _progress=None):
     registration = o3d.pipelines.registration
     poses = [np.array(record["transform_map_from_scan"]) for record in _result["scans"]]
     clouds = []
+    cloud_keys = []
     for number, record in enumerate(_result["scans"]):
         if _progress:
             _progress(f"Preparing 1 cm working clouds: {number + 1}/{len(_result['scans'])} ({record['name']})")
@@ -339,39 +342,48 @@ def refineGraph(_result, _output, _progress=None):
             raw = readPly(pathlib.Path(record["source_path"]))
             cloud = makeCloud(np.column_stack([raw["x"], raw["y"], raw["z"]])).voxel_down_sample(0.01)
             normals(cloud, 0.04)
-            saveCache(path, points=np.asarray(cloud.points).astype(np.float32), normals=np.asarray(cloud.normals).astype(np.float32))
+            # Preserve precision so first-run and reloaded clouds have identical checkpoint keys.
+            saveCache(path, points=np.asarray(cloud.points), normals=np.asarray(cloud.normals))
             del raw
         clouds.append(cloud)
+        cloud_keys.append(cloudFingerprint(cloud))
         print(f"Fine cloud {record['name']}: {len(cloud.points):,} points", flush=True)
     graph = registration.PoseGraph()
     for pose in poses:
         graph.nodes.append(registration.PoseGraphNode(pose))
     edges = []
     retained = [edge for edge in _result["constraints"] if edge["retained"]]
-    for number, edge in enumerate(retained):
+    workers = pairWorkers(clouds, len(retained))
+    if _progress:
+        _progress(f"Refining 1 cm connections: 0/{len(retained)}; {workers} concurrent pairs, {cpuCount()} available CPU threads")
+    print(f"Fine ICP parallelism: {workers} pairs; CPU budget {cpuCount()}", flush=True)
+
+    def refineEdge(_edge):
+        i, j = _edge["source"], _edge["target"]
+        initial = np.linalg.inv(poses[j]) @ poses[i]
+        return refinePair(clouds[i], clouds[j], initial,
+                          _output / "fine_pairs" / f"{i:02d}_{j:02d}.json", cloud_keys[i], cloud_keys[j])
+
+    for number, (edge, (match, reused)) in enumerate(zip(retained, orderedParallel(refineEdge, retained, workers))):
         i, j = edge["source"], edge["target"]
         if _progress:
-            _progress(f"Refining 1 cm connections: {number + 1}/{len(retained)} (rows {i + 1}:{j + 1})")
-        initial = np.linalg.inv(poses[j]) @ poses[i]
-        match = registration.registration_icp(clouds[i],
-                                              clouds[j],
-                                              0.03,
-                                              initial,
-                                              registration.TransformationEstimationPointToPlane(registration.TukeyLoss(0.01)),
-                                              registration.ICPConvergenceCriteria(relative_fitness=1e-6, relative_rmse=1e-6, max_iteration=30))
-        refined = {"source": i, "target": j, "transform_target_from_source": match.transformation.tolist(), "tree_edge": edge["tree_edge"]}
+            _progress(f"Refining 1 cm connections: {number + 1}/{len(retained)} completed; {workers} concurrent pairs")
+        transform = np.array(match["transform"])
+        refined = {"source": i, "target": j, "transform_target_from_source": match["transform"], "tree_edge": edge["tree_edge"]}
+        print(f"Fine pair {i:02d}:{j:02d}: {'cached' if reused else 'computed'}, "
+              f"ICP {match['icp_seconds']:.2f} s, total {match['total_seconds']:.2f} s", flush=True)
         translation, rotation = edgeError(refined, poses)
-        if translation > 0.05 or rotation > 0.5 or len(match.correspondence_set) < 20 or match.fitness < 0.10:
+        if translation > 0.05 or rotation > 0.5 or match["correspondences"] < 20 or match["fitness"] < 0.10:
             if edge["tree_edge"]:
                 raise ValueError(f"Fine registration failed the correction/overlap gate for a required connection: {i}:{j}")
             print(f"Excluded unstable fine loop {i}:{j}", flush=True)
             continue
-        information = registration.get_information_matrix_from_point_clouds(clouds[i], clouds[j], 0.03, match.transformation)
+        information = np.array(match["information"])
         refined["information"] = information.tolist()
         refined["correction_m"] = translation
         refined["correction_deg"] = rotation
         edges.append(refined)
-        graph.edges.append(registration.PoseGraphEdge(i, j, match.transformation, information, uncertain=not edge["tree_edge"]))
+        graph.edges.append(registration.PoseGraphEdge(i, j, transform, information, uncertain=not edge["tree_edge"]))
         print(f"Fine pair {i:02d}:{j:02d}: correction {translation:.4f} m / {rotation:.4f} deg", flush=True)
     if _progress:
         _progress("Optimizing the final 1 cm pose graph")

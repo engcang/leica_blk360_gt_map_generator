@@ -6,8 +6,9 @@ import json
 import os
 import pathlib
 
-os.environ.setdefault("OMP_NUM_THREADS", "8")
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+from parallel_runtime import configureThreads, cpuCount
+
+configureThreads()
 
 import numpy as np
 from scipy.spatial import cKDTree
@@ -31,7 +32,7 @@ def directionalMetrics(_source,
     #Codex: One exact, parallel bounded query supplies all four thresholds.
     distances, neighbors = cKDTree(target_points).query(source_points,
                                                        distance_upper_bound=max(_thresholds),
-                                                       workers=min(8, os.cpu_count() or 1))
+                                                       workers=cpuCount())
     indices = np.flatnonzero(np.isfinite(distances))
     target_indices = neighbors[indices]
     delta = source_points[indices] - target_points[target_indices]

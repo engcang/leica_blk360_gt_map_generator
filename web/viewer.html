@@ -12,7 +12,7 @@
     <div class="load-controls"><label>Open PLY <input id="file" type="file" accept=".ply"></label><span id="load-status" role="status">Loading scan…</span></div>
     <progress id="load-progress" value="0" max="100" hidden></progress>
     <div class="controls">
-        <button id="reset">Reset</button><button id="fit">Fit (F)</button>
+        <button id="reset">Reset</button><button id="fit">Fit</button>
         <label>View<select id="view"><option value="oblique">Oblique</option><option value="top">Top</option><option value="front">Front (−Y)</option><option value="right">Right (+X)</option></select></label>
         <label>Projection<select id="projection"><option value="perspective">Perspective</option><option value="orthographic">Orthographic</option></select></label>
         <label><input id="grid" type="checkbox" checked style="width:auto">Grid / axes</label>
@@ -22,8 +22,8 @@
         <label>Hide above Z<input id="clip" type="range" min="-1" max="4" step="0.02" value="4"><output id="clipvalue">All</output></label>
     </div>
     <p id="densityStatus" aria-live="polite"></p>
-    <div style="position:relative"><canvas id="cloud" tabindex="0" aria-label="Full-resolution point cloud. Drag to orbit, Shift or right-drag to pan, wheel to zoom."></canvas><canvas id="axes" width="140" height="140" style="position:absolute;right:10px;top:10px;width:140px;height:140px;min-height:0;border:0;pointer-events:none"></canvas></div>
+    <div style="position:relative"><canvas id="cloud" tabindex="0" aria-label="Full-resolution point cloud. Drag to orbit, Shift or right-drag to pan, wheel to move forward or backward."></canvas><canvas id="axes" width="140" height="140" style="position:absolute;right:10px;top:10px;width:140px;height:140px;min-height:0;border:0;pointer-events:none"></canvas></div>
     <p id="cameraStatus" class="small"></p><p id="error" role="alert"></p>
-    <p>Left drag: orbit · Middle/right/Shift drag: pan · Wheel: dolly · Double-click: focus · F: fit · Z-up</p>
+    <p>Left drag: orbit around the visible screen center · Middle/right/Shift drag: pan · Wheel: move forward/back · Shift+wheel: fine movement · Z-up</p>
     <p class="small">Display density changes only the view; the saved PLY retains every point. While navigating, at most 2,000,000 points are drawn, never more than your selected density, then your selected density returns. Colour always represents laser-return intensity.</p>
 </main></body></html>

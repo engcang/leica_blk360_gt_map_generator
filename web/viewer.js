@@ -24,12 +24,14 @@
         drag = null,
         active = false,
         settle = 0,
-        frame = 0;
+        frame = 0,
+        orbitAtEye = false;
     const camera = {
             target: [0, 0, 0],
             azimuth: -Math.PI / 4,
             elevation: Math.PI / 5,
             distance: 10,
+            orthographicScale: 10,
             projection: 'perspective'
         },
         fov = 50 * Math.PI / 180,
@@ -68,7 +70,7 @@
             right: r,
             up: u,
             back: b
-        } = basis(), eye = camera.target.map((v, i) => v + b[i] * camera.distance), near = Math.max(.0001, Math.min(extent * .0001, camera.distance * .01)), far = camera.distance + extent * 4 + 10, aspect = c.clientWidth / c.clientHeight;
+        } = basis(), eye = camera.target.map((v, i) => v + b[i] * camera.distance), near = Math.max(.0001, Math.min(extent * .0001, camera.distance * .01)), far = Math.max(camera.distance, Math.hypot(...eye.map((v, i) => v - center[i]))) + extent * 4 + 10, aspect = c.clientWidth / c.clientHeight;
         const view = new Float32Array([r[0], u[0], b[0], 0, r[1], u[1], b[1], 0, r[2], u[2], b[2], 0, -dot(r, eye), -dot(u, eye), -dot(b, eye), 1]);
         let p;
         if (camera.projection === 'perspective')
@@ -78,7 +80,7 @@
         }
         else
         {
-            const h = camera.distance * tanHalf,
+            const h = camera.orthographicScale * tanHalf,
                 w = h * aspect;
             p = new Float32Array([1 / w, 0, 0, 0, 0, 1 / h, 0, 0, 0, 0, -2 / (far - near), 0, 0, 0, -(far + near) / (far - near), 1]);
         }
@@ -266,6 +268,8 @@
         const radius = Math.max(.001, Math.hypot(...max.map((v, i) => (v - min[i]) / 2))),
             aspect = c.clientWidth / c.clientHeight;
         camera.distance = radius / Math.sin(Math.atan(tanHalf * Math.min(1, aspect))) * 1.08;
+        camera.orthographicScale = camera.distance;
+        orbitAtEye = false;
         requestDraw();
     }
 
@@ -350,29 +354,78 @@
         requestDraw();
     }
 
+    function cameraEye()
+    {
+        const back = basis().back;
+        return camera.target.map((value, index) => value + back[index] * camera.distance);
+    }
+
+    function focusView()
+    {
+        // Change only the pivot depth along the center ray; never jump the eye or view direction.
+        const b = basis(), eye = cameraEye(), height = c.clientHeight,
+            radius = Math.max(16, Math.min(c.clientWidth, height) * .04),
+            visible = shown(), stride = Math.max(1, Math.ceil(visible / 200000)),
+            near = Math.max(.0001, Math.min(extent * .0001, camera.distance * .01)),
+            zLimit = Number(clip.value) + .00001;
+        let best = radius * radius, depth = null;
+        for (let point = 0; point < visible; point += stride)
+        {
+            const index = point * 4;
+            if (data[index + 2] > zLimit) continue;
+            const x = data[index] - eye[0], y = data[index + 1] - eye[1], z = data[index + 2] - eye[2],
+                forward = -(x * b.back[0] + y * b.back[1] + z * b.back[2]);
+            if (forward <= near) continue;
+            const halfHeight = (camera.projection === 'perspective' ? forward : camera.orthographicScale) * tanHalf,
+                scale = height / (2 * halfHeight),
+                px = (x * b.right[0] + y * b.right[1] + z * b.right[2]) * scale,
+                py = (x * b.up[0] + y * b.up[1] + z * b.up[2]) * scale,
+                screenDistance = px * px + py * py;
+            if (screenDistance > radius * radius) continue;
+            if (depth === null || screenDistance < best - 1 || (Math.abs(screenDistance - best) <= 1 && forward < depth))
+            {
+                best = screenDistance;
+                depth = forward;
+            }
+        }
+        orbitAtEye = depth === null;
+        camera.distance = depth === null ? Math.max(.01, Math.min(camera.distance, 1)) : depth;
+        camera.target = eye.map((value, index) => value - b.back[index] * camera.distance);
+    }
+
     function orbit(dx, dy)
     {
-        camera.azimuth -= dx * 2 * Math.PI / c.clientHeight;
-        camera.elevation = Math.max(-Math.PI / 2 + .001, Math.min(Math.PI / 2 - .001, camera.elevation + dy * 2 * Math.PI / c.clientHeight));
+        const eye = orbitAtEye ? cameraEye() : null;
+        camera.azimuth -= dx * Math.PI / c.clientHeight;
+        camera.elevation = Math.max(-Math.PI / 2 + .001, Math.min(Math.PI / 2 - .001, camera.elevation + dy * Math.PI / c.clientHeight));
+        if (eye)
+        {
+            const back = basis().back;
+            camera.target = eye.map((value, index) => value - back[index] * camera.distance);
+        }
         $('view').selectedIndex = -1;
     }
 
     function panBy(dx, dy)
     {
         const b = basis(),
-            units = 2 * camera.distance * tanHalf / c.clientHeight;
+            units = 2 * (camera.projection === 'perspective' ? camera.distance : camera.orthographicScale) * tanHalf / c.clientHeight;
         camera.target = camera.target.map((v, i) => v + (-dx * b.right[i] + dy * b.up[i]) * units);
     }
 
     function dolly(delta)
     {
-        camera.distance = Math.max(Math.max(.001, extent * 1e-5), Math.min(extent * 100, camera.distance * Math.exp(Math.max(-1, Math.min(1, delta * .001)))));
+        const back = basis().back,
+            step = .5 * Math.max(.0001, extent * .001) * Math.max(-1000, Math.min(1000, delta));
+        // Move eye and orbit center together; preserve orbit radius and pan sensitivity.
+        camera.target = camera.target.map((value, index) => value + back[index] * step);
     }
     $('reset').onclick = reset;
     $('fit').onclick = fit;
     $('view').onchange = e => preset(e.target.value);
     $('projection').onchange = e =>
     {
+        if (e.target.value === 'orthographic') camera.orthographicScale = camera.distance;
         camera.projection = e.target.value;
         requestDraw();
     };
@@ -387,6 +440,7 @@
     {
         if (e.button > 2) return;
         e.preventDefault();
+        focusView();
         drag = {
             id: e.pointerId,
             x: e.clientX,
@@ -424,7 +478,7 @@
     {
         e.preventDefault();
         const delta = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? c.clientHeight : 1);
-        dolly(delta);
+        dolly(delta * (e.shiftKey ? .1 : 1));
         gesture();
     },
     {
@@ -432,8 +486,8 @@
     });
     c.onkeydown = e =>
     {
-        if (e.key.toLowerCase() === 'f') fit();
-        else if (e.key === 'ArrowLeft') orbit(-15, 0);
+        if (e.key.startsWith('Arrow')) focusView();
+        if (e.key === 'ArrowLeft') orbit(-15, 0);
         else if (e.key === 'ArrowRight') orbit(15, 0);
         else if (e.key === 'ArrowUp') orbit(0, -15);
         else if (e.key === 'ArrowDown') orbit(0, 15);
@@ -442,49 +496,6 @@
         else return;
         e.preventDefault();
         gesture();
-    };
-
-    function pick(px, py)
-    {
-        const b = matrices(),
-            w = c.clientWidth,
-            h = c.clientHeight,
-            half = camera.distance * tanHalf;
-        let index = -1,
-            best = 100,
-            bestDepth = Infinity;
-        const displayed = shown();
-        for (let j = 0; j < displayed; j++)
-        {
-            const i = j * 4;
-            if (data[i + 2] > Number(clip.value) + .00001) continue;
-            const x = data[i] - camera.target[0],
-                y = data[i + 1] - camera.target[1],
-                z = data[i + 2] - camera.target[2],
-                depth = camera.distance - (x * b.back[0] + y * b.back[1] + z * b.back[2]);
-            if (depth < b.near || depth > b.far) continue;
-            const k = camera.projection === 'perspective' ? depth * tanHalf : half,
-                sx = ((x * b.right[0] + y * b.right[1] + z * b.right[2]) / (k * b.aspect) + 1) * w / 2,
-                sy = (1 - (x * b.up[0] + y * b.up[1] + z * b.up[2]) / k) * h / 2,
-                d = (sx - px) ** 2 + (sy - py) ** 2;
-            if (d < best - .25 || (Math.abs(d - best) < .25 && depth < bestDepth))
-            {
-                best = d;
-                bestDepth = depth;
-                index = i;
-            }
-        }
-        return index < 0 ? null : [data[index], data[index + 1], data[index + 2]];
-    }
-    c.ondblclick = e =>
-    {
-        const rect = c.getBoundingClientRect(),
-            p = pick(e.clientX - rect.left, e.clientY - rect.top);
-        if (p)
-        {
-            camera.target = p;
-            requestDraw();
-        }
     };
 
     async function prepareDisplay(vertices)
@@ -668,10 +679,11 @@
         camera,
         basis,
         matrices,
+        cameraEye,
+        focusView,
         orbit,
         panBy,
         dolly,
-        pick,
         draw,
         preset,
         loadPly,

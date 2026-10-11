@@ -49,8 +49,11 @@ Ubuntu runtime validation is still pending.
 4. Click **View 3D**, or use **Open PLY files** to view existing results without reconverting.
 
 Color is always **Intensity**. Display density is **1/10**, **1/5**, **1/2**, or **Full**;
-navigation temporarily draws at most 2,000,000 points. Left-drag orbits,
-right-drag/Shift-drag pans, the wheel zooms, and double-click sets the orbit target.
+navigation temporarily draws at most 2,000,000 points. Left-drag orbits around
+the surface near the screen center, or looks around in place when no surface is
+found. The pivot updates at drag start without moving the camera, and stays fixed
+during the drag. Right-drag/Shift-drag pans. The wheel moves forward/back;
+Shift+wheel moves more slowly. Rotation is slower for finer control.
 Display settings do not change the PLY. Existing files are never overwritten.
 
 ### Register scans
@@ -81,6 +84,14 @@ Keep the originals and preserve their paths relative to the JSON when moving a d
 To reopen a result, choose **Open registration result → relative_poses.json**.
 Working caches live under the app's `projects/default/registration_records/`;
 completed result viewing and generation do not require those caches.
+Fine ICP saves completed pairs for **Resume** and reuses their final correspondences
+for graph weights. Changed clouds, initial poses, or ICP settings invalidate a pair
+checkpoint. Point density, robust loss, and convergence criteria stay unchanged.
+Available CPU threads are detected automatically for the native engines, Open3D,
+and quality queries. Fine ICP processes one pair at a time using all available
+threads by default. Optional `BLK_CPU_THREADS` limits the CPU budget;
+`BLK_REGISTRATION_WORKERS` enables memory-bounded concurrent pairs, which can be
+slower when one pair already saturates CPU or memory bandwidth.
 
 ### Generate maps and share results
 

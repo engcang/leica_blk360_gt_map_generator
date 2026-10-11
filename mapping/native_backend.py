@@ -8,6 +8,8 @@ import pathlib
 import subprocess
 import tempfile
 
+from parallel_runtime import cpuCount
+
 PIPELINE_ID = "kiss-1.0.2_nano-b21e79e_refine-1cm_v1"
 
 
@@ -41,7 +43,7 @@ def align(_method, _source, _target, **_options):
         request = root / "request.json"
         result = root / "result.json"
         request.write_text(json.dumps({"method": _method, "source": str(_source), "target": str(_target),
-                                       "threads": 8, **_options}, allow_nan=False), encoding="utf-8")
+                                       "threads": cpuCount(), **_options}, allow_nan=False), encoding="utf-8")
         process = subprocess.run([str(executablePath()), str(request), str(result)],
                                  capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         if process.returncode:

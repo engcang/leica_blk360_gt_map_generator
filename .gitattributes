@@ -1,0 +1,6 @@
+* text=auto
+*.sh text eol=lf
+*.command text eol=lf
+*.png binary
+*.jpg binary
+third_party/** -text

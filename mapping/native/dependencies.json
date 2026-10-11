@@ -1,0 +1,42 @@
+{
+  "kiss": {
+    "url": "https://codeload.github.com/MIT-SPARK/KISS-Matcher/tar.gz/e3440b63340af7414ebd0fdde04e40f02ff4e7d2",
+    "sha256": "1a5ade91ded3739857dc2af7000b95eeec605a0af0c04405261442742019e4fc"
+  },
+  "nano": {
+    "url": "https://codeload.github.com/engcang/nano_gicp/tar.gz/b21e79edcceb7c6e86ec0dfec90f451b796b683a",
+    "sha256": "e37682003a527f90090c965e56c51a4d1e3ebd14bb957b3982e116d0e4c6f734"
+  },
+  "robin": {
+    "url": "https://codeload.github.com/MIT-SPARK/ROBIN/tar.gz/5623f02f62c63711052bbb8d6096a410ddca0ee4",
+    "sha256": "b687532ff4af30c87b5fc96bb413cbb01f47590eb168c5c26e101250c5888d95"
+  },
+  "xenium": {
+    "url": "https://codeload.github.com/mpoeter/xenium/tar.gz/1c449ae953ce2a440b0d16c5ed1181d2754860ab",
+    "sha256": "3057321e33c30be3a2ff5d0691cc70cdda8da046d73e5b822ccee4c9d12c83d4"
+  },
+  "eigen": {
+    "url": "https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz",
+    "sha256": "8586084f71f9bde545ee7fa6d00288b264a2b7ac3607b974e54d13e7162c1c72"
+  },
+  "pcl": {
+    "url": "https://github.com/PointCloudLibrary/pcl/archive/refs/tags/pcl-1.15.1.tar.gz",
+    "sha256": "e1d862c7b6bd27a45884a825a2e509bfcbd4561307d5bfe17ce5c8a3d94a6c29"
+  },
+  "boost": {
+    "url": "https://archives.boost.io/release/1.87.0/source/boost_1_87_0.tar.bz2",
+    "sha256": "af57be25cb4c4f4b413ed692fe378affb4352ea50fbe294a11ef548f4d527d89"
+  },
+  "flann": {
+    "url": "https://github.com/flann-lib/flann/archive/refs/tags/1.9.2.tar.gz",
+    "sha256": "e26829bb0017f317d9cc45ab83ddcb8b16d75ada1ae07157006c1e7d601c8824"
+  },
+  "lz4": {
+    "url": "https://github.com/lz4/lz4/archive/refs/tags/v1.10.0.tar.gz",
+    "sha256": "537512904744b35e232912055ccf8ec66d768639ff3abe5788d90d792ec5f48b"
+  },
+  "one_tbb": {
+    "url": "https://github.com/oneapi-src/oneTBB/archive/refs/tags/v2022.0.0.tar.gz",
+    "sha256": "e8e89c9c345415b17b30a2db3095ba9d47647611662073f7fbf54ad48b7f3c2a"
+  }
+}

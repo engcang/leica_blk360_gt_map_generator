@@ -1,0 +1,154 @@
+cmake_minimum_required(VERSION 3.24)
+project(blk_registration VERSION 1.0.0 LANGUAGES C CXX)
+
+### Set compiler
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+set(BLK_REGISTRATION_DEPS "" CACHE PATH "Directory containing pinned registration dependency sources")
+if(NOT BLK_REGISTRATION_DEPS)
+    include(dependencies.cmake)
+endif()
+find_package(OpenMP REQUIRED)
+find_package(Threads REQUIRED)
+
+### Build upstream libraries without ROS
+add_library(blk_eigen INTERFACE)
+target_include_directories(blk_eigen SYSTEM INTERFACE ${BLK_REGISTRATION_DEPS}/eigen)
+add_library(Eigen3::Eigen ALIAS blk_eigen)
+
+set(TBB_TEST OFF CACHE BOOL "" FORCE)
+set(TBB_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(TBB_STRICT OFF CACHE BOOL "" FORCE)
+set(TBBMALLOC_BUILD OFF CACHE BOOL "" FORCE)
+set(TBB_INSTALL OFF CACHE BOOL "" FORCE)
+add_subdirectory(${BLK_REGISTRATION_DEPS}/one_tbb ${CMAKE_CURRENT_BINARY_DIR}/one_tbb EXCLUDE_FROM_ALL)
+if(MINGW)
+    get_target_property(tbb_link_options tbb LINK_OPTIONS)
+    list(REMOVE_ITEM tbb_link_options "-Wl,-z,relro,-z,now")
+    set_target_properties(tbb PROPERTIES LINK_OPTIONS "${tbb_link_options}")
+endif()
+
+add_library(blk_lz4 STATIC ${BLK_REGISTRATION_DEPS}/lz4/lib/lz4.c
+                           ${BLK_REGISTRATION_DEPS}/lz4/lib/lz4hc.c
+                           ${BLK_REGISTRATION_DEPS}/lz4/lib/lz4frame.c
+                           ${BLK_REGISTRATION_DEPS}/lz4/lib/xxhash.c)
+target_include_directories(blk_lz4 SYSTEM PUBLIC ${BLK_REGISTRATION_DEPS}/lz4/lib)
+add_library(blk_flann INTERFACE)
+target_include_directories(blk_flann SYSTEM INTERFACE ${BLK_REGISTRATION_DEPS}/flann/src/cpp)
+target_link_libraries(blk_flann INTERFACE blk_lz4)
+
+file(GLOB robin_sources CONFIGURE_DEPENDS ${BLK_REGISTRATION_DEPS}/robin/src/*.cpp)
+list(FILTER robin_sources EXCLUDE REGEX "/(graph|graph_solvers).cpp$")
+#Codex: KISS-Matcher uses MAX_CORE. Omit the optional GPL PMC implementation and retain the upstream BSD core solver unchanged.
+file(READ ${BLK_REGISTRATION_DEPS}/robin/src/graph_solvers.cpp robin_solvers)
+string(REPLACE "\r\n" "\n" robin_solvers "${robin_solvers}")
+string(REPLACE "#include <pmc/pmc.h>" "#include <stdexcept>" robin_solvers "${robin_solvers}")
+string(FIND "${robin_solvers}" "//\n// Definitions for the MaxCliqueSolver class" clique_start)
+if(clique_start LESS 0)
+    message(FATAL_ERROR "Unexpected ROBIN source: cannot isolate the MAX_CORE implementation")
+endif()
+string(SUBSTRING "${robin_solvers}" 0 ${clique_start} robin_core_solver)
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/robin_core_solver.cpp "${robin_core_solver}\nstd::vector<size_t> MaxCliqueSolver::FindMaxClique(const IGraph&) const { throw std::runtime_error(\"This build supports MAX_CORE only; PMC is not included\"); }\n}\n")
+add_library(blk_robin STATIC ${robin_sources} ${CMAKE_CURRENT_BINARY_DIR}/robin_core_solver.cpp)
+target_include_directories(blk_robin SYSTEM PUBLIC ${BLK_REGISTRATION_DEPS}/robin/include
+                                                 ${BLK_REGISTRATION_DEPS}/xenium)
+target_link_libraries(blk_robin PUBLIC blk_eigen OpenMP::OpenMP_CXX)
+target_compile_definitions(blk_robin PUBLIC _USE_MATH_DEFINES)
+
+set(kiss_root ${BLK_REGISTRATION_DEPS}/kiss/cpp/kiss_matcher/core)
+add_library(blk_kiss STATIC ${kiss_root}/kiss_matcher/ROBINMatching.cpp
+                            ${kiss_root}/kiss_matcher/FasterPFH.cpp
+                            ${kiss_root}/kiss_matcher/KISSMatcher.cpp
+                            ${kiss_root}/kiss_matcher/GncSolver.cpp)
+target_include_directories(blk_kiss SYSTEM PUBLIC ${kiss_root})
+target_link_libraries(blk_kiss PUBLIC blk_eigen blk_robin blk_flann TBB::tbb OpenMP::OpenMP_CXX)
+foreach(library blk_kiss blk_robin)
+    if(MSVC)
+        target_compile_options(${library} PRIVATE /FI${CMAKE_CURRENT_SOURCE_DIR}/include/upstream_headers.hpp)
+    else()
+        target_compile_options(${library} PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/include/upstream_headers.hpp)
+    endif()
+endforeach()
+
+### Instantiate upstream PCL templates for the required point type
+#Codex: Nano-GICP only needs PCL's registration/point templates and console implementation, not visualization or device drivers.
+set(PCL__cplusplus 201703L)
+set(PCL_REQUIRES_MSC_VER 1914)
+set(PCL_VERSION_MAJOR 1)
+set(PCL_VERSION_MINOR 15)
+set(PCL_VERSION_PATCH 1)
+set(PCL_DEV_VERSION 0)
+set(PCL_VERSION_PRETTY 1.15.1)
+set(PCL_INDEX_SIGNED_STR true)
+set(PCL_INDEX_SIZE 32)
+set(PCL_USES_EIGEN_HANDMADE_ALIGNED_MALLOC "(!EIGEN_MALLOC_ALREADY_ALIGNED && EIGEN_DEFAULT_ALIGN_BYTES != 0)")
+set(PCL_NO_PRECOMPILE ON)
+set(PCL_XYZ_POINT_TYPES "(pcl::PointXYZI)")
+set(PCL_NORMAL_POINT_TYPES "(pcl::Normal)")
+set(VTK_RENDERING_BACKEND_OPENGL_VERSION 0)
+configure_file(${BLK_REGISTRATION_DEPS}/pcl/pcl_config.h.in ${CMAKE_CURRENT_BINARY_DIR}/include/pcl/pcl_config.h)
+add_library(blk_pcl STATIC ${BLK_REGISTRATION_DEPS}/pcl/common/src/print.cpp)
+target_include_directories(blk_pcl SYSTEM PUBLIC ${CMAKE_CURRENT_BINARY_DIR}/include
+                                               ${BLK_REGISTRATION_DEPS}/boost
+                                               ${BLK_REGISTRATION_DEPS}/pcl/common/include
+                                               ${BLK_REGISTRATION_DEPS}/pcl/kdtree/include
+                                               ${BLK_REGISTRATION_DEPS}/pcl/search/include
+                                               ${BLK_REGISTRATION_DEPS}/pcl/sample_consensus/include
+                                               ${BLK_REGISTRATION_DEPS}/pcl/registration/include)
+target_compile_definitions(blk_pcl PUBLIC PCL_STATIC PCL_NO_PRECOMPILE BOOST_ALL_NO_LIB NOMINMAX)
+target_link_libraries(blk_pcl PUBLIC blk_eigen blk_flann Threads::Threads)
+add_library(blk_nano STATIC ${BLK_REGISTRATION_DEPS}/nano/src/nano_gicp.cc
+                            ${BLK_REGISTRATION_DEPS}/nano/src/nanoflann.cc)
+target_include_directories(blk_nano SYSTEM PUBLIC ${BLK_REGISTRATION_DEPS}/nano/include)
+target_link_libraries(blk_nano PUBLIC blk_pcl OpenMP::OpenMP_CXX)
+if(MSVC)
+    target_compile_options(blk_nano PRIVATE /FI${CMAKE_CURRENT_SOURCE_DIR}/include/upstream_headers.hpp)
+else()
+    target_compile_options(blk_nano PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/include/upstream_headers.hpp)
+endif()
+
+### Build application
+add_executable(blk_registration src/main.cpp)
+target_include_directories(blk_registration PRIVATE src include)
+target_include_directories(blk_registration SYSTEM PRIVATE ../../third_party)
+target_link_libraries(blk_registration PRIVATE blk_kiss blk_nano)
+if(MINGW)
+    target_link_options(blk_registration PRIVATE -static-libstdc++ -static-libgcc -municode)
+endif()
+
+### Install
+install(TARGETS blk_registration RUNTIME DESTINATION mapping/bin)
+install(TARGETS tbb RUNTIME DESTINATION mapping/bin LIBRARY DESTINATION mapping/bin)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set_target_properties(blk_registration PROPERTIES INSTALL_RPATH "$ORIGIN")
+endif()
+if(MINGW)
+    get_filename_component(compiler_directory "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    foreach(runtime libc++.dll libomp.dll libunwind.dll libwinpthread-1.dll)
+        if(EXISTS "${compiler_directory}/${runtime}")
+            install(FILES "${compiler_directory}/${runtime}" DESTINATION mapping/bin)
+        endif()
+    endforeach()
+endif()
+install(FILES ${BLK_REGISTRATION_DEPS}/kiss/LICENSE DESTINATION mapping/bin/licenses RENAME KISS-Matcher.txt)
+install(FILES ${BLK_REGISTRATION_DEPS}/nano/LICENSE DESTINATION mapping/bin/licenses RENAME Nano-GICP.txt)
+install(FILES ${BLK_REGISTRATION_DEPS}/nano/include/nano_gicp/impl/nano_gicp_impl.hpp DESTINATION mapping/bin/licenses RENAME Nano-GICP-upstream-source.hpp.txt)
+install(FILES ${BLK_REGISTRATION_DEPS}/nano/include/nano_gicp/nanoflann.hpp DESTINATION mapping/bin/licenses RENAME nanoflann-upstream-source.hpp.txt)
+install(FILES ${BLK_REGISTRATION_DEPS}/robin/LICENSE DESTINATION mapping/bin/licenses RENAME ROBIN.txt OPTIONAL)
+install(FILES ${BLK_REGISTRATION_DEPS}/robin/LICENSE.md DESTINATION mapping/bin/licenses RENAME ROBIN.txt OPTIONAL)
+install(FILES ${BLK_REGISTRATION_DEPS}/xenium/LICENSE DESTINATION mapping/bin/licenses RENAME xenium.txt)
+install(FILES ${BLK_REGISTRATION_DEPS}/eigen/COPYING.MPL2 DESTINATION mapping/bin/licenses RENAME Eigen-MPL2.txt)
+install(FILES ${BLK_REGISTRATION_DEPS}/eigen/COPYING.BSD DESTINATION mapping/bin/licenses RENAME Eigen-BSD.txt)
+install(FILES ${BLK_REGISTRATION_DEPS}/boost/LICENSE_1_0.txt DESTINATION mapping/bin/licenses RENAME Boost.txt)
+install(FILES ${BLK_REGISTRATION_DEPS}/pcl/LICENSE.txt DESTINATION mapping/bin/licenses RENAME PCL.txt)
+install(FILES ${BLK_REGISTRATION_DEPS}/flann/COPYING DESTINATION mapping/bin/licenses RENAME FLANN.txt)
+install(FILES ${BLK_REGISTRATION_DEPS}/lz4/lib/LICENSE DESTINATION mapping/bin/licenses RENAME LZ4.txt)
+install(FILES ${BLK_REGISTRATION_DEPS}/lz4/lib/xxhash.c DESTINATION mapping/bin/licenses RENAME xxHash-upstream-source.c.txt)
+install(FILES ${BLK_REGISTRATION_DEPS}/one_tbb/LICENSE.txt ${BLK_REGISTRATION_DEPS}/one_tbb/third-party-programs.txt DESTINATION mapping/bin/licenses)
+install(FILES dependencies.json DESTINATION mapping/bin/licenses)

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 
@@ -31,6 +32,21 @@ def sourceFingerprint(_root):
         result.update(path.relative_to(_root).as_posix().encode())
         result.update(path.read_bytes())
     return result.hexdigest()
+
+
+def synchronizeBuildRuntime(_install, _build_app):
+    source = _install / "mapping" / "bin"
+    if not source.is_dir():
+        raise FileNotFoundError("The installed registration engine is missing; rerun setup")
+    destination = _build_app / "mapping" / "bin"
+    for path in source.rglob("*"):
+        if not path.is_file():
+            continue
+        target = destination / path.relative_to(source)
+        if target.is_file() and hashlib.sha256(target.read_bytes()).digest() == hashlib.sha256(path.read_bytes()).digest():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
 
 
 def initializeProject(_install, _runtime):
@@ -95,10 +111,13 @@ def main():
                     runCommand([ctest, "--test-dir", output, "--output-on-failure"], root, log)
                 runCommand([cmake, "--install", output, "--prefix", install], root, log)
         stamp.unlink(missing_ok=True)
+        synchronizeBuildRuntime(install, build / "app")
         print("Checking registration runtime...", flush=True)
         runCommand([helper, "--version"], root, log)
         runCommand([sys.executable, install / "mapping" / "studio_worker.py", "--check", "--report", build / "runtime-check"], root, log)
-        initializeProject(install, json.loads((build / "runtime-check" / "progress.json").read_text(encoding="utf-8")))
+        runtime = json.loads((build / "runtime-check" / "progress.json").read_text(encoding="utf-8"))
+        initializeProject(install, runtime)
+        initializeProject(build / "app", runtime)
         stamp.write_text(fingerprint, encoding="ascii")
     print("BLK Studio is ready.", flush=True)
     if not args.no_launch:

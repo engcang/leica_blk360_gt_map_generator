@@ -124,6 +124,9 @@ def checkRuntime(_report):
 
 
 def setupRuntime(_destination, _report):
+    from native_backend import backendInfo
+
+    backendInfo()
     if not (3, 10) <= sys.version_info[:2] <= (3, 13):
         raise ValueError("Install 64-bit Python 3.10-3.13, then select its executable")
     saveJson(_report / "progress.json", {"status": "running", "stage": "Creating a private registration environment"})
@@ -139,8 +142,12 @@ def setupRuntime(_destination, _report):
                     str(pathlib.Path(__file__).with_name("requirements.txt"))],
                    check=True, creationflags=flags, stdout=sys.stdout, stderr=sys.stderr, stdin=subprocess.DEVNULL)
     saveJson(_report / "progress.json", {"status": "running", "stage": "Checking the installed registration runtime"})
-    subprocess.run([str(python), "-u", str(pathlib.Path(__file__).resolve()), "--check", "--report", str(_report)],
-                   check=True, creationflags=flags, stdout=sys.stdout, stderr=sys.stderr, stdin=subprocess.DEVNULL)
+    result = subprocess.run([str(python), "-u", str(pathlib.Path(__file__).resolve()), "--check", "--report", str(_report)],
+                            creationflags=flags, stdout=sys.stdout, stderr=sys.stderr, stdin=subprocess.DEVNULL)
+    if result.returncode:
+        progress = json.loads((_report / "progress.json").read_text(encoding="utf-8"))
+        detail = progress.get("stage") if progress.get("status") == "failed" else "Registration runtime check failed; see the worker log"
+        raise RuntimeError(detail)
 
 
 def main():

@@ -5,12 +5,31 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "scripts"))
-from setup import initializeProject, runCommand, sourceFingerprint
+from setup import initializeProject, runCommand, sourceFingerprint, synchronizeBuildRuntime
 
 
 class SetupTests(unittest.TestCase):
+    def testBuildAppReceivesHelperAndLibrariesWithoutRewritingUnchangedFiles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            install = root / "install"
+            app = root / "build" / "local" / "app"
+            source = install / "mapping" / "bin"
+            source.mkdir(parents=True)
+            for name in ("blk_registration.exe", "libomp.dll", "libtbb12.dll"):
+                (source / name).write_bytes(name.encode())
+            synchronizeBuildRuntime(install, app)
+            for path in source.iterdir():
+                self.assertEqual((app / "mapping" / "bin" / path.name).read_bytes(), path.read_bytes())
+            with mock.patch("setup.shutil.copy2", side_effect=AssertionError("Unchanged runtime must not be overwritten")):
+                synchronizeBuildRuntime(install, app)
+            (source / "blk_registration.exe").write_bytes(b"updated engine")
+            synchronizeBuildRuntime(install, app)
+            self.assertEqual((app / "mapping" / "bin" / "blk_registration.exe").read_bytes(), b"updated engine")
+
     def testValidatedRuntimeIsReadyWithoutReplacingExistingJobs(self):
         with tempfile.TemporaryDirectory() as directory:
             install = pathlib.Path(directory)

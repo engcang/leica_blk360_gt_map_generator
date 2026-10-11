@@ -17,6 +17,24 @@ endif()
 find_package(OpenMP REQUIRED)
 find_package(Threads REQUIRED)
 
+### Fetch the standalone engine's JSON dependency
+set(json_directory "${CMAKE_CURRENT_BINARY_DIR}/json")
+file(MAKE_DIRECTORY "${json_directory}")
+set(json_header "${json_directory}/json.hpp")
+set(json_hash aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63)
+if(EXISTS "${json_header}")
+    file(SHA256 "${json_header}" actual_json_hash)
+endif()
+if(NOT actual_json_hash STREQUAL json_hash)
+    file(DOWNLOAD "https://raw.githubusercontent.com/nlohmann/json/v3.12.0/single_include/nlohmann/json.hpp"
+        "${json_header}.pending" EXPECTED_HASH "SHA256=${json_hash}" TLS_VERIFY ON STATUS json_download_status)
+    list(GET json_download_status 0 json_download_code)
+    if(NOT json_download_code EQUAL 0)
+        message(FATAL_ERROR "Cannot download registration JSON dependency: ${json_download_status}")
+    endif()
+    file(RENAME "${json_header}.pending" "${json_header}")
+endif()
+
 ### Build upstream libraries without ROS
 add_library(blk_eigen INTERFACE)
 target_include_directories(blk_eigen SYSTEM INTERFACE ${BLK_REGISTRATION_DEPS}/eigen)
@@ -116,7 +134,7 @@ endif()
 ### Build application
 add_executable(blk_registration src/main.cpp)
 target_include_directories(blk_registration PRIVATE src include)
-target_include_directories(blk_registration SYSTEM PRIVATE ../../third_party)
+target_include_directories(blk_registration SYSTEM PRIVATE "${json_directory}")
 target_link_libraries(blk_registration PRIVATE blk_kiss blk_nano)
 if(MINGW)
     target_link_options(blk_registration PRIVATE -static-libstdc++ -static-libgcc -municode)

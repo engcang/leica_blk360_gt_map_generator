@@ -6,54 +6,36 @@
 
 <br>
 
-## Dependencies
+## Install and run
 
-- **Platforms:** Windows and Ubuntu.
-- **Build:** CMake 3.24+, Ninja, and a C/C++17 compiler with OpenMP: GCC on Ubuntu or LLVM-MinGW on Windows.
-- **Viewing:** a WebGL-capable browser.
-- **Registration and map generation:** 64-bit Python 3.10–3.13, the locally built KISS-Matcher / Nano-GICP engine, and [Python packages](mapping/requirements.txt). Use **Registration setup → Check runtime** or **Install packages** after installing Python. Conversion/viewing do not require Python.
-- Initial dependency downloads need internet access; processing runs locally at `127.0.0.1`.
+Download or clone this source repository into a writable folder.
 
-Windows has been tested locally. Ubuntu has a CI build configuration; local runtime validation is still pending.
+- **Windows 10/11 x64:** double-click **`Start-BLK-Studio.bat`**.
+- **Ubuntu 22.04/24.04 x86_64:** open a terminal in this folder and run **`bash start.sh`**.
+  Ubuntu asks for your sudo password only if required system packages are missing.
 
-<br>
+The launcher downloads required tools, prepares a local Python environment, builds
+both the app and registration engine, checks the runtime, and opens your browser.
+The first run needs internet access, several GB of free disk space, and time for
+compilation. Later runs reuse the installation; source updates trigger a rebuild.
+No manual CMake commands or Python package installation are needed.
 
-## Build and run from source
+Tools, Python packages, dependencies, and compiled files stay in ignored local
+folders (`.build-tools/`, `.venv/`, `third_party/`, `build/`, and `install/`).
+Windows setup does not require administrator rights or modify the system PATH.
+Keep these folders with the project; Python environments contain absolute paths.
 
-Download the source and open a terminal in the `blk2ply` project root.
-Users build the application locally. Executables, DLLs, downloaded dependencies,
-scan data, and build/install folders are excluded from the source repository by
-[.gitignore](.gitignore). CMake downloads checksum-verified dependencies as needed.
-
-**Windows:** install LLVM-MinGW, CMake, and Ninja; add their `bin` directories to
-`PATH`. In PowerShell, select the compiler before running the build commands:
-
-```powershell
-$env:CC = "clang"
-$env:CXX = "clang++"
-$env:RC = "windres"
-```
-
-**Ubuntu:** install CMake, Ninja, and GCC with OpenMP support.
-MSVC is not supported for the registration engine.
-
-**Both platforms:** build the registration engine first, then the app.
-Skip the first three commands for conversion/viewing only:
-
-```sh
-cmake -S mapping/native -B build/native -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build/native --config Release --parallel 4
-cmake --install build/native --config Release --prefix .
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release --parallel
-ctest --test-dir build -C Release --output-on-failure
-cmake --install build --config Release --prefix install
-```
-
-Run `install/blk_studio` on Ubuntu or the locally built `install/blk_studio.exe`
-on Windows. Keep the generated `install/` contents together.
-Ubuntu desktop opening requires `xdg-open`.
+Use the same launcher every time. Processing runs locally at `127.0.0.1`.
 Use **Quit app** to stop the process; closing the browser tab leaves it running.
+If setup fails, the launcher reports the error; build details are in `build/setup.log`.
+To build without opening the app, use `Start-BLK-Studio.bat -NoLaunch` or
+`bash start.sh --no-launch`. The default is two compiler jobs to limit memory use.
+
+No GitHub Actions workflows are included. Cloning, pushing, and starting the app
+do not trigger builds on GitHub.
+
+The Windows launcher has been validated from a fresh source checkout.
+Ubuntu runtime validation is still pending.
 
 <br>
 

@@ -52,7 +52,9 @@ Color is always **Intensity**. Display density is **1/10**, **1/5**, **1/2**, or
 navigation temporarily draws at most 2,000,000 points. Left-drag orbits around
 the surface near the screen center, or looks around in place when no surface is
 found. The pivot updates at drag start without moving the camera, and stays fixed
-during the drag. Right-drag/Shift-drag pans. The wheel moves forward/back;
+during the drag. Right-/middle-drag or Shift-drag pans at a stable speed based on
+the visible surfaces, independently of the orbit pivot; empty views retain the last
+usable pan speed. The wheel moves forward/back;
 Shift+wheel moves more slowly. Rotation is slower for finer control.
 Display settings do not change the PLY. Existing files are never overwritten.
 

@@ -25,7 +25,8 @@
         active = false,
         settle = 0,
         frame = 0,
-        orbitAtEye = false;
+        orbitAtEye = false,
+        panDistance = 10;
     const camera = {
             target: [0, 0, 0],
             azimuth: -Math.PI / 4,
@@ -269,6 +270,7 @@
             aspect = c.clientWidth / c.clientHeight;
         camera.distance = radius / Math.sin(Math.atan(tanHalf * Math.min(1, aspect))) * 1.08;
         camera.orthographicScale = camera.distance;
+        panDistance = camera.distance;
         orbitAtEye = false;
         requestDraw();
     }
@@ -406,10 +408,44 @@
         $('view').selectedIndex = -1;
     }
 
+    function preparePan()
+    {
+        if (camera.projection !== 'perspective') return;
+        // Estimate the visible surface depth independently of the orbit pivot.
+        // Frontmost samples per screen tile prevent dense, hidden backgrounds from dominating.
+        const b = basis(), eye = cameraEye(), columns = 24, rows = 16,
+            depths = new Float64Array(columns * rows).fill(Infinity),
+            visible = shown(), stride = Math.max(1, Math.ceil(visible / 200000)),
+            aspect = c.clientWidth / c.clientHeight,
+            near = Math.max(.0001, Math.min(extent * .0001, camera.distance * .01)),
+            zLimit = Number(clip.value) + .00001;
+        for (let point = 0; point < visible; point += stride)
+        {
+            const index = point * 4;
+            if (data[index + 2] > zLimit) continue;
+            const offset = [data[index] - eye[0], data[index + 1] - eye[1], data[index + 2] - eye[2]],
+                depth = -dot(offset, b.back);
+            if (depth <= near) continue;
+            const x = dot(offset, b.right) / (depth * tanHalf * aspect),
+                y = dot(offset, b.up) / (depth * tanHalf);
+            if (Math.abs(x) >= 1 || Math.abs(y) >= 1) continue;
+            const tile = Math.floor((y + 1) * .5 * rows) * columns + Math.floor((x + 1) * .5 * columns);
+            depths[tile] = Math.min(depths[tile], depth);
+        }
+        const valid = Array.from(depths).filter(Number.isFinite).sort((a, b) => a - b);
+        // A median rejects isolated foreground points. Empty views retain the last usable speed.
+        // This value remains fixed throughout the drag, even as the visible geometry changes.
+        if (valid.length)
+        {
+            const middle = Math.floor(valid.length / 2);
+            panDistance = (valid[middle] + valid[Math.floor((valid.length - 1) / 2)]) * .5;
+        }
+    }
+
     function panBy(dx, dy)
     {
         const b = basis(),
-            units = 2 * (camera.projection === 'perspective' ? camera.distance : camera.orthographicScale) * tanHalf / c.clientHeight;
+            units = 2 * (camera.projection === 'perspective' ? panDistance : camera.orthographicScale) * tanHalf / c.clientHeight;
         camera.target = camera.target.map((v, i) => v + (-dx * b.right[i] + dy * b.up[i]) * units);
     }
 
@@ -440,12 +476,14 @@
     {
         if (e.button > 2) return;
         e.preventDefault();
-        focusView();
+        const pan = e.shiftKey || e.button === 1 || e.button === 2;
+        if (pan) preparePan();
+        else focusView();
         drag = {
             id: e.pointerId,
             x: e.clientX,
             y: e.clientY,
-            pan: e.shiftKey || e.button === 1 || e.button === 2
+            pan
         };
         c.setPointerCapture(e.pointerId);
         c.focus();

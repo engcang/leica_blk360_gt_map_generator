@@ -116,6 +116,75 @@ def run(_chrome):
                     xyError: Math.max(...[0,1,4,5,8,9,12,13].map(i => Math.abs(before[i] - after[i])))};
             }""")
             assert ortho["scale"] == 2 and ortho["xyError"] < 1e-8
+            # A tiny foreground point can set the orbit pivot, but must not stall panning.
+            pan_points = [(0, y * .1, z * .1) for y in range(-80, 81) for z in range(-50, 51)]
+            pan_points.append((9.99, 0, 0))
+            header = f"ply\nformat binary_little_endian 1.0\nelement vertex {len(pan_points)}\nproperty float x\nproperty float y\nproperty float z\nproperty ushort intensity\nend_header\n".encode()
+            cloud = header + b"".join(struct.pack("<fffH", *point, 30000) for point in pan_points)
+            page.locator("#file").set_input_files({"name": "pan-depth.ply", "mimeType": "application/octet-stream", "buffer": cloud})
+            page.wait_for_function("n => blkViewer.count === n", arg=len(pan_points))
+            page.locator("#density").select_option("1")
+
+            def pose(distance=10, away=False, ortho=False):
+                page.evaluate("""args => {
+                    Object.assign(blkViewer.camera, {target: [args.away ? 20 : 0, 0, 0],
+                        distance: args.distance, azimuth: args.away ? Math.PI : 0, elevation: 0,
+                        projection: args.ortho ? 'orthographic' : 'perspective', orthographicScale: 2});
+                    blkViewer.draw();
+                }""", {"distance": distance, "away": away, "ortho": ortho})
+
+            def pan(button="right", shift=False):
+                box = canvas.bounding_box()
+                x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+                page.mouse.move(x, y)
+                if shift:
+                    page.keyboard.down("Shift")
+                before = page.evaluate("({eye: blkViewer.cameraEye(), camera: structuredClone(blkViewer.camera)})")
+                page.mouse.down(button=button)
+                pressed = page.evaluate("({eye: blkViewer.cameraEye(), camera: structuredClone(blkViewer.camera)})")
+                assert pressed == before, "Pan press must not alter the eye, pivot, or radius"
+                page.mouse.move(x + 40, y)
+                first = page.evaluate("blkViewer.cameraEye()")
+                page.mouse.move(x + 80, y)
+                second = page.evaluate("blkViewer.cameraEye()")
+                page.mouse.up(button=button)
+                if shift:
+                    page.keyboard.up("Shift")
+                lengths = [sum((a-b)**2 for a,b in zip(left,right))**.5
+                           for left,right in [(first,before["eye"]),(second,first)]]
+                assert abs(lengths[0] - lengths[1]) < 1e-9, "Speed changed during drag"
+                return lengths[0]
+
+            pose()
+            reference_pan = pan()
+            expected = page.evaluate("80 * 10 * Math.tan(25 * Math.PI / 180) / document.getElementById('cloud').clientHeight")
+            assert abs(reference_pan - expected) < 1e-8
+            for button, shift in [("middle", False), ("left", True)]:
+                pose()
+                assert abs(pan(button, shift) - reference_pan) < 1e-8
+            pose()
+            page.evaluate("blkViewer.focusView(); blkViewer.orbit(2, 0); blkViewer.draw()")
+            assert page.evaluate("blkViewer.camera.distance") < .02
+            assert abs(pan() - reference_pan) / reference_pan < .01
+            # Looking at empty space (including after look-around) retains normal translation.
+            pose(away=True)
+            empty_pan = pan()
+            assert abs(empty_pan - reference_pan) / reference_pan < .01
+            pose(away=True)
+            page.evaluate("blkViewer.focusView(); blkViewer.orbit(5, 0); blkViewer.draw()")
+            assert abs(pan() - empty_pan) < 1e-8
+            # Clipped surfaces do not supply a false pan depth.
+            pose()
+            page.evaluate("document.getElementById('clip').value = -5")
+            assert abs(pan() - empty_pan) < 1e-8
+            page.evaluate("document.getElementById('clip').value = 5")
+            # A new visible depth after forward movement updates the scale at drag start.
+            pose(distance=5)
+            assert abs(pan() - reference_pan * .5) < 1e-8
+            pose(ortho=True)
+            assert abs(pan() - reference_pan * .2) < 1e-8
+            print(json.dumps({"pan_world_distance_per_40px": reference_pan,
+                              "empty_view_pan_distance": empty_pan}, indent=2))
             print(json.dumps({"near_surface_radius": focused["radius"], "pivot_screen_position": rotated["center"],
                               "empty_view_eye_displacement": fallback, "orthographic": ortho}, indent=2))
             assert not errors, errors

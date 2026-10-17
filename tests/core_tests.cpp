@@ -1,6 +1,7 @@
 #include <iostream>
 
 #include "project.hpp"
+#include "file_browser.hpp"
 
 void require(bool _value,
              const std::string &_message)
@@ -129,14 +130,19 @@ int main()
             const std::string ply = "ply\nformat binary_little_endian 1.0\ncomment saved cloud\nelement vertex 2\nproperty float x\nproperty float y\nproperty float z\nproperty ushort intensity\nend_header\n" + std::string(28, '\0');
             blk_core::writeText(saved, ply);
             blk_core::writeText(external, ply);
+            std::filesystem::last_write_time(saved, std::filesystem::file_time_type::clock::now() - std::chrono::hours(1));
             require(blk_core::inspectPly(saved)["valid_points"] == 2, "Saved PLY count failed");
             std::string cloud_id;
             {
                 blk_core::Project project(root);
-                require(project.snapshot()["point_clouds"].size() == 1, "Output PLY not discovered at startup");
+                require(project.snapshot()["point_clouds"].empty(), "Output PLY discovered without explicit selection");
+                const auto before_view = blk_core::readText(root / "project.json");
+                const auto folder = project.addPointClouds({saved.parent_path().u8string()});
+                require(folder["added"] == 1 && folder["errors"].size() == 1, "Explicit folder import did not report valid and invalid PLYs");
                 require(project.snapshot()["jobs"].empty(), "PLY discovery created conversion jobs");
                 require(project.addPointClouds({external.u8string()})["added"] == 1, "External PLY not added");
                 require(project.addPointClouds({external.u8string()})["skipped"] == 1, "Duplicate PLY not recognized");
+                require(blk_core::readText(root / "project.json") == before_view, "Viewing persisted a point-cloud cache");
                 cloud_id = project.snapshot()["point_clouds"][1]["id"];
                 require(project.pointCloud(cloud_id)["valid_points"] == 2, "External PLY not viewable");
                 expectError([&project]
@@ -146,15 +152,17 @@ int main()
             }
             {
                 blk_core::Project project(root);
-                require(project.snapshot()["point_clouds"].size() == 2, "Saved PLY library lost on restart");
-                require(project.pointCloud(cloud_id)["path"] == std::filesystem::canonical(external).u8string(), "Saved PLY ID changed on restart");
+                require(project.snapshot()["point_clouds"].empty(), "PLY selection restored on restart");
+                expectError([&project, &cloud_id]
+                {
+                    project.pointCloud(cloud_id);
+                });
+                require(project.addPointClouds({saved.u8string(), external.u8string()})["added"] == 2, "Explicit reselection failed");
+                cloud_id = project.snapshot()["point_clouds"][1]["id"];
                 std::filesystem::remove(external);
-                require(project.snapshot()["point_clouds"].size() == 1, "Deleted PLY remained in the saved-cloud list");
+                require(project.snapshot()["point_clouds"].size() == 1, "Deleted PLY remained in memory");
                 project.refreshClouds();
-                const auto errors = project.snapshot()["point_cloud_errors"];
-                require(errors.size() == 1 && std::filesystem::equivalent(std::filesystem::u8path(errors[0]["path"].get<std::string>()), root / "output" / "synthetic.ply"), "Missing-cloud cleanup lost an invalid-file error or retained a stale warning");
-                std::filesystem::remove(root / "output" / "synthetic.ply");
-                require(project.snapshot()["point_cloud_errors"].empty(), "Deleted invalid PLY retained a warning");
+                require(project.snapshot()["point_clouds"].size() == 1 && project.snapshot()["point_cloud_errors"].empty(), "Refresh rediscovered unselected files");
                 expectError([&project, &cloud_id]
                 {
                     project.pointCloud(cloud_id);
@@ -170,6 +178,64 @@ int main()
                 require(project.snapshot()["point_clouds"][1]["available"] == true, "Restored PLY did not become available");
                 require(blk_core::readText(saved) == ply && blk_core::readText(external) == ply, "Viewing changed PLY data");
                 require(!std::filesystem::exists(root / "inputs") && !std::filesystem::exists(root / "scans"), "PLY data was copied into the project");
+            }
+            const auto history_root = root / "history";
+            std::filesystem::create_directory(history_root);
+            const auto present_id = blk_core::newId(), missing_id = blk_core::newId(), unavailable_id = blk_core::newId();
+            auto history = nlohmann::json::parse(blk_core::readText(root / "project.json"));
+            history["jobs"] = nlohmann::json::array();
+            for (const auto &entry : {std::make_pair(present_id, saved), std::make_pair(missing_id, root / "deleted.ply"), std::make_pair(unavailable_id, root / "absent.ply")})
+                history["jobs"].push_back({{"id", entry.first}, {"name", "synthetic.blk"}, {"source_path", (entry.first == unavailable_id ? root / "missing.blk" : root / "synthetic.blk").u8string()}, {"status", "completed"}, {"output_path", entry.second.u8string()}, {"progress", 1.0}, {"result", {{"valid_points", 2}}}});
+            blk_core::writeText(history_root / "project.json", history.dump());
+            {
+                blk_core::Project project(history_root);
+                require(project.snapshot()["jobs"].size() == 2, "Completed history was restored");
+                const auto missing = project.scan(missing_id);
+                require(missing["status"] == "ready" && missing["result"].is_null() && missing["progress"] == 0 && missing["output_path"] == "", "Deleted PLY was still completed");
+                require(project.scan(unavailable_id)["status"] == "failed", "Missing source was made ready");
+                expectError([&project, &present_id]
+                {
+                    project.scan(present_id);
+                });
+                expectError([&project, &missing_id]
+                {
+                    project.outputPath(missing_id);
+                });
+                for (const auto &name : {"project.json", "project.json.backup"})
+                {
+                    const auto stored = nlohmann::json::parse(blk_core::readText(history_root / name));
+                    for (const auto &job : stored["jobs"])
+                        require(job["status"] != "completed", "Completed history was retained on disk");
+                }
+            }
+            const auto ordered_root = root / "ordered";
+            std::filesystem::create_directory(ordered_root);
+            const auto oldest = ordered_root / "Setup511.ply";
+            const auto middle = ordered_root / "Setup52.ply";
+            const auto newest = ordered_root / "Setup51.ply";
+            const auto stamp = std::filesystem::file_time_type::clock::now() - std::chrono::hours(2);
+            for (const auto &path : {oldest, middle, newest})
+                blk_core::writeText(path, ply);
+            std::filesystem::last_write_time(oldest, stamp);
+            std::filesystem::last_write_time(middle, stamp + std::chrono::seconds(100));
+            std::filesystem::last_write_time(newest, stamp + std::chrono::seconds(200));
+            {
+                blk_core::Project project(root / "ordered-project");
+                project.addPointClouds({newest.u8string()});
+                auto selected = project.addPointClouds({middle.u8string(), oldest.u8string()});
+                require(selected["clouds"][0]["name"] == "Setup511.ply", "File selection followed click/name order");
+                const auto clouds = project.snapshot()["point_clouds"];
+                require(clouds[0]["name"] == "Setup511.ply" && clouds[1]["name"] == "Setup52.ply" && clouds[2]["name"] == "Setup51.ply", "Separate additions were not sorted by modification time");
+                selected = project.addPointClouds({ordered_root.u8string()});
+                require(selected["clouds"] == clouds, "Folder and explicit file orders differ");
+                auto entries = blk_core::browseFiles(ordered_root.u8string(), ".ply")["entries"];
+                require(entries[0]["name"] == "Setup511.ply" && entries[2]["name"] == "Setup51.ply", "Browser is not chronological");
+                std::filesystem::last_write_time(newest, stamp);
+                entries = blk_core::browseFiles(ordered_root.u8string(), ".ply")["entries"];
+                require(entries[0]["name"] == "Setup51.ply" && entries[1]["name"] == "Setup511.ply", "Equal-time tie is not deterministic");
+                auto records = nlohmann::json::array({{{"source_path", middle.u8string()}}, {{"source_path", oldest.u8string()}}, {{"source_path", (ordered_root / "missing.blk").u8string()}}});
+                blk_core::sortRecordsByModification(records, "source_path");
+                require(records[0]["source_path"] == oldest.u8string() && records[2]["source_path"] == (ordered_root / "missing.blk").u8string(), "Conversion record order or missing-file fallback failed");
             }
             std::filesystem::remove_all(root);
         }

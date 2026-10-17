@@ -8,6 +8,7 @@ let closed = false,
     last_signature = '',
     last_cloud_signature = '',
     notice_timer, output_dirty = false;
+let viewed_cloud_ids = new Set();
 let project = null,
     browser_state = null,
     browser_mode = 'files',
@@ -23,6 +24,35 @@ const labels = {
     cancelled: 'Stopped',
     interrupted: 'Interrupted'
 };
+
+function selectTab(name, focus = false)
+{
+    for (const tab of document.querySelectorAll('[role="tab"]'))
+    {
+        const active = tab.id === `tab-${name}`;
+        tab.setAttribute('aria-selected', String(active));
+        tab.tabIndex = active ? 0 : -1;
+        element(tab.getAttribute('aria-controls')).hidden = !active;
+        if (active && focus) tab.focus();
+    }
+    element('open-folder').hidden = name !== 'convert';
+}
+for (const tab of document.querySelectorAll('[role="tab"]'))
+{
+    tab.onclick = () => selectTab(tab.id.slice(4));
+    tab.onkeydown = event =>
+    {
+        const tabs = [...document.querySelectorAll('[role="tab"]')];
+        let index = tabs.indexOf(tab);
+        if (event.key === 'ArrowRight') index = (index + 1) % tabs.length;
+        else if (event.key === 'ArrowLeft') index = (index + tabs.length - 1) % tabs.length;
+        else if (event.key === 'Home') index = 0;
+        else if (event.key === 'End') index = tabs.length - 1;
+        else return;
+        event.preventDefault();
+        selectTab(tabs[index].id.slice(4), true);
+    };
+}
 
 function notice(message, error = false)
 {
@@ -176,7 +206,7 @@ function renderCloud(cloud)
         view.textContent = 'View 3D ↗';
         view.className = 'view';
         actions.append(view);
-        actions.append(button('Add to map', () => addRegistrationScans([cloud])));
+        actions.append(button('Add to map', () => { addRegistrationScans([cloud]); selectTab('register'); }));
     }
     else
     {
@@ -203,7 +233,7 @@ async function refresh()
         element('summary').textContent = project.jobs.length ? `${count('completed')} completed · ${count('ready') + count('queued')} waiting · ${count('running')} processing` : 'Selected scans will appear here.';
         element('start').disabled = adding || !count('ready');
         element('cancel').disabled = !project.running && !count('queued');
-        const clouds = project.point_clouds || [];
+        const clouds = (project.point_clouds || []).filter(cloud => viewed_cloud_ids.has(cloud.id));
         element('cloud-count').textContent = clouds.length;
         const cloud_signature = JSON.stringify(clouds);
         if (cloud_signature !== last_cloud_signature)
@@ -214,7 +244,7 @@ async function refresh()
             {
                 const empty = document.createElement('div');
                 empty.className = 'empty';
-                empty.textContent = 'Open existing PLY files, or choose their output folder below. No conversion is needed.';
+                empty.textContent = 'Select PLY files or a folder to view. Nothing is loaded automatically.';
                 element('clouds').append(empty);
             }
         }
@@ -284,7 +314,7 @@ async function browse(path = '')
     for (const id of ['browser-path', 'browser-go', 'browser-up', 'use-folder', 'new-folder']) element(id).disabled = true;
     try
     {
-        browser_state = await api('browse?path=' + encodeURIComponent(path) + (browser_mode === 'registration-result' ? '&type=json' : ['ply', 'registration-ply'].includes(browser_mode) ? '&type=ply' : ''));
+        browser_state = await api('browse?path=' + encodeURIComponent(path) + (browser_mode === 'registration-result' ? '&type=json' : ['ply', 'ply-folder', 'registration-ply', 'registration-folder'].includes(browser_mode) ? '&type=ply' : ''));
         selected.clear();
         element('browser-path').value = browser_state.path;
         element('browser-up').disabled = browser_state.parent === browser_state.path;
@@ -348,20 +378,20 @@ async function browse(path = '')
 function updateSelection()
 {
     element('use-files').disabled = !selected.size || (browser_mode === 'registration-result' && selected.size !== 1);
-    element('use-files').textContent = `${browser_mode === 'registration-result' ? 'Open selected poses JSON' : ['ply', 'registration-ply'].includes(browser_mode) ? 'Open selected PLY files' : 'Add selected files'}${selected.size ? ` (${selected.size})` : ''}`;
+    element('use-files').textContent = `${browser_mode === 'registration-result' ? 'Open selected poses JSON' : ['ply', 'ply-folder', 'registration-ply', 'registration-folder'].includes(browser_mode) ? 'Open selected PLY files' : 'Add selected files'}${selected.size ? ` (${selected.size})` : ''}`;
 }
 async function openBrowser(mode)
 {
     browser_mode = mode;
-    const ply_mode = ['ply', 'registration-ply'].includes(mode);
+    const ply_mode = ['ply', 'ply-folder', 'registration-ply', 'registration-folder'].includes(mode);
     const output_mode = ['output', 'map-output'].includes(mode);
     element('browser-title').textContent = mode === 'registration-result' ? 'Open relative_poses.json' : ply_mode ? 'Open existing PLY files' : output_mode ? 'Choose output folder' : mode === 'folder' ? 'Select a scan folder' : 'Select BLK files';
     element('use-files').hidden = !['files', 'ply', 'registration-ply', 'registration-result'].includes(mode);
     element('select-all').parentElement.hidden = !['files', 'ply', 'registration-ply'].includes(mode);
     element('select-all-label').textContent = ply_mode ? 'Select all PLY files' : 'Select all BLK files';
-    element('use-folder').hidden = ply_mode || mode === 'registration-result';
+    element('use-folder').hidden = ['ply', 'registration-ply', 'registration-result'].includes(mode);
     element('new-folder').hidden = !output_mode;
-    element('use-folder').textContent = output_mode ? 'Use this output folder' : 'Add this folder';
+    element('use-folder').textContent = output_mode ? 'Use this output folder' : ply_mode ? 'Open PLY files in this folder' : 'Add this folder';
     element('browser').showModal();
     let path = browser_state?.path || '';
     if (ply_mode && project?.output_directory) path = project.output_directory;
@@ -371,10 +401,10 @@ async function openBrowser(mode)
 }
 action('pick-files', () => openBrowser('files'));
 action('pick-ply', () => openBrowser('ply'));
-action('refresh-clouds', async () =>
+action('pick-ply-folder', () => openBrowser('ply-folder'));
+action('clear-clouds', async () =>
 {
-    await api('refresh-clouds',
-    {});
+    viewed_cloud_ids.clear();
     await refresh();
 });
 action('pick-folder', () => openBrowser('folder'));
@@ -400,6 +430,17 @@ element('select-all').onchange = event =>
     }
     updateSelection();
 };
+async function openCloudPaths(paths, registration = false)
+{
+    const result = await api('add-clouds', {paths});
+    if (!registration) viewed_cloud_ids = new Set(result.clouds.map(cloud => cloud.id));
+    await refresh();
+    if (registration) addRegistrationScans(result.clouds);
+    selectTab(registration ? 'register' : 'clouds');
+    if (result.errors.length) notice(result.errors.map(item => `${item.path}: ${item.error}`).join('\n'), true);
+    else notice(result.clouds.length ? `${result.clouds.length} PLY files selected. No files copied.` : 'No PLY files found in this folder.');
+}
+
 action('use-files', async () =>
 {
     const paths = [...selected];
@@ -407,30 +448,12 @@ action('use-files', async () =>
     if (browser_mode === 'registration-result')
     {
         const result = await api('registration/import', {path: paths[0]});
+        registration_visible_jobs.add(result.id);
         await refreshRegistration();
         await api(`registration/review/${result.id}`, {});
         return;
     }
-    if (['ply', 'registration-ply'].includes(browser_mode))
-    {
-        const result = await api('add-clouds',
-        {
-            paths
-        });
-        await refresh();
-        if (browser_mode === 'registration-ply')
-        {
-            const normalized = path => path.replace(/\\/g, '/');
-            addRegistrationScans(paths.map(path => project.point_clouds.find(cloud => normalized(cloud.path) === normalized(path))).filter(Boolean));
-        }
-        if (result.errors.length) notice(result.errors.map(item => `${item.path}: ${item.error}`).join('\n'), true);
-        else notice(`${result.added} PLY files added · ${result.skipped} already available. Click View 3D to open.`);
-        element(browser_mode === 'registration-ply' ? 'registration' : 'saved-clouds').scrollIntoView(
-        {
-            behavior: 'smooth',
-            block: 'start'
-        });
-    }
+    if (['ply', 'registration-ply'].includes(browser_mode)) await openCloudPaths(paths, browser_mode === 'registration-ply');
     else await addPaths(paths);
 });
 action('use-folder', async () =>
@@ -448,6 +471,7 @@ action('use-folder', async () =>
         element('map-output').value = path;
         saveRegistrationDraft();
     }
+    else if (['ply-folder', 'registration-folder'].includes(browser_mode)) await openCloudPaths([path], browser_mode === 'registration-folder');
     else await addPaths([path]);
 });
 action('new-folder', async () =>

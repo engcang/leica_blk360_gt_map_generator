@@ -36,8 +36,15 @@ namespace blk_core
             {
                 state_ = {{"schema_version", 1}, {"python", defaultPython()}, {"runtime", {{"status", "unchecked"}}}, {"jobs", nlohmann::json::array()}};
             }
+            if (state_.contains("draft") && state_["draft"].is_object())
+                state_["draft"].erase("cloud_ids");
             for (auto &job : state_.at("jobs"))
             {
+                if (job.contains("products"))
+                {
+                    for (auto &[kind, product] : job["products"].items())
+                        product.erase("cloud_id");
+                }
                 if (job.contains("export") && job["export"].value("status", "") == "running")
                 {
                     job["export"]["status"] = "interrupted";
@@ -82,6 +89,7 @@ namespace blk_core
                 throw std::runtime_error("Registration selection must be an object");
             }
             state_["draft"] = _draft;
+            state_["draft"].erase("cloud_ids");
             saveLocked();
         }
 
@@ -97,6 +105,7 @@ namespace blk_core
                     continue;
                 }
                 const auto directory = std::filesystem::u8path(entry.at("poses_path").get<std::string>()).parent_path();
+                entry["chunks_available"] = std::filesystem::is_regular_file(directory / "chunks_review.html");
                 const auto products_file = directory / "html_source" / "products.json";
                 if (std::filesystem::is_regular_file(products_file))
                 {
@@ -207,15 +216,20 @@ namespace blk_core
             {
                 throw std::runtime_error("Expected a BLK Studio poses-only registration result");
             }
+            std::string id;
             for (const auto &job : state_["jobs"])
             {
                 if (std::filesystem::u8path(job.value("poses_path", "")).lexically_normal() == path.lexically_normal())
                 {
-                    return job.at("id");
+                    id = job.at("id");
+                    break;
                 }
             }
-            const auto id = newId();
-            state_["jobs"].push_back({{"id", id}, {"name", manifest.value("result_name", "reference_map")}, {"status", "completed"}, {"stage", "Loaded saved poses and review; registration was not repeated"}, {"scans", manifest.at("scans")}, {"voxel_m", manifest.at("registration_voxel_m")}, {"poses_path", path.u8string()}, {"output_path", (directory / "reference_map_1cm.ply").u8string()}, {"review_path", (directory / "result_review_and_manage.html").u8string()}, {"review_available", true}});
+            if (id.empty())
+            {
+                id = newId();
+                state_["jobs"].push_back({{"id", id}, {"name", manifest.value("result_name", "reference_map")}, {"status", "completed"}, {"stage", "Loaded saved poses and review; registration was not repeated"}, {"scans", manifest.at("scans")}, {"voxel_m", manifest.at("registration_voxel_m")}, {"poses_path", path.u8string()}, {"output_path", (directory / "reference_map_1cm.ply").u8string()}, {"review_path", (directory / "result_review_and_manage.html").u8string()}, {"review_available", true}});
+            }
             const auto products_file = directory / "html_source" / "products.json";
             if (std::filesystem::is_regular_file(products_file))
             {
@@ -238,8 +252,8 @@ namespace blk_core
                     {
                         if (std::filesystem::equivalent(std::filesystem::u8path(cloud.at("path").get<std::string>()), ply))
                         {
-                            state_["jobs"].back()["products"][kind] = product;
-                            state_["jobs"].back()["products"][kind]["cloud_id"] = cloud.at("id");
+                            findJob(state_, id)["products"][kind] = product;
+                            findJob(state_, id)["products"][kind]["cloud_id"] = cloud.at("id");
                         }
                     }
                 }
@@ -376,8 +390,9 @@ namespace blk_core
             }
             if (std::filesystem::exists(std::filesystem::u8path(config.at("output_path").get<std::string>())))
             {
-                throw std::runtime_error("Map PLY already exists; open it from Saved point clouds or use a new map name");
+                throw std::runtime_error("Map PLY already exists; open it from View saved point clouds or use a new map name");
             }
+            config["review_only"] = _body.value("review_only", false);
             saveJson(report / "config.json", config);
             auto &job = findJob(state_, id);
             job["status"] = "running";
@@ -441,8 +456,34 @@ namespace blk_core
 
         static nlohmann::json readJson(const std::filesystem::path &_path)
         {
+#ifdef _WIN32
+            // Polling must allow the worker to atomically replace its JSON files.
+            const auto handle = CreateFileW(_path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (handle == INVALID_HANDLE_VALUE)
+                throw std::runtime_error("Cannot read registration record: " + _path.u8string());
+            std::string contents;
+            try
+            {
+                char buffer[16384];
+                DWORD count = 0;
+                do
+                {
+                    if (!ReadFile(handle, buffer, sizeof(buffer), &count, nullptr))
+                        throw std::runtime_error("Cannot read registration record: " + _path.u8string());
+                    contents.append(buffer, count);
+                } while (count);
+            }
+            catch (...)
+            {
+                CloseHandle(handle);
+                throw;
+            }
+            CloseHandle(handle);
+            return nlohmann::json::parse(contents);
+#else
             std::ifstream stream(_path);
             return nlohmann::json::parse(stream);
+#endif
         }
 
         static void saveJson(const std::filesystem::path &_path,
@@ -553,7 +594,7 @@ namespace blk_core
                         const auto imported = project_.addPointClouds({path});
                         if (!imported.at("errors").empty())
                         {
-                            throw std::runtime_error("Map was written but could not be added to Saved point clouds: " + imported.at("errors").dump());
+                            throw std::runtime_error("Map was written but could not be opened for viewing: " + imported.at("errors").dump());
                         }
                         const auto project = project_.snapshot();
                         for (const auto &cloud : project.at("point_clouds"))

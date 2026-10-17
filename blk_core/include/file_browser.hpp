@@ -39,7 +39,7 @@ namespace blk_core
             {
                 continue;
             }
-            entries.push_back({{"name", entry.path().filename().u8string()}, {"path", entry.path().u8string()}, {"directory", directory}});
+            entries.push_back({{"name", entry.path().filename().u8string()}, {"path", entry.path().u8string()}, {"directory", directory}, {"modified_time", modifiedTime(entry.path())}});
         }
         std::sort(entries.begin(), entries.end(), [](const nlohmann::json &_a, const nlohmann::json &_b)
         {
@@ -47,6 +47,8 @@ namespace blk_core
             {
                 return _a["directory"].get<bool>();
             }
+            if (!_a["directory"].get<bool>() && _a["modified_time"] != _b["modified_time"])
+                return _a["modified_time"].get<std::int64_t>() < _b["modified_time"].get<std::int64_t>();
             return _a["name"].get<std::string>() < _b["name"].get<std::string>();
         });
         auto roots = nlohmann::json::array();

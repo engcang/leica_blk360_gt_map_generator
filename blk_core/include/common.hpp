@@ -11,16 +11,47 @@
 #include <functional>
 #include <iomanip>
 #include <iterator>
+#include <limits>
 #include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <utility>
 
 #include <json.hpp>
 
 namespace blk_core
 {
+    inline std::int64_t modifiedTime(const std::filesystem::path &_path)
+    {
+        std::error_code error;
+        const auto time = std::filesystem::last_write_time(_path, error);
+        return error ? std::numeric_limits<std::int64_t>::max() : std::chrono::duration_cast<std::chrono::milliseconds>(time.time_since_epoch()).count();
+    }
+
+    inline void sortPathsByModification(std::vector<std::filesystem::path> &_paths)
+    {
+        std::vector<std::pair<std::int64_t, std::filesystem::path>> ordered;
+        for (const auto &path : _paths)
+            ordered.emplace_back(modifiedTime(path), path);
+        std::sort(ordered.begin(), ordered.end());
+        for (std::size_t index = 0; index < ordered.size(); ++index)
+            _paths[index] = ordered[index].second;
+    }
+
+    inline void sortRecordsByModification(nlohmann::json &_records, const char *_path_field)
+    {
+        for (auto &record : _records)
+            record["modified_time"] = modifiedTime(std::filesystem::u8path(record.at(_path_field).get<std::string>()));
+        std::sort(_records.begin(), _records.end(), [_path_field](const nlohmann::json &_a, const nlohmann::json &_b)
+        {
+            if (_a["modified_time"] != _b["modified_time"])
+                return _a["modified_time"].get<std::int64_t>() < _b["modified_time"].get<std::int64_t>();
+            return _a.at(_path_field).get<std::string>() < _b.at(_path_field).get<std::string>();
+        });
+    }
+
     struct Progress
     {
         std::string stage_;

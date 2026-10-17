@@ -153,6 +153,10 @@ outputs/
 *.poses.json
 *_relative_poses.json
 relative_poses.json
+partial_chunks.json
+/chunks_review.html
+/chunk_connections.json
+/chunk_search/
 result_review_and_manage.html
 html_source/
 .product-*/

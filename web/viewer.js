@@ -663,7 +663,7 @@
             });
             const job = await response.json();
             if (!response.ok) throw Error(job.error || 'Cannot read scan record.');
-            if (!cloud && job.status !== 'completed') throw Error('This scan has not completed conversion. Open an existing PLY from Saved point clouds.');
+            if (!cloud && job.status !== 'completed') throw Error('This scan has not completed conversion. Open an existing PLY from View saved point clouds.');
             const url = (cloud ? '/files/cloud/' : '/files/') + encodeURIComponent(scan) + '.ply';
             const head = await fetch(url,
             {

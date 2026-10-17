@@ -12,33 +12,16 @@
     <header><a class="brand" href="/">▦ <strong>BLK Studio</strong><span>0.4</span></a><div class="header-actions"><span class="local"><i></i> LOCAL WORKSPACE</span><button id="quit" class="quiet">Quit app</button></div></header>
     <main>
         <div class="eyebrow">BLK → FULL-RESOLUTION PLY</div>
-        <div class="heading"><div><h1>Your scans. Every point.</h1><p class="lead">Select original BLK files, choose an output folder, and view the full point cloud.</p></div><button id="open-folder" class="secondary">Open output folder ↗</button></div>
+        <div class="heading"><div><h1>Your scans. Every point.</h1><p class="lead">Convert BLK scans, inspect point clouds, and register a reference map.</p></div><button id="open-folder" class="secondary">Open output folder ↗</button></div>
         <div class="project-bar"><label for="project-name">PROJECT</label><input id="project-name" aria-label="Project name" maxlength="100" value="My scan project"><button id="save-name" class="quiet">Save name</button><a id="export" class="quiet">Export project record ↓</a></div>
-        <section id="saved-clouds" class="queue-panel" aria-label="Saved point clouds">
-            <div class="queue-toolbar"><div><h2>Saved point clouds <span id="cloud-count">0</span></h2><p>Open existing PLY files anytime, including after restarting the app.</p></div><div class="conversion-actions"><button id="pick-ply" class="primary">Open PLY files</button><button id="refresh-clouds" class="secondary">Refresh</button></div></div>
-            <p class="hint">PLY files in your output folder appear automatically. Other selected PLY paths are remembered. Files are read in place; no BLK or conversion is required.</p>
-            <div id="clouds"></div><p id="cloud-errors" class="hint" role="status" hidden></p>
-        </section>
-        <section id="registration" class="queue-panel" aria-label="Scan registration">
-            <div class="queue-toolbar"><div><h2>Register scans <span id="registration-count">0</span></h2><p>Align overlapping scans and build a reference map.</p></div><div class="conversion-actions"><button id="registration-converted" class="secondary">Use converted scans</button><button id="registration-pick" class="secondary">Add PLY files</button></div></div>
-            <p class="hint">Review acquisition order below. Use individual scanner-frame scans with substantial overlap. KISS-Matcher initializes alignment, Nano-GICP aligns scans, and 1 cm ICP refines the poses. Sources are read in place and preserved.</p>
-            <div id="registration-scans"><div class="empty">Add scans from Saved point clouds or use the converted scans in queue order.</div></div>
-            <div class="registration-settings">
-                <label>Map name<input id="map-name" value="reference_map" maxlength="100" aria-label="Map name"></label>
-                <label>Refinement voxel size<select id="map-voxel" aria-label="Refinement voxel size"><option value="0.01" selected>1 cm</option></select></label>
-                <button id="registration-clear" class="quiet">Clear selection</button>
-            </div>
-            <label class="map-output-label" for="map-output">MAP OUTPUT FOLDER</label><div class="map-output"><input id="map-output" aria-label="Map output folder" placeholder="Choose where to save poses and review"><button id="map-browse" class="secondary">Browse…</button></div>
-            <p class="hint">Registration saves <strong id="map-poses-filename">relative_poses.json</strong> and <strong id="map-review-folder">result_review_and_manage.html + html_source/</strong>. Original PLYs stay in place. The management page generates <strong id="map-filename">reference_map_1cm.ply (on demand)</strong>, a full raw map, or a standalone share HTML only when requested. Use a different output folder for each registration result. Working caches stay in the BLK Studio project.</p>
-            <button id="open-registration-result" class="secondary">Open registration result</button>
-            <details class="registration-advanced"><summary>Additional overlapping pairs (optional)</summary><p class="hint">If consecutive scans do not connect, the app searches across groups automatically and verifies agreement between multiple scan pairs. Optional hints use the row numbers above, for example 1:4,2:5.</p><input id="map-pairs" aria-label="Additional overlapping pairs" placeholder="1:4,2:5"></details>
-            <details id="registration-setup" class="registration-advanced"><summary>Registration setup <span id="runtime-state">Not checked</span></summary><p class="hint">Conversion and viewing need no Python. Registration requires 64-bit Python 3.10–3.13 and Open3D 0.20.0, plus the bundled KISS-Matcher / Nano-GICP engine. Check an existing environment, or install packages into a private environment in this project. Installation downloads packages from PyPI and can take several minutes.</p><label for="registration-python">Python executable (path or command, no arguments)</label><div class="map-output"><input id="registration-python" aria-label="Python executable" placeholder="python"><button id="runtime-check" class="secondary">Check runtime</button><button id="runtime-install" class="secondary">Install packages</button></div><p id="runtime-message" class="hint" role="status"></p></details>
-            <div class="registration-actions"><button id="registration-start" class="primary" disabled>Register scans</button><button id="registration-stop" class="secondary" disabled>Stop registration</button><span class="hint">Experimental reference maps require visual review and independent accuracy checks.</span></div>
-            <div id="registration-jobs"></div>
-            <details class="registration-advanced"><summary>Latest worker log</summary><pre id="registration-log">No registration operation has run yet.</pre></details>
-        </section>
+        <nav class="workspace-tabs" role="tablist" aria-label="Workspace">
+            <button id="tab-convert" role="tab" aria-controls="panel-convert" aria-selected="true" tabindex="0">Convert</button>
+            <button id="tab-clouds" role="tab" aria-controls="panel-clouds" aria-selected="false" tabindex="-1">View saved point clouds</button>
+            <button id="tab-register" role="tab" aria-controls="panel-register" aria-selected="false" tabindex="-1">Register</button>
+        </nav>
+        <div id="panel-convert" role="tabpanel" aria-labelledby="tab-convert">
         <section id="dropzone" aria-label="Select original scans">
-            <div class="drop-icon">＋</div><h2>Select BLK files on this computer</h2><p>Original files are read in place. No uploads, source copies, or renamed inputs.</p>
+            <div class="drop-icon">＋</div><h2>Select BLK files on this computer</h2><p>Original files are read in place, ordered by modification time, oldest first. Converted PLY files retain the BLK modification time.</p>
             <div class="picker-actions"><button id="pick-files" class="primary">Select files</button><button id="pick-folder" class="secondary">Select folder</button></div>
             <div id="import-status" role="status" aria-live="polite"></div>
             <details class="path-entry"><summary>Add paths directly</summary><textarea id="source-paths" rows="3" placeholder="Paste a full file or folder path, one per line" aria-label="Source paths"></textarea><button id="add-paths" class="secondary">Add paths</button></details>
@@ -46,10 +29,40 @@
         <section class="output-bar"><label for="output-path">OUTPUT FOLDER</label><div><input id="output-path" placeholder="Select a folder for the PLY files" aria-label="Output folder"><button id="choose-output" class="secondary">Browse…</button><button id="save-output" class="secondary">Apply</button></div><p>Example: <strong>Setup26.blk → Setup26.ply</strong>. Existing files are never overwritten.</p></section>
         <section class="queue-panel">
             <div class="queue-toolbar"><div><h2>Conversion queue <span id="job-count">0</span></h2><p id="summary">Selected scans will appear here.</p></div><div class="conversion-actions"><button id="start" class="primary" disabled>Convert scans</button><button id="cancel" class="secondary" disabled>Stop</button></div></div>
-            <p class="hint"><strong>One PLY per scan, with every valid point.</strong> Choose a display density in the 3D viewer. The full PLY is preserved; no separate preview file is generated.</p>
+            <p class="hint"><strong>One PLY per scan, with every valid point.</strong> Choose a display density in the 3D viewer. The full PLY is preserved; no separate preview file is generated. Completed rows are not saved as history. Deleted outputs return to Ready if the source BLK is available.</p>
             <div id="jobs"><div class="empty">No scans selected.<span>Select individual BLK files or a folder to get started.</span></div></div>
         </section>
         <div class="notes"><section><span class="note-index">01 / FILES STAY IN PLACE</span><h3>Simple, predictable output</h3><p>Original filenames are preserved. Sources stay where you selected them, and completed PLY files go directly into your output folder. Removing a queue item does not delete any file.</p></section><section><span class="note-index">02 / MAP BUILDING</span><h3>From scans to a reference map</h3><p>Registration estimates rigid scan poses using global feature matching, ICP, and pose-graph optimization. The first scanner defines the map frame. Accuracy against an official export or surveyed control has not yet been verified.</p></section></div>
+        </div>
+        <div id="panel-clouds" role="tabpanel" aria-labelledby="tab-clouds" hidden>
+        <section id="saved-clouds" class="queue-panel" aria-label="View saved point clouds">
+            <div class="queue-toolbar"><div><h2>View saved point clouds <span id="cloud-count">0</span></h2><p>Choose the PLY files or folder you want to view.</p></div><div class="conversion-actions"><button id="pick-ply" class="primary">Open PLY files</button><button id="pick-ply-folder" class="secondary">Open folder</button><button id="clear-clouds" class="quiet">Clear selection</button></div></div>
+            <p class="hint">Files are read in place. Only your current selection is shown; it is not saved or restored. Opening a folder lists its PLY files, without subfolders. Files are ordered by modification time, oldest first.</p>
+            <div id="clouds"></div><p id="cloud-errors" class="hint" role="status" hidden></p>
+        </section>
+        </div>
+        <div id="panel-register" role="tabpanel" aria-labelledby="tab-register" hidden>
+        <section id="registration" class="queue-panel" aria-label="Scan registration">
+            <div class="queue-toolbar"><div><h2>Register scans <span id="registration-count">0</span></h2><p>Align overlapping scans and build a reference map.</p></div><div class="conversion-actions"><button id="registration-converted" class="secondary">Use converted scans</button><button id="registration-pick" class="secondary">Add PLY files</button><button id="registration-folder" class="secondary">Add folder</button></div></div>
+            <section class="registration-results" aria-label="Registration results">
+                <div class="results-heading"><div><h2>Results and progress</h2><p>Review alignment, generate maps, and open your output files here.</p></div><button id="open-registration-result" class="secondary">Open existing result</button></div>
+                <div id="registration-jobs"><p class="results-empty">Your current result will appear here. To revisit a previous result, open its relative_poses.json.</p></div>
+            </section>
+            <p class="hint">Files are added by modification time, oldest first. Adding more files re-sorts the selection; Up / Down can override this order. Review acquisition order below. Use individual scanner-frame scans with substantial overlap. KISS-Matcher initializes alignment, Nano-GICP aligns scans, and 1 cm ICP refines the poses. Sources are read in place and preserved.</p>
+            <div id="registration-scans"><div class="empty">Select PLY files or a folder to begin. Input selections are not restored.</div></div>
+            <div class="registration-settings">
+                <label>Map name<input id="map-name" value="reference_map" maxlength="100" aria-label="Map name"></label>
+                <label>Refinement voxel size<select id="map-voxel" aria-label="Refinement voxel size"><option value="0.01" selected>1 cm</option></select></label>
+                <button id="registration-clear" class="quiet">Clear selection</button>
+            </div>
+            <label class="map-output-label" for="map-output">MAP OUTPUT FOLDER</label><div class="map-output"><input id="map-output" aria-label="Map output folder" placeholder="Choose where to save poses and review"><button id="map-browse" class="secondary">Browse…</button></div>
+            <p class="hint">Registration saves <strong id="map-poses-filename">relative_poses.json</strong> and <strong id="map-review-folder">result_review_and_manage.html + html_source/</strong>. Original PLYs stay in place. The management page generates <strong id="map-filename">reference_map_1cm.ply (on demand)</strong>, a full raw map, or a standalone share HTML only when requested. Use a different output folder for each registration result. Working caches stay in the BLK Studio project.</p>
+            <details class="registration-advanced"><summary>Additional overlapping pairs (optional)</summary><p class="hint">If consecutive scans do not connect, the app searches across groups automatically and verifies agreement between multiple scan pairs. Optional hints use the row numbers above, for example 1:4,2:5.</p><input id="map-pairs" aria-label="Additional overlapping pairs" placeholder="1:4,2:5"></details>
+            <details id="registration-setup" class="registration-advanced"><summary>Registration setup <span id="runtime-state">Not checked</span></summary><p class="hint">Conversion and viewing need no Python. Registration requires 64-bit Python 3.10–3.13 and Open3D 0.20.0, plus the bundled KISS-Matcher / Nano-GICP engine. Check an existing environment, or install packages into a private environment in this project. Installation downloads packages from PyPI and can take several minutes.</p><label for="registration-python">Python executable (path or command, no arguments)</label><div class="map-output"><input id="registration-python" aria-label="Python executable" placeholder="python"><button id="runtime-check" class="secondary">Check runtime</button><button id="runtime-install" class="secondary">Install packages</button></div><p id="runtime-message" class="hint" role="status"></p></details>
+            <div class="registration-actions"><button id="registration-start" class="primary" disabled>Register scans</button><button id="registration-stop" class="secondary" disabled>Stop registration</button><span class="hint">Experimental reference maps require visual review and independent accuracy checks.</span></div>
+            <details class="registration-advanced"><summary>Latest worker log</summary><pre id="registration-log">No registration operation has run yet.</pre></details>
+        </section>
+        </div>
         <footer><span id="connection">Connecting to local app…</span><span id="directory"></span></footer>
     </main>
     <dialog id="browser">

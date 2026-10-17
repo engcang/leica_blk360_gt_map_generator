@@ -126,6 +126,7 @@ def run(_args):
             target = output / source.with_suffix(".ply").name
             assert pathlib.Path(job["output_path"]) == target
             assert list(output.iterdir()) == [target]
+            assert target.stat().st_mtime_ns == original_mtime, "PLY did not preserve the BLK modification time"
             comparison = compareFiles(_args.reference, target)
             assert comparison["differing_points"] == 0, comparison
             page.locator("#jobs").get_by_role("link", name="View 3D").wait_for(timeout=15000)
@@ -220,6 +221,20 @@ def run(_args):
             page.reload()
             page.wait_for_function("document.querySelector('#job-count').textContent === '1'")
             assert page.locator("#project-name").input_value() == "Test <scan> project"
+            assert json.loads((project / "project.json").read_text())["jobs"] == [], "Completed history persisted"
+            original_output_hash = hashlib.sha256(target.read_bytes()).hexdigest()
+            target.unlink()
+            assert api(f"/api/scan/{job['id']}")["status"] == "ready", "Scan API returned a stale completion"
+            page.wait_for_function("project.jobs[0].status === 'ready'")
+            assert page.locator("#jobs .view").count() == 0
+            assert page.locator("#start").is_enabled()
+            assert api("/api/add", {"paths": [str(source)]})["skipped"] == 1
+            page.locator("#start").click()
+            waitFor(lambda: api("/api/project")["jobs"][0]["status"] in ("completed", "failed"), 300)
+            assert api("/api/project")["jobs"][0]["status"] == "completed"
+            assert hashlib.sha256(target.read_bytes()).hexdigest() == original_output_hash
+            assert target.stat().st_mtime_ns == original_mtime
+            assert json.loads((project / "project.json").read_text())["jobs"] == []
             api(f"/api/remove/{job['id']}", {})
             assert target.exists() and source.exists()
             assert api("/api/add", {"paths": [str(source)]})["added"] == 1

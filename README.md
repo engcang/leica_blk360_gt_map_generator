@@ -41,12 +41,20 @@ Ubuntu runtime validation is still pending.
 
 ## Usage
 
+The main screen has **Convert** (default), **View saved point clouds**, and **Register** tabs.
+PLY viewing and registration input selections are not saved or restored; choose
+files or a folder each time. Viewing reads files in place without creating a library cache.
+All three tabs select files by modification time, oldest first (path breaks ties).
+New conversions preserve the BLK modification time on the PLY. Existing PLY timestamps
+are unchanged. Modification time reflects scan order only if the source timestamps do.
+Adding registration inputs re-sorts the selection; **Up / Down** allows manual correction.
+
 ### Convert and view
 
 1. Click **Select files** or **Select folder** to add BLK scans.
 2. Choose an **Output folder**, then click **Convert scans**.
 3. Each scan becomes one full-resolution file: `Setup26.blk → Setup26.ply`.
-4. Click **View 3D**, or use **Open PLY files** to view existing results without reconverting.
+4. Click **View 3D**, or open **View saved point clouds** and choose **Open PLY files** / **Open folder**.
 
 Color is always **Intensity**. Display density is **1/10**, **1/5**, **1/2**, or **Full**;
 navigation temporarily draws at most 2,000,000 points. Left-drag orbits around
@@ -57,14 +65,17 @@ the visible surfaces, independently of the orbit pivot; empty views retain the l
 usable pan speed. The wheel moves forward/back;
 Shift+wheel moves more slowly. Rotation is slower for finer control.
 Display settings do not change the PLY. Existing files are never overwritten.
+Completed conversions are shown only during the current app session, not saved as history.
+If an output PLY is removed, its row returns to **Ready** when the source BLK is available;
+click **Convert scans** to recreate it. Pending/interrupted work is retained for recovery.
 
 ### Register scans
 
-1. Add overlapping, individual PLY scans with **Use converted scans**, **Add PLY files**, or **Add to map**.
+1. Add overlapping, individual PLY scans with **Use converted scans**, **Add PLY files**, **Add folder**, or **Add to map**.
 2. Confirm acquisition order with **Up / Down**. The first scan defines the map frame.
 3. Choose a product base name and output folder. Use a separate folder for each registration result.
 4. Check the Python environment under **Registration setup**, then click **Register scans**.
-5. Open **Review and manage** to inspect quality metrics, scan positions, and inferred-level images.
+5. In the highlighted **Results and progress** panel, open **Review and manage** to inspect quality metrics, scan positions, and inferred-level images.
 
 After conversion and registration, the output is:
 
@@ -83,7 +94,7 @@ Original PLYs remain where selected; they are not copied if stored elsewhere.
 into the first scan/map frame: `p_map = T_map_scan @ [x, y, z, 1]`, in metres.
 Keep the originals and preserve their paths relative to the JSON when moving a dataset.
 
-To reopen a result, choose **Open registration result → relative_poses.json**.
+To reopen a result, choose **Open existing result → relative_poses.json**.
 Working caches live under the app's `projects/default/registration_records/`;
 completed result viewing and generation do not require those caches.
 Fine ICP saves completed pairs for **Resume** and reuses their final correspondences
@@ -123,7 +134,10 @@ Retain original PLYs plus `relative_poses.json` for reproducibility.
 **Pipeline:** KISS-Matcher (30 cm) → Nano-GICP (30 cm, then 8 cm) → pose-graph
 optimization → robust point-to-plane ICP (1 cm clouds, 3 cm gate, 1 cm Tukey scale)
 → second pose-graph optimization. Disconnected groups trigger automatic searches
-for other overlapping pairs; ambiguous or unverified connections are not forced.
+for other overlapping pairs, followed by KISS-Matcher / Nano-GICP on merged chunks.
+A chunk bridge needs at least two consistent original scan-pair verifications
+(within 10 cm / 1 degree), then follows the same 1 cm refinement and pose-graph pipeline.
+Ambiguous or unverified connections are not forced.
 
 **Evaluation:** fixed final poses on **1 cm per-scan clouds**, at **1/2/3/5 cm**
 distance thresholds (3 cm default). Distances at or above the threshold are excluded.
@@ -140,7 +154,7 @@ accuracy. Scan-to-map trajectory estimation is not implemented.
 ## Troubleshooting
 
 - **Missing file:** select a moved PLY again. Generation requires originals at the paths recorded in the poses JSON.
-- **Disconnected groups:** inspect overlap and acquisition order. Optional pair hints use row numbers such as `1:4,2:5`; **Resume** reuses completed caches.
+- **Disconnected groups:** click **View chunks** (or **Build chunk review** for an older job). `chunks_review.html`, `partial_chunks.json`, and `html_source/chunks/` show sampled 3D previews, scan positions, and original row numbers in separate chunk-local frames. These are diagnostic poses before final 1 cm refinement, not a common GT map. Compare two chunks and supply pair hints such as `1:4,2:5`; **Resume** reuses caches and attempts merged-chunk connections. No final map/poses are published until all groups connect.
 - **Slow viewer or large output:** lower display density for navigation. The full cloud still occupies memory; raw maps and embedded HTML can be large.
 - **Existing output:** move/remove the generated file before regenerating, or choose a different folder for a new registration.
 

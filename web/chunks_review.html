@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Disconnected chunks | BLK Studio</title>
+<style>
+body{margin:0;padding:24px;background:#f1f5f3;color:#203b35;font:15px system-ui}h1{margin-top:0}.warning{background:#fff2d5;padding:18px;border-left:5px solid #cf8a18;line-height:1.6}.panels{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin:20px 0}.panel{min-width:0;background:white;border:1px solid #bed2c8;border-radius:10px;padding:16px}select,input{padding:10px;max-width:100%;font:inherit;margin:6px}iframe{width:100%;height:680px;border:0}img{width:100%;height:auto}a{color:#176e5b}table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:8px;border-bottom:1px solid #d8e2dc}code{overflow-wrap:anywhere}.hint{color:#526c63;line-height:1.6}@media(max-width:1000px){.panels{grid-template-columns:1fr}body{padding:12px}}
+</style></head><body>
+<h1>Disconnected chunk review</h1>
+<p id="summary"></p><div class="warning"><strong>These chunks do not share a coordinate frame.</strong> Each view is anchored at its own first scan. Similar on-screen positions do not mean physical overlap. The views use sampled raw points and accepted pair poses, before final 1 cm refinement. This is a partial diagnostic result, not a ground-truth map.</div>
+<p class="hint">Compare two chunks, inspect the station images, and select scans that actually cover the same place. Enter the resulting original row-number pair under Additional pairs in BLK Studio, then Resume. A hint requests another attempt; it does not force an unverified connection.</p>
+<label>Connection hint <input id="pair" readonly aria-label="Connection hint"></label><span id="pair-note"></span>
+<p><a href="partial_chunks.json">Download all chunk-local poses and scan identities</a></p>
+<div class="panels"><section class="panel" id="left"></section><section class="panel" id="right"></section></div>
+<details><summary>All chunks and original row numbers</summary><table><thead><tr><th>Chunk</th><th>Rows / files</th><th>Preview points</th></tr></thead><tbody id="inventory"></tbody></table></details>
+<script id="chunk-data" type="application/json">__CHUNKS_JSON__</script>
+<script>
+'use strict';
+const documentData=JSON.parse(document.getElementById('chunk-data').textContent),chunks=documentData.chunks;
+document.getElementById('summary').textContent=`${chunks.length} chunks | ${chunks.reduce((n,c)=>n+c.rows.length,0)} scans | generated ${documentData.generated_utc}`;
+const panels=[];
+function updatePair(){const a=Number(panels[0]?.scan.value),b=Number(panels[1]?.scan.value);const valid=panels.length===2&&panels[0].chunk.value!==panels[1].chunk.value;document.getElementById('pair').value=valid?`${Math.min(a,b)}:${Math.max(a,b)}`:'';document.getElementById('pair-note').textContent=valid?'Select and copy this pair; confirm real overlap first.':'Select different chunks.';}
+for(const [side,id] of ['left','right'].entries()){
+ const panel=document.getElementById(id),chunk=document.createElement('select'),scan=document.createElement('select'),frame=document.createElement('iframe'),image=document.createElement('img'),note=document.createElement('p'),link=document.createElement('a'),imageLink=document.createElement('a');
+ chunk.setAttribute('aria-label',`${id} chunk`);scan.setAttribute('aria-label',`${id} scan`);frame.title=`${id} chunk 3D viewer`;image.alt='Top and side views with original row numbers and scan filenames';link.textContent='Open this 3D view in a separate tab';link.target='_blank';link.rel='noopener';
+ chunks.forEach((c,i)=>{const o=document.createElement('option');o.value=i;o.textContent=`Chunk ${c.number} | ${c.rows.length} scans | anchor row ${c.anchor_row}`;chunk.append(o);});
+ chunk.value=Math.min(side,chunks.length-1);imageLink.target='_blank';imageLink.rel='noopener';imageLink.title='Open scan position image at full size';imageLink.append(image);panel.append(chunk,scan,note,link,frame,imageLink);panels.push({chunk,scan});
+ function show(){const c=chunks[Number(chunk.value)];scan.replaceChildren(...c.scans.map(s=>{const o=document.createElement('option');o.value=s.row;o.textContent=`Row ${s.row}: ${s.name}`;return o;}));note.textContent=`${c.points.toLocaleString()} preview points. ${c.pose_method}.`;frame.src=c.viewer;link.href=c.viewer;image.src=c.image;imageLink.href=c.image;updatePair();}
+ chunk.onchange=show;scan.onchange=updatePair;show();
+}
+updatePair();
+for(const c of chunks){const row=document.createElement('tr');for(const text of [c.number,c.scans.map(s=>`${s.row}: ${s.name}`).join(', '),c.points.toLocaleString()]){const cell=document.createElement('td');cell.textContent=text;row.append(cell);}document.getElementById('inventory').append(row);}
+</script></body></html>

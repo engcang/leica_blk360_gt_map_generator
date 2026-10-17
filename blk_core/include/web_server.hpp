@@ -249,6 +249,16 @@ namespace blk_core
                 openLocalTarget(registration_.outputDirectory(_request.matches[1]).u8string());
                 reply(_response, {{"ok", true}});
             });
+            server_.Post("/api/registration/chunks/([0-9a-f]{32})", [this](const httplib::Request &_request, httplib::Response &_response)
+            {
+                const auto page = registration_.outputDirectory(_request.matches[1]) / "chunks_review.html";
+                if (!std::filesystem::is_regular_file(page))
+                {
+                    throw std::runtime_error("Build the chunk review first");
+                }
+                openLocalTarget(page.u8string());
+                reply(_response, {{"ok", true}});
+            });
             server_.Post("/api/registration/review/([0-9a-f]{32})", [this](const httplib::Request &_request, httplib::Response &_response)
             {
                 const auto page = registration_.reviewPath(_request.matches[1]);

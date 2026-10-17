@@ -6,6 +6,7 @@ let registration_state = null,
     draft_timer,
     python_dirty = false;
 const resume_pairs = new Map();
+const registration_visible_jobs = new Set();
 
 function registrationDraft()
 {
@@ -39,6 +40,15 @@ function addRegistrationScans(clouds)
     {
         if (cloud.available && !registration_ids.includes(cloud.id)) registration_ids.push(cloud.id);
     }
+    const byId = new Map(project.point_clouds.map(cloud => [cloud.id, cloud]));
+    registration_ids.sort((a, b) =>
+    {
+        const first = byId.get(a), second = byId.get(b);
+        const difference = (first?.modified_time ?? Infinity) - (second?.modified_time ?? Infinity);
+        if (difference) return difference;
+        const firstPath = first?.path || a, secondPath = second?.path || b;
+        return firstPath < secondPath ? -1 : firstPath > secondPath ? 1 : 0;
+    });
     renderRegistrationScans();
     saveRegistrationDraft();
 }
@@ -82,7 +92,7 @@ function renderRegistrationScans()
     {
         const empty = document.createElement('div');
         empty.className = 'empty';
-        empty.textContent = 'Add individual scans from Saved point clouds, or use the converted scans in queue order.';
+        empty.textContent = 'Select PLY files or a folder. Input selections are kept only on this page.';
         element('registration-scans').append(empty);
     }
     element('registration-count').textContent = registration_ids.length;
@@ -100,7 +110,7 @@ function registrationControls()
 function renderRegistrationJob(job)
 {
     const row = document.createElement('article');
-    row.className = 'registration-job';
+    row.className = `registration-job ${job.status === 'completed' ? 'result-ready' : 'result-pending'}`;
     row.dataset.registrationId = job.id;
     const heading = document.createElement('h3');
     heading.textContent = `${job.name} · ${job.voxel_m * 1000} mm · ${job.scans.length} scans`;
@@ -132,10 +142,28 @@ function renderRegistrationJob(job)
         scans.append(pairs);
     }
     const actions = document.createElement('div');
-    actions.className = 'registration-actions';
+    actions.className = 'registration-actions result-actions';
+    if (job.chunks_available && job.status !== 'completed')
+    {
+        const chunks = button('View chunks', () => api(`registration/chunks/${job.id}`, {}));
+        chunks.className = 'primary review-result';
+        actions.append(chunks);
+    }
+    else if (job.status === 'needs_connections')
+    {
+        const build = button('Build chunk review', async () =>
+        {
+            await api('registration/start', {resume_id: job.id, review_only: true});
+            await refreshRegistration();
+        });
+        build.disabled = !!registration_state.busy || registration_state.runtime.status !== 'completed';
+        actions.append(build);
+    }
     if (job.status === 'completed')
     {
-        actions.append(button('Review and manage', () => api(`registration/review/${job.id}`, {})));
+        const review = button('Review and manage', () => api(`registration/review/${job.id}`, {}));
+        review.className = 'primary review-result';
+        actions.append(review);
         const detail = document.createElement('span');
         detail.className = 'hint';
         detail.textContent = 'Poses saved. Generate a 1 cm map, raw map, or share HTML from the management page.';
@@ -162,6 +190,7 @@ function renderRegistrationJob(job)
                 resume_id: job.id,
                 additional_pairs: pairs.value
             });
+            registration_visible_jobs.add(job.id);
             resume_pairs.delete(job.id);
             await refreshRegistration();
         });
@@ -170,7 +199,7 @@ function renderRegistrationJob(job)
     }
     actions.append(button('Open output folder', () => api(`registration/open/${job.id}`,
     {})));
-    row.append(heading, state, path, scans, actions);
+    row.append(heading, state, path, actions, scans);
     return row;
 }
 
@@ -179,6 +208,7 @@ async function refreshRegistration()
     try
     {
         registration_state = await api('registration');
+        for (const job of registration_state.jobs) if (job.status !== 'completed') registration_visible_jobs.add(job.id);
         const runtime = registration_state.runtime;
         if (!python_dirty) element('registration-python').value = registration_state.python;
         element('runtime-state').textContent = runtime.status === 'completed' ? 'Ready' : runtime.status.replaceAll('_', ' ');
@@ -188,7 +218,7 @@ async function refreshRegistration()
             registration_loaded = true;
             const draft = registration_state.draft ||
             {};
-            registration_ids = draft.cloud_ids || [];
+            registration_ids = [];
             element('map-name').value = draft.name || 'reference_map';
             element('map-voxel').value = '0.01';
             element('map-output').value = draft.output_directory || project.output_directory || '';
@@ -198,11 +228,19 @@ async function refreshRegistration()
             renderRegistrationScans();
         }
         registrationControls();
-        const signature = JSON.stringify([registration_state.jobs, registration_state.busy, runtime.status]);
+        const visible_jobs = registration_state.jobs.filter(job => registration_visible_jobs.has(job.id) || job.status !== 'completed');
+        const signature = JSON.stringify([visible_jobs, registration_state.busy, runtime.status]);
         if (signature !== registration_signature)
         {
             registration_signature = signature;
-            element('registration-jobs').replaceChildren(...[...registration_state.jobs].reverse().map(renderRegistrationJob));
+            element('registration-jobs').replaceChildren(...[...visible_jobs].reverse().map(renderRegistrationJob));
+            if (!visible_jobs.length)
+            {
+                const empty = document.createElement('p');
+                empty.className = 'results-empty';
+                empty.textContent = 'Your current result will appear here. Open relative_poses.json to revisit a previous result.';
+                element('registration-jobs').append(empty);
+            }
         }
         element('registration-log').textContent = registration_state.log || 'No worker output yet.';
         if (registration_state.storage_error) notice(registration_state.storage_error, true);
@@ -219,16 +257,17 @@ element('registration-python').oninput = () =>
 {
     python_dirty = true;
 };
-action('registration-converted', () =>
+action('registration-converted', async () =>
 {
-    const normalized = path => path.replace(/\\/g, '/');
-    const scans = project.jobs.filter(job => job.status === 'completed').map(job => project.point_clouds.find(cloud => normalized(cloud.path) === normalized(job.output_path))).filter(Boolean);
-    if (!scans.length) throw new Error('No completed conversions in this project. Use Add PLY files or Add to map instead.');
+    const paths = project.jobs.filter(job => job.status === 'completed').map(job => job.output_path);
+    if (!paths.length) throw new Error('No completed conversions. Select PLY files or a folder instead.');
     registration_ids = [];
-    addRegistrationScans(scans);
-    notice('Scans selected in conversion queue order. Confirm that this matches acquisition order.');
+    await openCloudPaths(paths, true);
+    notice('Scans selected by modification time, oldest first. Confirm acquisition order.');
 });
+
 action('registration-pick', () => openBrowser('registration-ply'));
+action('registration-folder', () => openBrowser('registration-folder'));
 action('map-browse', () => openBrowser('map-output'));
 action('registration-clear', () =>
 {
@@ -251,7 +290,10 @@ action('registration-start', async () =>
     clearTimeout(draft_timer);
     const draft = registrationDraft();
     await api('registration/draft', draft);
+    const previous = new Set((registration_state?.jobs || []).map(job => job.id));
     await api('registration/start', draft);
+    const current = await api('registration');
+    for (const job of current.jobs) if (!previous.has(job.id)) registration_visible_jobs.add(job.id);
     await refreshRegistration();
 });
 action('registration-stop', async () =>

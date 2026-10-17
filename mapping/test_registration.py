@@ -70,7 +70,10 @@ class RegistrationTests(unittest.TestCase):
                 writePly(source, np.array([[0, 0, 0]], dtype=np.float32), np.array([1]))
             config = {"paths": [str(path) for path in sources], "voxel_m": 0.01,
                       "output_path": str(root / "map.ply"), "additional_pairs": ""}
-            with mock.patch("register_scans.prepare", return_value=[{}, {}]), \
+            records = [{"name": path.name, "source_path": str(path), "source_sha256": hashFile(path),
+                        "source_bytes": path.stat().st_size, "source_mtime_ns": path.stat().st_mtime_ns,
+                        "original_points": 1} for path in sources]
+            with mock.patch("register_scans.prepare", return_value=records), \
                  mock.patch("register_scans.loadClouds", return_value=[{}, {}]), \
                  mock.patch("register_scans.adjacent", return_value=[{"source": 0, "target": 1, "accepted": False}]), \
                  mock.patch("automatic_connections.discoverConnections", side_effect=lambda _clouds, _edges, _output, _progress: _edges), \
@@ -83,6 +86,14 @@ class RegistrationTests(unittest.TestCase):
             self.assertEqual(progress["status"], "needs_connections")
             self.assertEqual(progress["groups"], [[1], [2]])
             self.assertFalse((root / "map.ply").exists())
+            self.assertFalse((root / "relative_poses.json").exists())
+            self.assertTrue((root / "chunks_review.html").is_file())
+            manifest = json.loads((root / "partial_chunks.json").read_text())
+            self.assertFalse(manifest["shared_coordinate_frame"])
+            self.assertEqual(manifest["groups"], [[1], [2]])
+            for chunk in manifest["chunks"]:
+                self.assertTrue((root / chunk["viewer"]).is_file())
+                self.assertTrue((root / chunk["image"]).is_file())
 
     def testGraphDirection(self):
         angle = 0.6

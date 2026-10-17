@@ -31,7 +31,8 @@ def hashFile(_path):
 def run(_args):
     root = pathlib.Path(_args.project).resolve()
     root.mkdir(parents=True, exist_ok=False)
-    sources = [pathlib.Path(value).resolve() for value in _args.ply]
+    sources = sorted((pathlib.Path(value).resolve() for value in _args.ply),
+                     key=lambda path: (path.stat().st_mtime_ns // 1000000, str(path)))
     source_hashes = [hashFile(path) for path in sources]
     output = root / "Maps with spaces"
     output.mkdir()
@@ -89,16 +90,13 @@ def run(_args):
                 assert error.code == 403
             api("registration/runtime", {"python": str(root / "missing-python"), "install": False})
             assert waitFor(idle)["runtime"]["status"] == "failed"
+            page.locator("#tab-register").click()
             page.locator("#registration-setup").evaluate("node => node.open = true")
             page.locator("#registration-python").fill(sys.executable)
             page.locator("#runtime-check").click()
             page.wait_for_function("document.querySelector('#runtime-state').textContent === 'Ready'", timeout=60000)
-            added = api("add-clouds", {"paths": [str(path) for path in sources]})
-            assert not added["errors"]
-            page.wait_for_function("n => document.querySelectorAll('#clouds .job').length === n", arg=len(sources))
-            for path in sources:
-                cloud = next(item for item in api("project")["point_clouds"] if pathlib.Path(item["path"]) == path)
-                page.locator(f"[data-cloud-id='{cloud['id']}']").get_by_role("button", name="Add to map").click()
+            page.evaluate("paths => openCloudPaths(paths, true)", [str(path) for path in sources])
+            page.wait_for_function("n => document.querySelectorAll('.registration-scan').length === n", arg=len(sources))
             original = page.locator(".registration-scan > span").all_text_contents()
             page.locator(".registration-scan").nth(1).get_by_role("button", name="Move", exact=False).first.click()
             assert page.locator(".registration-scan > span").all_text_contents() != original
@@ -112,7 +110,7 @@ def run(_args):
             page.wait_for_function("p => document.querySelector('#browser-path').value.replaceAll('\\\\','/') === p", arg=output.as_posix())
             page.locator("#use-folder").click()
             waitFor(lambda: api("registration").get("draft", {}).get("name") == "Integration map")
-            config = api("registration")["draft"]
+            config = page.evaluate("registrationDraft()")
             expectError({**config, "name": "../outside"})
             expectError({**config, "voxel_m": 0})
             expectError({**config, "additional_pairs": "0:2"})
@@ -242,22 +240,35 @@ def run(_args):
             raw_path.rename(raw_backup)
             review_page.wait_for_function("!document.querySelector('[data-product=raw]').disabled")
             review_page.locator("[data-product=raw]").click()
-            waitFor(lambda: bool(list(output.glob(".product-*"))), 30)
+            # Small clouds may finish before the staging folder can be observed.
+            waitFor(lambda: bool(list(output.glob(".product-*"))) or idle(), 30)
             api("registration/cancel", {})
             cancelled = waitFor(idle)["jobs"][0]["export"]
-            assert cancelled["status"] == "cancelled", cancelled
-            assert not list(output.glob(".product-*")) and not raw_path.exists()
-            raw_backup.rename(raw_path)
+            assert cancelled["status"] in ("cancelled", "completed"), cancelled
+            assert not list(output.glob(".product-*"))
+            # Cancellation can arrive after the complete file has been published.
+            # Either no output or the complete expected output is valid; never a partial file.
+            if raw_path.exists():
+                assert hashFile(raw_path) == hashFile(raw_backup)
+                raw_backup.unlink()
+            else:
+                assert cancelled["status"] == "cancelled"
+                raw_backup.rename(raw_path)
             review_page.close()
             expectError(config)
             expectError({"resume_id": job_id})
             shutdown()
             page.goto(launch())
+            page.wait_for_function("project !== null && registration_state !== null")
+            assert page.locator(".registration-scan").count() == 0
+            assert page.locator(".registration-job").count() == 0
+            assert api("project")["point_clouds"] == []
+            imported = api("registration/import", {"path": str(manifest_path)})
+            page.evaluate("id => { registration_visible_jobs.add(id); selectTab('register'); return refreshRegistration(); }", imported["id"])
             page.get_by_role("button", name="Review and manage").wait_for()
             state = api("registration")
-            assert state["jobs"][0]["products"]["voxel"]["cloud_id"] == cloud_id
-            assert state["draft"]["cloud_ids"] == config["cloud_ids"]
-            assert page.locator(".registration-scan > span").all_text_contents() == original
+            cloud_id = state["jobs"][0]["products"]["voxel"]["cloud_id"]
+            assert "cloud_ids" not in state["draft"]
             assert api(f"cloud/{cloud_id}")["valid_points"] == points
             assert state["jobs"][0]["review_path"] == str(review_path)
             assert not records.exists(), "Viewing/export recreated the deleted registration folder"
@@ -272,10 +283,11 @@ def run(_args):
             imported = api("registration/import", {"path": str(manifest_path)})
             assert imported["id"] != job_id
             imported_job = api("registration")["jobs"][0]
-            assert imported_job["products"]["voxel"]["cloud_id"] == cloud_id
+            assert api("cloud/" + imported_job["products"]["voxel"]["cloud_id"])["valid_points"] == points
             assert imported_job["products"]["share"]["available"]
             assert "report_directory" not in imported_job
             assert api("registration/import", {"path": str(manifest_path)})["id"] == imported["id"]
+            page.evaluate("id => { registration_visible_jobs.add(id); selectTab('register'); return refreshRegistration(); }", imported["id"])
             page.get_by_role("button", name="Review and manage").wait_for()
             shutdown()
             browser.close()

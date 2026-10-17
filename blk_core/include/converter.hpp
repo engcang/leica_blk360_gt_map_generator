@@ -253,6 +253,8 @@ namespace blk_core
                     std::filesystem::remove(work / (name + ".raw"));
                 }
                 checkCancel(_cancel);
+                // Preserve acquisition/download chronology across BLK and PLY selection.
+                std::filesystem::last_write_time(work / "cloud.ply", source_time);
                 publishFile(work / "cloud.ply", _destination);
                 std::filesystem::remove(work);
                 _progress({"Completed", 1});

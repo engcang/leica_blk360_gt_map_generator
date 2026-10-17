@@ -63,22 +63,11 @@ namespace blk_core
                     }
                 }
             }
-            if (!state_.contains("point_clouds"))
-            {
-                state_["point_clouds"] = nlohmann::json::array();
-            }
-            if (!state_["point_clouds"].is_array())
-            {
-                throw std::runtime_error("Invalid point-cloud library");
-            }
-            for (const auto &cloud : state_["point_clouds"])
-            {
-                if (!validId(cloud.value("id", "")) || !cloud.contains("path") || !cloud["path"].is_string())
-                {
-                    throw std::runtime_error("Invalid saved point-cloud record");
-                }
-            }
-            refreshCloudsLocked();
+            refreshCompletedLocked();
+            omitCompleted(state_);
+            // File browsing is session-only. Never restore a library or scan the output folder.
+            state_["point_clouds"] = nlohmann::json::array();
+            state_["point_cloud_errors"] = nlohmann::json::array();
             saveLocked();
             worker_ = std::thread([this]
             {
@@ -107,10 +96,20 @@ namespace blk_core
         nlohmann::json snapshot()
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (pruneMissingCloudsLocked())
+            if (refreshCompletedLocked())
             {
-                saveLocked();
+                try
+                {
+                    saveLocked();
+                }
+                catch (const std::exception &error)
+                {
+                    state_["storage_error"] = error.what();
+                }
             }
+            pruneMissingCloudsLocked();
+            sortRecordsByModification(state_["jobs"], "source_path");
+            sortRecordsByModification(state_["point_clouds"], "path");
             auto result = state_;
             result["project_directory"] = root_.u8string();
             result["running"] = !active_id_.empty();
@@ -123,7 +122,9 @@ namespace blk_core
             {
                 if (job["id"] == _id)
                 {
-                    return job;
+                    auto result = job;
+                    refreshCompletedJob(result);
+                    return result;
                 }
             }
             throw std::runtime_error("Unknown scan");
@@ -157,35 +158,70 @@ namespace blk_core
             std::lock_guard<std::mutex> lock(mutex_);
             std::size_t added = 0, skipped = 0;
             auto errors = nlohmann::json::array();
-            for (const auto &path : _paths)
+            auto clouds = nlohmann::json::array();
+            std::vector<std::filesystem::path> candidates;
+            for (const auto &text : _paths)
             {
                 try
                 {
-                    if (addCloudLocked(std::filesystem::u8path(path)))
+                    const auto path = std::filesystem::canonical(std::filesystem::u8path(text));
+                    if (std::filesystem::is_directory(path))
                     {
-                        ++added;
+                        std::vector<std::filesystem::path> files;
+                        for (const auto &entry : std::filesystem::directory_iterator(path))
+                        {
+                            if (entry.is_regular_file() && hasExtension(entry.path(), ".ply"))
+                                files.push_back(entry.path());
+                        }
+                        candidates.insert(candidates.end(), files.begin(), files.end());
                     }
                     else
-                    {
+                        candidates.push_back(path);
+                }
+                catch (const std::exception &error)
+                {
+                    errors.push_back({{"path", text}, {"error", error.what()}});
+                }
+            }
+            sortPathsByModification(candidates);
+            for (const auto &path : candidates)
+            {
+                try
+                {
+                    if (addCloudLocked(path))
+                        ++added;
+                    else
                         ++skipped;
+                    for (const auto &cloud : state_["point_clouds"])
+                    {
+                        std::error_code error;
+                        if (std::filesystem::equivalent(std::filesystem::u8path(cloud.at("path").get<std::string>()), path, error))
+                        {
+                            clouds.push_back(cloud);
+                            break;
+                        }
                     }
                 }
                 catch (const std::exception &error)
                 {
-                    errors.push_back({{"path", path}, {"error", error.what()}});
+                    errors.push_back({{"path", path.u8string()}, {"error", error.what()}});
                 }
             }
-            saveLocked();
-            return {{"added", added}, {"skipped", skipped}, {"errors", errors}};
+            sortRecordsByModification(clouds, "path");
+            return {{"added", added}, {"skipped", skipped}, {"errors", errors}, {"clouds", clouds}};
         }
         void refreshClouds()
         {
             std::lock_guard<std::mutex> lock(mutex_);
             refreshCloudsLocked();
-            saveLocked();
         }
         nlohmann::json addPaths(const std::vector<std::string> &_paths)
         {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (refreshCompletedLocked())
+                    saveLocked();
+            }
             std::vector<std::filesystem::path> candidates;
             auto errors = nlohmann::json::array();
             for (const auto &text : _paths)
@@ -217,7 +253,7 @@ namespace blk_core
                     errors.push_back({{"path", text}, {"error", error.what()}});
                 }
             }
-            std::sort(candidates.begin(), candidates.end());
+            sortPathsByModification(candidates);
             std::size_t added = 0, skipped = 0;
             for (const auto &candidate : candidates)
             {
@@ -277,6 +313,8 @@ namespace blk_core
         void queue()
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            refreshCompletedLocked();
+            sortRecordsByModification(state_["jobs"], "source_path");
             const auto output_text = state_.value("output_directory", "");
             if (output_text.empty())
             {
@@ -308,7 +346,7 @@ namespace blk_core
                 target.replace_extension(".ply");
                 if (std::filesystem::exists(target))
                 {
-                    throw std::runtime_error("Output already exists: " + target.u8string() + ". Open it from Saved point clouds without converting again, or choose another output folder.");
+                    throw std::runtime_error("Output already exists: " + target.u8string() + ". Open it from View saved point clouds without converting again, or choose another output folder.");
                 }
                 for (const auto &other : reserved)
                 {
@@ -400,6 +438,43 @@ namespace blk_core
         }
 
     private:
+        static bool refreshCompletedJob(nlohmann::json &_job)
+        {
+            if (_job.value("status", "") != "completed")
+                return false;
+            const auto output = _job.value("output_path", "");
+            std::error_code error;
+            if (!output.empty())
+            {
+                const bool exists = std::filesystem::exists(std::filesystem::u8path(output), error);
+                // An inaccessible volume is not evidence that the user removed the file.
+                if (exists || error)
+                    return false;
+            }
+            const bool source_exists = std::filesystem::is_regular_file(std::filesystem::u8path(_job.at("source_path").get<std::string>()), error);
+            _job["status"] = source_exists ? "ready" : "failed";
+            _job["message"] = source_exists ? "Output PLY was removed or moved. Ready to convert again." : "Output PLY and source BLK are unavailable. Remove this entry and select the source again.";
+            _job["progress"] = 0.0;
+            _job["result"] = nullptr;
+            _job["output_path"] = "";
+            return true;
+        }
+        bool refreshCompletedLocked()
+        {
+            bool changed = false;
+            for (auto &job : state_["jobs"])
+                changed = refreshCompletedJob(job) || changed;
+            return changed;
+        }
+        static void omitCompleted(nlohmann::json &_state)
+        {
+            auto &jobs = _state["jobs"];
+            jobs.erase(std::remove_if(jobs.begin(), jobs.end(), [](const nlohmann::json &_job)
+            {
+                return _job.value("status", "") == "completed";
+            }),
+                       jobs.end());
+        }
         bool addCloudLocked(const std::filesystem::path &_path)
         {
             const auto path = std::filesystem::canonical(_path);
@@ -461,52 +536,7 @@ namespace blk_core
                     cloud["error"] = error.what();
                 }
             }
-            std::vector<std::filesystem::path> candidates;
             state_["point_cloud_errors"] = nlohmann::json::array();
-            const auto output = std::filesystem::u8path(state_.value("output_directory", ""));
-            std::error_code directory_error;
-            if (!output.empty() && std::filesystem::is_directory(output, directory_error))
-            {
-                try
-                {
-                    for (const auto &entry : std::filesystem::directory_iterator(output, std::filesystem::directory_options::skip_permission_denied))
-                    {
-                        if (hasExtension(entry.path(), ".ply"))
-                        {
-                            candidates.push_back(entry.path());
-                        }
-                    }
-                }
-                catch (const std::exception &error)
-                {
-                    state_["point_cloud_errors"].push_back({{"path", output.u8string()}, {"error", error.what()}});
-                }
-            }
-            for (const auto &job : state_["jobs"])
-            {
-                if (job["status"] == "completed" && !job.value("output_path", "").empty())
-                {
-                    candidates.push_back(std::filesystem::u8path(job.at("output_path").get<std::string>()));
-                }
-            }
-            std::sort(candidates.begin(), candidates.end());
-            candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
-            for (const auto &path : candidates)
-            {
-                std::error_code existence_error;
-                if (!std::filesystem::exists(path, existence_error) && !existence_error)
-                {
-                    continue;
-                }
-                try
-                {
-                    addCloudLocked(path);
-                }
-                catch (const std::exception &error)
-                {
-                    state_["point_cloud_errors"].push_back({{"path", path.u8string()}, {"error", error.what()}});
-                }
-            }
         }
         void migrateLegacy()
         {
@@ -545,11 +575,19 @@ namespace blk_core
         void saveLocked() const
         {
             const auto pending = root_ / "project.json.pending";
-            writeText(pending, state_.dump(2) + "\n");
+            auto saved = state_;
+            omitCompleted(saved);
+            saved.erase("point_clouds");
+            saved.erase("point_cloud_errors");
+            writeText(pending, saved.dump(2) + "\n");
             const auto target = root_ / "project.json";
             if (std::filesystem::exists(target))
             {
-                std::filesystem::copy_file(target, root_ / "project.json.backup", std::filesystem::copy_options::overwrite_existing);
+                auto previous = nlohmann::json::parse(readText(target));
+                omitCompleted(previous);
+                previous.erase("point_clouds");
+                previous.erase("point_cloud_errors");
+                writeText(root_ / "project.json.backup", previous.dump(2) + "\n");
             }
             replaceFile(pending, target);
         }

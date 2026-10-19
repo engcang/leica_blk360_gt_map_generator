@@ -76,6 +76,9 @@ def runRegistration(_config, _report):
         saveJson(_report / "progress.json", {"status": "needs_connections", "stage": "Chunk review ready. Resume to search for connections.", **partial_info})
         return
     clouds = registration.loadClouds(_report, len(records))
+    from manual_placement import applyPlacements, collectPriors
+    cached_edges = [json.loads(path.read_text(encoding="utf-8")) for path in (_report / "pairs").glob("*.json")]
+    applyPlacements(_config, clouds, records, cached_edges, _report, progress)
     progress("Registering consecutive scans")
     edges = registration.adjacent(clouds, records, _report)
     for i, j in pairs:
@@ -95,14 +98,15 @@ def runRegistration(_config, _report):
     edges = list(existing.values())
     publishChunks(edges)
     from automatic_connections import discoverConnections
-    edges = discoverConnections(clouds, edges, _report, progress)
+    priors, _ = collectPriors(_config, records)
+    edges = discoverConnections(clouds, edges, _report, progress, priors) if priors else discoverConnections(clouds, edges, _report, progress)
     publishChunks(edges)
     from chunk_connections import discoverChunkConnections
-    edges = discoverChunkConnections(clouds, edges, records, _report, progress, publishChunks)
+    edges = discoverChunkConnections(clouds, edges, records, _report, progress, publishChunks, priors)
     groups = connectedGroups(edges, len(records))
     if len(groups) > 1:
         saveJson(_report / "progress.json", {"status": "needs_connections",
-                                             "stage": "Scan-pair and merged-chunk searches could not verify all connections. View chunks, then provide connection hints or additional scans.",
+                                             "stage": "Scan-pair and merged-chunk searches could not verify all connections. View or arrange chunks, then provide initial placements, connection hints, or additional scans.",
                                              **partial_info,
                                              "groups": groups,
                                              "rejected_pairs": [[edge["source"] + 1, edge["target"] + 1] for edge in edges if not edge["accepted"]]})

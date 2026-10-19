@@ -5,6 +5,9 @@ let registration_state = null,
     registration_signature = '',
     draft_timer,
     python_dirty = false;
+const initial_placements = new Map();
+let placement_window = null, placement_selection = '', placement_order = '';
+const identity_pose = [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]];
 const resume_pairs = new Map();
 const registration_visible_jobs = new Set();
 
@@ -12,6 +15,7 @@ function registrationDraft()
 {
     return {
         cloud_ids: registration_ids,
+        initial_guesses: registration_ids.map(id => initial_placements.get(id) || null),
         name: element('map-name').value.trim(),
         output_directory: element('map-output').value.trim(),
         voxel_m: Number(element('map-voxel').value),
@@ -55,6 +59,13 @@ function addRegistrationScans(clouds)
 
 function renderRegistrationScans()
 {
+    const orderKey = registration_ids.join(',');
+    if (orderKey !== placement_order)
+    {
+        initial_placements.clear();
+        placement_order = orderKey;
+        updatePlacementStatus();
+    }
     const rows = registration_ids.map((id, index) =>
     {
         const cloud = project.point_clouds.find(item => item.id === id);
@@ -102,6 +113,8 @@ function renderRegistrationScans()
 function registrationControls()
 {
     const busy = registration_state?.busy;
+    element('placement-open').disabled = !!busy || registration_ids.length < 2;
+    element('placement-clear').disabled = !!busy || !initial_placements.size;
     element('registration-start').disabled = !registration_state || busy || registration_state.runtime.status !== 'completed' || registration_ids.length < 2;
     element('registration-stop').disabled = !busy;
     element('runtime-check').disabled = element('runtime-install').disabled = !!busy;
@@ -147,7 +160,12 @@ function renderRegistrationJob(job)
     {
         const chunks = button('View chunks', () => api(`registration/chunks/${job.id}`, {}));
         chunks.className = 'primary review-result';
-        actions.append(chunks);
+        const arrange = button('Arrange chunks', () =>
+        {
+            window.open(`placement.html?job=${encodeURIComponent(job.id)}#${token}`, '_blank');
+        });
+        arrange.disabled = !!registration_state.busy;
+        actions.append(chunks, arrange);
     }
     else if (job.status === 'needs_connections')
     {
@@ -305,3 +323,56 @@ action('registration-stop', async () =>
 });
 
 action('open-registration-result', () => openBrowser('registration-result'));
+
+function updatePlacementStatus()
+{
+    element('placement-status').textContent = initial_placements.size
+        ? `${initial_placements.size} scans have initial placements. Unplaced scans use automatic matching.`
+        : 'No initial placements. Automatic registration is unchanged.';
+}
+action('placement-clear', () =>
+{
+    initial_placements.clear();
+    updatePlacementStatus();
+    registrationControls();
+});
+action('placement-open', () =>
+{
+    placement_selection = registration_ids.join(',');
+    placement_window = window.open(`placement.html#${token}`, '_blank');
+    if (!placement_window) throw Error('Allow a new tab to open the placement editor.');
+});
+window.addEventListener('message', event =>
+{
+    if (event.origin !== location.origin) return;
+    if (event.data?.type === 'chunk-placement-started') { refreshRegistration(); return; }
+    if (event.source !== placement_window) return;
+    if (event.data?.type === 'placement-ready')
+    {
+        const items = registration_ids.map((id, row) =>
+        {
+            const cloud = project.point_clouds.find(item => item.id === id);
+            return {id, name: `${row + 1}. ${cloud.name}`, pose: initial_placements.get(id) || null,
+                scans: [{name: cloud.name, points: cloud.valid_points, base: identity_pose,
+                    url: `/api/placement-sample/${id}`} ]};
+        });
+        placement_window.postMessage({type: 'placement-input', items}, location.origin);
+    }
+    if (event.data?.type === 'placement-save')
+    {
+        if (placement_selection !== registration_ids.join(','))
+        {
+            placement_window.postMessage({type:'placement-error', error:'Input order changed. Reopen the editor.'}, location.origin);
+            return;
+        }
+        const values = event.data.items;
+        if (!Array.isArray(values) || values.length !== registration_ids.length ||
+            values.some((v,i) => v.id !== registration_ids[i] || (v.pose !== null &&
+                (!Array.isArray(v.pose) || v.pose.length !== 4 || !v.pose.every(Number.isFinite))))) return;
+        initial_placements.clear();
+        for (const value of values) if (value.pose) initial_placements.set(value.id, value.pose);
+        updatePlacementStatus();
+        registrationControls();
+        placement_window.postMessage({type:'placement-saved'}, location.origin);
+    }
+});

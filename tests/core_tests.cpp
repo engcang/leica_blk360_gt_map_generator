@@ -2,6 +2,7 @@
 
 #include "project.hpp"
 #include "file_browser.hpp"
+#include "placement.hpp"
 
 void require(bool _value,
              const std::string &_message)
@@ -208,6 +209,33 @@ int main()
                         require(job["status"] != "completed", "Completed history was retained on disk");
                 }
             }
+            const auto sampled_path = root / "sample-boundaries.ply";
+            std::string sample_source = "ply\nformat binary_little_endian 1.0\nelement vertex 350003\nproperty float x\nproperty float y\nproperty float z\nproperty ushort intensity\nend_header\n";
+            for (std::uint32_t i = 0; i < 350003; ++i)
+            {
+                const float xyz[] = {static_cast<float>(i), -static_cast<float>(i), 0.25f};
+                const std::uint16_t intensity = static_cast<std::uint16_t>(i % 65536);
+                sample_source.append(reinterpret_cast<const char *>(xyz), 12);
+                sample_source.append(reinterpret_cast<const char *>(&intensity), 2);
+            }
+            blk_core::writeText(sampled_path, sample_source);
+            for (const auto stride : {1, 2, 5, 10, 50})
+            {
+                const auto total = (350003ull + stride - 1) / stride;
+                for (std::uint64_t start = 0; start < total; start += 262144)
+                {
+                    const auto sampled = blk_core::placementSample(sampled_path, start, stride);
+                    require(sampled.size() == std::min<std::uint64_t>(262144, total - start) * 16, "Sample block size mismatch");
+                    for (std::size_t offset = 0; offset < sampled.size(); offset += 16)
+                    {
+                        float point[4];
+                        std::memcpy(point, sampled.data() + offset, 16);
+                        const auto original_index = (start + offset / 16) * stride;
+                        require(point[0] == original_index && point[1] == -static_cast<float>(original_index) && point[2] == 0.25f && point[3] == original_index % 65536, "Sample crosses a read boundary incorrectly");
+                    }
+                }
+            }
+            require(blk_core::readText(sampled_path) == sample_source, "Sample reads modified the source");
             const auto ordered_root = root / "ordered";
             std::filesystem::create_directory(ordered_root);
             const auto oldest = ordered_root / "Setup511.ply";
@@ -216,6 +244,28 @@ int main()
             const auto stamp = std::filesystem::file_time_type::clock::now() - std::chrono::hours(2);
             for (const auto &path : {oldest, middle, newest})
                 blk_core::writeText(path, ply);
+            blk_core::validatePlacement(nullptr);
+            blk_core::validatePlacement(nlohmann::json::array({1, 2, 3, 0.5}));
+            expectError([]
+            {
+                blk_core::validatePlacement(nlohmann::json::array({1, 2}));
+            });
+            expectError([]
+            {
+                blk_core::validatePlacement(nlohmann::json::array({1, 2, 3, "yaw"}));
+            });
+            const auto sample = blk_core::placementSample(oldest, 0, 10);
+            const auto sampled_count = (blk_core::inspectPly(oldest)["valid_points"].get<std::uint64_t>() + 9) / 10;
+            require(sample.size() == sampled_count * 16, "Placement sample count is incorrect");
+            require(blk_core::readText(oldest) == ply, "Placement changed the original PLY");
+            expectError([&]
+            {
+                blk_core::placementSample(oldest, sampled_count, 10);
+            });
+            expectError([&]
+            {
+                blk_core::placementSample(oldest, 0, 3);
+            });
             std::filesystem::last_write_time(oldest, stamp);
             std::filesystem::last_write_time(middle, stamp + std::chrono::seconds(100));
             std::filesystem::last_write_time(newest, stamp + std::chrono::seconds(200));

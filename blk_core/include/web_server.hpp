@@ -171,17 +171,40 @@ namespace blk_core
             {
                 serveFile(_response, web_root_ / "index.html", "text/html; charset=utf-8");
             });
-            server_.Get("/(app\\.js|viewer\\.js|registration\\.js)", [this](const httplib::Request &_request, httplib::Response &_response)
+            server_.Get("/(app\\.js|viewer\\.js|registration\\.js|placement\\.js)", [this](const httplib::Request &_request, httplib::Response &_response)
             {
                 serveFile(_response, web_root_ / _request.matches[1].str(), "text/javascript; charset=utf-8");
             });
-            server_.Get("/(app\\.css|viewer\\.css)", [this](const httplib::Request &_request, httplib::Response &_response)
+            server_.Get("/(app\\.css|viewer\\.css|placement\\.css)", [this](const httplib::Request &_request, httplib::Response &_response)
             {
                 serveFile(_response, web_root_ / _request.matches[1].str(), "text/css; charset=utf-8");
             });
             server_.Get("/viewer.html", [this](const httplib::Request &, httplib::Response &_response)
             {
                 serveFile(_response, web_root_ / "viewer.html", "text/html; charset=utf-8");
+            });
+            server_.Get("/placement.html", [this](const httplib::Request &, httplib::Response &_response)
+            {
+                serveFile(_response, web_root_ / "placement.html", "text/html; charset=utf-8");
+            });
+            server_.Get("/api/placement-sample/([0-9a-f]{32})", [this](const httplib::Request &_request, httplib::Response &_response)
+            {
+                const auto cloud = project_.pointCloud(_request.matches[1]);
+                _response.set_content(placementSample(std::filesystem::u8path(cloud.at("path").get<std::string>()),
+                                                      std::stoull(_request.get_param_value("start")),
+                                                      std::stoull(_request.get_param_value("stride"))),
+                                      "application/octet-stream");
+            });
+            server_.Get("/api/registration/placement/([0-9a-f]{32})", [this](const httplib::Request &_request, httplib::Response &_response)
+            {
+                reply(_response, registration_.placementData(_request.matches[1]));
+            });
+            server_.Get("/api/registration/placement-sample/([0-9a-f]{32})/([0-9]+)", [this](const httplib::Request &_request, httplib::Response &_response)
+            {
+                _response.set_content(placementSample(registration_.placementScan(_request.matches[1], std::stoull(_request.matches[2])),
+                                                      std::stoull(_request.get_param_value("start")),
+                                                      std::stoull(_request.get_param_value("stride"))),
+                                      "application/octet-stream");
             });
             server_.Get("/api/project", [this](const httplib::Request &, httplib::Response &_response)
             {

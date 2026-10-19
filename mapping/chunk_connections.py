@@ -69,7 +69,7 @@ def verifyBridge(first, second, poses, transform, clouds, progress):
     return candidates
 
 
-def discoverChunkConnections(clouds, edges, records, output, progress, on_groups=None):
+def discoverChunkConnections(clouds, edges, records, output, progress, on_groups=None, priors=None):
     directory = output / "chunk_search"
     directory.mkdir(exist_ok=True)
     attempts = []
@@ -104,7 +104,9 @@ def discoverChunkConnections(clouds, edges, records, output, progress, on_groups
                             np.array(result["transform_target_from_source"]), clouds, progress)
                 del source, target
                 saveJson(cache, attempt)
-            candidates = [edge for edge in attempt["candidates"] if edge["accepted"]]
+            from manual_placement import compatibleWithPlacement
+            candidates = [compatibleWithPlacement(edge, priors or {}) for edge in attempt["candidates"]]
+            candidates = [edge for edge in candidates if edge["accepted"]]
             # Preserve competing scan-only placements as evidence against ambiguous bridges.
             by_pair = {(edge["source"], edge["target"]): edge for edge in candidates}
             conflict = False
@@ -114,7 +116,7 @@ def discoverChunkConnections(clouds, edges, records, output, progress, on_groups
                     path = output / "auto_pairs" / f"{key[0]:02d}_{key[1]:02d}.json"
                     if not path.is_file():
                         continue
-                    old = json.loads(path.read_text(encoding="utf-8"))
+                    old = compatibleWithPlacement(json.loads(path.read_text(encoding="utf-8")), priors or {})
                     if not old["accepted"]:
                         continue
                     if key in by_pair:

@@ -16,6 +16,7 @@
 #include <json.hpp>
 
 #include "project.hpp"
+#include "placement.hpp"
 #include "worker_process.hpp"
 
 namespace blk_core
@@ -37,7 +38,10 @@ namespace blk_core
                 state_ = {{"schema_version", 1}, {"python", defaultPython()}, {"runtime", {{"status", "unchecked"}}}, {"jobs", nlohmann::json::array()}};
             }
             if (state_.contains("draft") && state_["draft"].is_object())
+            {
                 state_["draft"].erase("cloud_ids");
+                state_["draft"].erase("initial_guesses");
+            }
             for (auto &job : state_.at("jobs"))
             {
                 if (job.contains("products"))
@@ -90,6 +94,7 @@ namespace blk_core
             }
             state_["draft"] = _draft;
             state_["draft"].erase("cloud_ids");
+            state_["draft"].erase("initial_guesses");
             saveLocked();
         }
 
@@ -374,6 +379,16 @@ namespace blk_core
                     throw std::runtime_error("Select at least two PLY scans in acquisition order");
                 }
                 validatePairs(_body.value("additional_pairs", ""), paths.size());
+                if (_body.contains("chunk_initial_guesses"))
+                    throw std::runtime_error("Chunk placements require an existing registration");
+                if (_body.contains("initial_guesses"))
+                {
+                    const auto &guesses = _body.at("initial_guesses");
+                    if (!guesses.is_array() || guesses.size() != paths.size())
+                        throw std::runtime_error("Placement selection changed; reopen the placement editor");
+                    for (const auto &pose : guesses)
+                        validatePlacement(pose);
+                }
                 id = newId();
                 report = root_ / "registration_records" / id;
                 std::filesystem::create_directories(directory);
@@ -392,6 +407,33 @@ namespace blk_core
             {
                 throw std::runtime_error("Map PLY already exists; open it from View saved point clouds or use a new map name");
             }
+            if (_body.contains("initial_guesses"))
+            {
+                const auto &guesses = _body.at("initial_guesses");
+                if (!guesses.is_array() || guesses.size() != config.at("paths").size())
+                    throw std::runtime_error("Placement selection changed; reopen the placement editor");
+                for (const auto &pose : guesses)
+                    validatePlacement(pose);
+                config["initial_guesses"] = guesses;
+            }
+            if (_body.contains("chunk_initial_guesses"))
+            {
+                const auto &guesses = _body.at("chunk_initial_guesses");
+                const auto directory = std::filesystem::u8path(config.at("output_path").get<std::string>()).parent_path();
+                const auto manifest = readJson(directory / "partial_chunks.json");
+                if (!guesses.is_object() || guesses.size() != manifest.at("chunks").size())
+                    throw std::runtime_error("Chunks changed; reopen the placement editor");
+                for (const auto &chunk : manifest.at("chunks"))
+                {
+                    const auto key = chunk.at("key").get<std::string>();
+                    if (!guesses.contains(key))
+                        throw std::runtime_error("Chunks changed; reopen the placement editor");
+                    validatePlacement(guesses.at(key));
+                }
+                config.erase("initial_guesses");
+                config["chunk_initial_guesses"] = guesses;
+                config["manual_chunks"] = manifest.at("chunks");
+            }
             config["review_only"] = _body.value("review_only", false);
             saveJson(report / "config.json", config);
             auto &job = findJob(state_, id);
@@ -399,6 +441,43 @@ namespace blk_core
             job["stage"] = "Starting registration";
             job["additional_pairs"] = config["additional_pairs"];
             launchLocked(id, report, {state_.at("python").get<std::string>(), "-u", (scripts_ / "studio_worker.py").u8string(), "--run", (report / "config.json").u8string(), "--report", report.u8string()});
+        }
+
+        std::filesystem::path placementScan(const std::string &_id, std::size_t _row)
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto &job = findJob(state_, _id);
+            const auto config = readJson(std::filesystem::u8path(job.at("report_directory").get<std::string>()) / "config.json");
+            if (_row >= config.at("paths").size())
+                throw std::runtime_error("Unknown registration scan");
+            return std::filesystem::u8path(config.at("paths").at(_row).get<std::string>());
+        }
+
+        nlohmann::json placementData(const std::string &_id)
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto &job = findJob(state_, _id);
+            const auto root = std::filesystem::u8path(job.at("output_path").get<std::string>()).parent_path();
+            const auto manifest = readJson(root / "partial_chunks.json");
+            const auto config = readJson(std::filesystem::u8path(job.at("report_directory").get<std::string>()) / "config.json");
+            auto items = nlohmann::json::array();
+            for (const auto &chunk : manifest.at("chunks"))
+            {
+                auto scans = nlohmann::json::array();
+                for (const auto &scan : chunk.at("scans"))
+                {
+                    const auto row = scan.at("row").get<std::size_t>() - 1;
+                    const auto path = std::filesystem::u8path(config.at("paths").at(row).get<std::string>());
+                    const auto metadata = inspectPly(path);
+                    scans.push_back({{"name", scan.at("name")}, {"points", metadata.at("valid_points")}, {"base", scan.at("transform_chunk_from_scan")}, {"url", "/api/registration/placement-sample/" + _id + "/" + std::to_string(row)}});
+                }
+                const auto key = chunk.at("key").get<std::string>();
+                auto pose = nlohmann::json();
+                if (config.contains("chunk_initial_guesses") && config["chunk_initial_guesses"].contains(key))
+                    pose = config["chunk_initial_guesses"][key];
+                items.push_back({{"id", key}, {"name", "Chunk " + std::to_string(chunk.at("number").get<int>())}, {"scans", scans}, {"pose", pose}});
+            }
+            return {{"items", items}, {"busy", busy_}, {"mode", "chunks"}};
         }
 
         std::filesystem::path outputDirectory(const std::string &_id)

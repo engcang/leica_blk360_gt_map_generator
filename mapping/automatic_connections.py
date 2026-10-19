@@ -97,7 +97,7 @@ def selectConnections(_edges, _candidates, _count):
     return selected, audit
 
 
-def discoverConnections(_clouds, _edges, _output, _progress):
+def discoverConnections(_clouds, _edges, _output, _progress, _priors=None):
     existing = {(edge["source"], edge["target"]): edge for edge in _edges}
     for path in (_output / "pairs").glob("*.json"):
         edge = json.loads(path.read_text(encoding="utf-8"))
@@ -123,6 +123,9 @@ def discoverConnections(_clouds, _edges, _output, _progress):
         else:
             edge = registerPair(_clouds[i], _clouds[j], i, j)
             saveJson(path, edge)
+        if _priors:
+            from manual_placement import compatibleWithPlacement
+            edge = compatibleWithPlacement(edge, _priors)
         candidates.append(edge)
     selected, audit = selectConnections(edges, candidates, len(_clouds))
     #Codex: Unverified global matches stay outside pairs/ and cannot seed the pose graph.

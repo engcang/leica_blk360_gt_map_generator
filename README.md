@@ -77,6 +77,25 @@ click **Convert scans** to recreate it. Pending/interrupted work is retained for
 4. Check the Python environment under **Registration setup**, then click **Register scans**.
 5. In the highlighted **Results and progress** panel, open **Review and manage** to inspect quality metrics, scan positions, and inferred-level images.
 
+**Optional initial placement:** after selecting PLYs, click **Arrange PLY scans**.
+Switch **Move view / Place scan / chunk** to choose the left-drag action (view movement is the default).
+In placement mode, select XY, X, Y, Z, or yaw, or enter numeric values.
+The first item is fixed; **Next** uses the previous item as a reference. Right/middle
+drag always pans the view. **Height cut** hides points above a shared Z height after
+placement transforms; **Show all** restores them without changing registration inputs.
+Only the moving item and reference are loaded, at **1/10** display density by default. **Use placements in Register**
+applies enabled guesses to the current input selection; then click **Register scans**.
+Changing the selection/order clears those guesses. **Clear initial placements**
+restores fully automatic registration.
+
+For disconnected results, **Arrange chunks** offers the same controls. **Register
+placed chunks** resumes with chunk-local poses composed with the edited XYZ/yaw
+transforms. Unchecked chunks remain automatic. Original PLYs and internal chunk
+geometry are unchanged. Placements initialize Nano-GICP; acceptance still checks
+convergence/overlap and limits correction to 1 m / 15 degrees, followed by the
+existing 1 cm refinement and PGO. Failed guesses are reported in the worker log;
+manual-pair results are cached in the registration record, not the output folder.
+
 After conversion and registration, the output is:
 
 ```text

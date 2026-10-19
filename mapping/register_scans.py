@@ -216,7 +216,7 @@ def seedPoses(_edges, _count):
 
     tree = []
     ordered = sorted([edge for edge in _edges if edge["accepted"]],
-                     key=lambda _edge: (int(_edge["target"] == _edge["source"] + 1), _edge["score"]),
+                     key=lambda _edge: (bool(_edge.get("manual_placement")), int(_edge["target"] == _edge["source"] + 1), _edge["score"]),
                      reverse=True)
     for edge in ordered:
         i, j = edge["source"], edge["target"]

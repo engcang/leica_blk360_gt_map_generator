@@ -37,23 +37,27 @@ function registrationDraft()
     };
 }
 
-function updateResultNames()
-{
-    const name = element('map-name').value.trim() || 'reference_map';
-    element('map-filename').textContent = `${name}_1cm.ply (on demand)`;
-    element('map-poses-filename').textContent = 'relative_poses.json';
-    element('map-review-folder').textContent = 'result_review_and_manage.html + html_source/';
-}
-
 function saveRegistrationDraft()
 {
     selectPlacementOutput();
-    updateResultNames();
+
     ++placement_restore_serial;
     updatePlacementStatus();
     registrationControls();
     clearTimeout(draft_timer);
     draft_timer = setTimeout(() => loadSavedPlacements().catch(error => notice(error.message, true)), 300);
+}
+
+function defaultRegistrationOutput()
+{
+    if (element('map-output').value.trim()) return;
+    const cloud = registration_ids.map(id => project.point_clouds.find(item => item.id === id))
+        .find(item => item?.available && item.path);
+    if (!cloud) return;
+    const end = Math.max(cloud.path.lastIndexOf('/'), cloud.path.lastIndexOf(String.fromCharCode(92)));
+    if (end < 0) return;
+    element('map-output').value = cloud.path.slice(0, end + 1);
+    selectPlacementOutput();
 }
 
 function addRegistrationScans(clouds)
@@ -71,6 +75,7 @@ function addRegistrationScans(clouds)
         const firstPath = first?.path || a, secondPath = second?.path || b;
         return firstPath < secondPath ? -1 : firstPath > secondPath ? 1 : 0;
     });
+    defaultRegistrationOutput();
     renderRegistrationScans();
     saveRegistrationDraft();
     return loadSavedPlacements();
@@ -117,7 +122,7 @@ function renderRegistrationScans()
     {
         const empty = document.createElement('div');
         empty.className = 'empty';
-        empty.textContent = 'Select PLY files or a folder. Input selections are kept only on this page.';
+        empty.textContent = 'Select PLY files or a folder.';
         element('registration-scans').append(empty);
     }
     element('registration-count').textContent = registration_ids.length;
@@ -127,7 +132,7 @@ function renderRegistrationScans()
 function registrationControls()
 {
     const busy = registration_state?.busy || registration_starting;
-    element('placement-open').disabled = !!busy || registration_ids.length < 2 || !element('map-output').value.trim();
+    element('placement-open').disabled = !!busy || registration_ids.length < 2;
     element('registration-start').disabled = !registration_state || busy || placement_saving || placement_restoring || registration_state.runtime.status !== 'completed' || registration_ids.length < 2 || !element('map-output').value.trim() || !!placement_restore_error;
     element('registration-stop').disabled = !busy;
     element('runtime-check').disabled = element('runtime-install').disabled = !!busy;
@@ -257,7 +262,7 @@ async function refreshRegistration()
             element('map-voxel').value = '0.01';
             element('map-output').value = '';
             element('map-pairs').value = '';
-            updateResultNames();
+
             element('registration-setup').open = runtime.status !== 'completed';
             renderRegistrationScans();
         }
@@ -272,11 +277,11 @@ async function refreshRegistration()
             {
                 const empty = document.createElement('p');
                 empty.className = 'results-empty';
-                empty.textContent = 'Your current result will appear here. Open relative_poses.json or partial_chunks.json to revisit a previous result.';
+                empty.textContent = 'No result selected.';
                 element('registration-jobs').append(empty);
             }
         }
-        element('registration-log').textContent = visible_jobs.some(job => job.status === 'running') ? (registration_state.log || 'Waiting for worker output.') : 'No active registration. Open a result explicitly to review previous work.';
+        element('registration-log').textContent = visible_jobs.some(job => job.status === 'running') ? (registration_state.log || 'Waiting for worker output.') : 'No active registration.';
         if (registration_state.storage_error) notice(registration_state.storage_error, true);
     }
     catch (error)
@@ -347,23 +352,30 @@ function updatePlacementStatus()
 {
     selectPlacementOutput();
     const placed = registration_ids.filter(id => initial_placements.has(id)).length;
+    element('placement-status').hidden = !registration_ids.length && !placement_restore_error;
     element('placement-status').textContent = placement_restore_error
         ? `Saved placements could not be verified: ${placement_restore_error}. Registration is blocked until they can be read.`
-        : placement_restoring ? 'Checking saved placements for the selected scans and output folder...'
+        : placement_restoring ? 'Checking saved placements?'
         : !registration_ids.length ? 'Select PLY files or a folder to begin.'
-        : !element('map-output').value.trim() ? 'Choose a map output folder to restore saved placements or arrange scans.'
+        : !element('map-output').value.trim() ? 'Choose a map output folder.'
         : placed
-        ? `${placed} / ${registration_ids.length} selected scans have initial placements. Removing or reordering scans preserves the remaining poses.`
-        : 'No saved placements for this selection. Registration will initialize these scans automatically; Arrange PLY scans can provide manual guesses.';
+        ? `${placed} / ${registration_ids.length} saved placements`
+        : 'No saved placements ? automatic initialization.';
 }
-action('placement-open', () =>
+function openPlacementEditor()
 {
     if (placement_window && !placement_window.closed) { placement_window.focus(); return; }
-    if (!element('map-output').value.trim()) throw Error('Choose an output folder before arranging scans.');
+    if (registration_state?.busy || registration_starting) throw Error('Wait for the active registration to finish.');
+    if (registration_ids.length < 2) throw Error('Select at least two PLY scans.');
+    defaultRegistrationOutput();
+    if (!element('map-output').value.trim()) throw Error('Cannot determine the selected PLY folder. Choose a map output folder.');
+    updatePlacementStatus();
+    registrationControls();
     placement_context = registrationDraft();
     placement_window = window.open(`placement.html#${token}`, '_blank');
     if (!placement_window) throw Error('Allow a new tab to open the placement editor.');
-});
+}
+action('placement-open', openPlacementEditor);
 window.addEventListener('message', async event =>
 {
     if (event.origin !== location.origin) return;

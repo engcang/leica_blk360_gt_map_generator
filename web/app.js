@@ -225,13 +225,15 @@ async function refresh()
     try
     {
         project = await api('project');
-        element('connection').textContent = '● Local connection · files read in place';
+        element('connection').hidden = true;
+        element('connection').textContent = '';
         for (const job of project.jobs) if (['running', 'queued'].includes(job.status)) conversion_ids.add(job.id);
         const selectedJobs = project.jobs.filter(job => conversion_ids.has(job.id));
         element('job-count').textContent = selectedJobs.length;
         const count = status => selectedJobs.filter(job => job.status === status).length;
         element('open-folder').disabled = !element('output-path').value.trim();
-        element('summary').textContent = selectedJobs.length ? `${count('completed')} completed · ${count('ready') + count('queued')} waiting · ${count('running')} processing` : 'Selected scans will appear here.';
+        element('summary').textContent = selectedJobs.length ? `${count('completed')} completed · ${count('ready') + count('queued')} waiting · ${count('running')} processing` : '';
+        element('summary').hidden = !selectedJobs.length;
         element('start').disabled = adding || !count('ready') || !element('output-path').value.trim();
         element('cancel').disabled = !project.running && !count('queued');
         const clouds = (project.point_clouds || []).filter(cloud => viewed_cloud_ids.has(cloud.id));
@@ -245,7 +247,7 @@ async function refresh()
             {
                 const empty = document.createElement('div');
                 empty.className = 'empty';
-                empty.textContent = 'Select PLY files or a folder to view. Nothing is loaded automatically.';
+                empty.textContent = 'Select PLY files or a folder.';
                 element('clouds').append(empty);
             }
         }
@@ -261,7 +263,7 @@ async function refresh()
             {
                 const empty = document.createElement('div');
                 empty.className = 'empty';
-                empty.textContent = 'No scans selected. Select BLK files or a folder to get started.';
+                empty.textContent = 'No scans selected.';
                 element('jobs').append(empty);
             }
         }
@@ -275,6 +277,7 @@ async function refresh()
     }
     catch (error)
     {
+        element('connection').hidden = false;
         element('connection').textContent = 'Disconnected · reopen BLK Studio to reconnect';
         element('start').disabled = element('cancel').disabled = true;
     }
@@ -292,7 +295,7 @@ async function addPaths(paths)
             paths
         });
         for (const id of result.ids) conversion_ids.add(id);
-        element('import-status').textContent = `${result.added} scans added · ${result.skipped} already selected · ${result.errors.length} errors. No files copied.`;
+        element('import-status').textContent = `${result.added} scans added · ${result.skipped} already selected · ${result.errors.length} errors.`;
         if (result.errors.length) notice(result.errors.map(item => `${item.path}: ${item.error}`).join('\n'), true);
     }
     finally
@@ -439,7 +442,7 @@ async function openCloudPaths(paths, registration = false)
     if (registration) await addRegistrationScans(result.clouds);
     selectTab(registration ? 'register' : 'clouds');
     if (result.errors.length) notice(result.errors.map(item => `${item.path}: ${item.error}`).join('\n'), true);
-    else notice(result.clouds.length ? `${result.clouds.length} PLY files selected. No files copied.` : 'No PLY files found in this folder.');
+    else notice(result.clouds.length ? `${result.clouds.length} PLY files selected.` : 'No PLY files found in this folder.');
 }
 
 action('use-files', async () =>
@@ -523,6 +526,7 @@ action('quit', async () =>
     await api('shutdown',
     {});
     closed = true;
+    element('connection').hidden = false;
     element('connection').textContent = 'App closed. You can close this tab.';
     element('start').disabled = element('cancel').disabled = true;
 });

@@ -44,7 +44,7 @@ run('api = mockApi;');
     assert.equal(element('output-path').value,'');
     assert.equal(element('map-output').value,'');
     assert.equal(element('registration-jobs').children.length,1);
-    assert.match(element('registration-jobs').children[0].textContent,/current result/);
+    assert.match(element('registration-jobs').children[0].textContent,/No result selected/);
     assert.equal(element('registration-scans').children.length,1);
     assert.match(element('registration-scans').children[0].textContent,/Select PLY/);
     assert.equal(element('map-name').value,'reference_map');

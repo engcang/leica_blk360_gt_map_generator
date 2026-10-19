@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(blk_studio VERSION 0.4.0 LANGUAGES C CXX)
+project(blk_studio VERSION 2.0.0 LANGUAGES C CXX)
 
 ### Set compiler
 set(CMAKE_CXX_STANDARD 17)

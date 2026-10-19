@@ -73,11 +73,11 @@ click **Convert scans** to recreate it. Pending/interrupted work is retained for
 
 1. Add overlapping, individual PLY scans with **Add PLY files**, **Add folder**, or **Add to map**.
 2. Confirm acquisition order with **Up / Down**. The first scan defines the map frame.
-3. Choose a product base name and output folder. Use a separate folder for each registration result.
+3. Confirm the product base name and output folder (defaults to the first selected PLY folder). Use a separate folder for each registration result.
 4. Check the Python environment under **Registration setup**, then click **Register scans**.
 5. In the highlighted **Results and progress** panel, open **Review and manage** to inspect quality metrics, scan positions, and inferred-level images.
 
-**Optional initial placement:** after selecting PLYs, click **Arrange PLY scans**.
+**Optional initial placement:** after selecting PLYs, click **Arrange PLY scans** to open the editor directly. Placements save beside the selected PLYs unless you choose another output folder.
 Switch **Move view / Place scan / chunk** to choose the left-drag action (view movement is the default).
 In placement mode, select XY, X, Y, Z, or yaw, or enter numeric values.
 The first item is fixed; **Next** uses the previous item as a reference. Right/middle

@@ -104,6 +104,7 @@ def run(args):
             for stride in (1, 2, 5, 10, 50):
                 block = np.frombuffer(api(f"placement-sample/{ids[0]}?start=1&stride={stride}", raw=True), dtype="<f4").reshape(-1,4)
                 np.testing.assert_allclose(block[:, :3], locals_[0][stride::stride], atol=1e-6)
+            page.locator("#map-output").fill(str(root / "raw-placements"))
             with page.expect_popup() as popup:
                 page.locator("#placement-open").click()
             editor = popup.value

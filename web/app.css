@@ -100,14 +100,6 @@ header
     color: var(--ink)
 }
 
-.brand span
-{
-    font-size: 11px;
-    border: 1px solid var(--line);
-    padding: 3px 5px;
-    border-radius: 4px
-}
-
 .header-actions
 {
     display: flex;
@@ -115,46 +107,11 @@ header
     align-items: center
 }
 
-.local
-{
-    font-size: 10px;
-    letter-spacing: 1.5px;
-    font-weight: 700;
-    display: flex;
-    align-items: center;
-    gap: 8px
-}
-
-.local i
-{
-    height: 7px;
-    width: 7px;
-    background: #289f71;
-    border-radius: 50%
-}
-
 main
 {
     max-width: 1200px;
     margin: 0 auto;
     padding: 45px 0 24px
-}
-
-.eyebrow
-{
-    font-size: 11px;
-    letter-spacing: 2px;
-    color: var(--accent);
-    font-weight: 700;
-    margin-bottom: 15px
-}
-
-.heading
-{
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 20px
 }
 
 h1
@@ -174,14 +131,6 @@ h3
 {
     font-size: 16px;
     margin: 12px 0
-}
-
-.lead
-{
-    font-size: 14px;
-    color: var(--muted);
-    margin: 0 0 28px;
-    line-height: 1.7
 }
 
 .primary
@@ -219,20 +168,6 @@ h3
 {
     background: #d5ecdc;
     border: 2px solid var(--accent)
-}
-
-.drop-icon
-{
-    height: 38px;
-    width: 38px;
-    display: grid;
-    place-items: center;
-    margin: 0 auto 12px;
-    font-size: 26px;
-    background: #fff;
-    border: 1px solid #d2e3d8;
-    border-radius: 10px;
-    color: var(--accent)
 }
 
 #dropzone p
@@ -460,42 +395,6 @@ select
     border-color: #cfe1d6
 }
 
-.notes
-{
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 44px;
-    margin-top: 30px;
-    padding: 2px 2px 25px
-}
-
-.note-index
-{
-    font-size: 9px;
-    letter-spacing: 1.5px;
-    color: #738d83;
-    font-weight: 700
-}
-
-.notes p
-{
-    color: var(--muted);
-    font-size: 12px;
-    line-height: 1.9;
-    margin: 0
-}
-
-footer
-{
-    border-top: 1px solid var(--line);
-    padding-top: 18px;
-    display: flex;
-    justify-content: space-between;
-    gap: 15px;
-    font-size: 10px;
-    color: #849390
-}
-
 #notice
 {
     position: fixed;
@@ -533,25 +432,9 @@ footer
         padding: 0 20px
     }
 
-    .local
-    {
-        display: none
-    }
-
     h1
     {
         font-size: 24px
-    }
-
-    .heading
-    {
-        align-items: flex-start
-    }
-
-    .heading>.secondary
-    {
-        font-size: 11px;
-        padding: 10px
     }
 
     .queue-toolbar
@@ -571,20 +454,9 @@ footer
         gap: 12px
     }
 
-    .notes
-    {
-        grid-template-columns: 1fr;
-        gap: 24px
-    }
-
     main
     {
         padding: 30px 16px
-    }
-
-    .lead
-    {
-        font-size: 12px
     }
 
     .job-actions

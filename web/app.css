@@ -205,43 +205,6 @@ h3
     padding: 8px
 }
 
-.project-bar
-{
-    display: flex;
-    gap: 12px;
-    align-items: center;
-    border-top: 1px solid var(--line);
-    padding: 17px 0
-}
-
-.project-bar label
-{
-    font-size: 10px;
-    letter-spacing: 1.5px;
-    font-weight: 700;
-    color: var(--muted)
-}
-
-.project-bar input
-{
-    width: 220px;
-    background: transparent;
-    border: 0;
-    border-bottom: 1px solid transparent;
-    padding: 7px 3px;
-    font-size: 14px
-}
-
-.project-bar input:focus
-{
-    border-bottom-color: var(--accent)
-}
-
-.project-bar a
-{
-    margin-left: auto
-}
-
 #dropzone
 {
     border: 1px dashed #8daf9e;
@@ -533,13 +496,6 @@ footer
     color: #849390
 }
 
-#directory
-{
-    overflow-wrap: anywhere;
-    text-align: right;
-    max-width: 70%
-}
-
 #notice
 {
     position: fixed;
@@ -619,21 +575,6 @@ footer
     {
         grid-template-columns: 1fr;
         gap: 24px
-    }
-
-    .project-bar
-    {
-        flex-wrap: wrap
-    }
-
-    .project-bar a
-    {
-        margin-left: 0
-    }
-
-    .project-bar input
-    {
-        width: 150px
     }
 
     main

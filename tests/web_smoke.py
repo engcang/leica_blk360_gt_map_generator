@@ -94,7 +94,12 @@ def run(_args):
             page.get_by_label(source.name, exact=True).check()
             page.locator("#use-files").click()
             page.wait_for_function("document.querySelector('#job-count').textContent === '1'", timeout=60000)
-            assert api("/api/add", {"paths": [str(source)]})["skipped"] == 1
+            page.locator('#source-paths').fill(str(source))
+            page.locator('#add-paths').click()
+            page.wait_for_function("document.querySelector('#job-count').textContent === '1'")
+            page.locator('#output-path').fill(str(output))
+            page.locator('#save-output').click()
+            assert page.locator("#start").is_enabled()
             job = api("/api/project")["jobs"][0]
             assert pathlib.Path(job["source_path"]) == source
             assert not (project / "inputs").exists()
@@ -108,9 +113,7 @@ def run(_args):
             page.wait_for_function("document.querySelector('#browser-path').value.endsWith('output')")
             page.locator("#use-folder").click()
             waitFor(lambda: pathlib.Path(api("/api/project")["output_directory"]) == output)
-            page.locator("#project-name").fill("Test <scan> project")
-            page.locator("#save-name").click()
-            waitFor(lambda: api("/api/project")["name"] == "Test <scan> project")
+            assert page.locator("#project-name, #save-name, #export").count() == 0
             page.locator("#start").click()
             waitFor(lambda: api("/api/project")["running"])
             api("/api/cancel", {})
@@ -219,16 +222,21 @@ def run(_args):
             waitForDraw(1001)
             viewer.close()
             page.reload()
-            page.wait_for_function("document.querySelector('#job-count').textContent === '1'")
-            assert page.locator("#project-name").input_value() == "Test <scan> project"
+            page.wait_for_function("document.querySelector('#job-count').textContent === '0'")
+            assert page.locator("#project-name, #save-name, #export").count() == 0
             assert json.loads((project / "project.json").read_text())["jobs"] == [], "Completed history persisted"
             original_output_hash = hashlib.sha256(target.read_bytes()).hexdigest()
             target.unlink()
             assert api(f"/api/scan/{job['id']}")["status"] == "ready", "Scan API returned a stale completion"
             page.wait_for_function("project.jobs[0].status === 'ready'")
             assert page.locator("#jobs .view").count() == 0
+            assert page.locator("#start").is_disabled()
+            page.locator('#source-paths').fill(str(source))
+            page.locator('#add-paths').click()
+            page.wait_for_function("document.querySelector('#job-count').textContent === '1'")
+            page.locator('#output-path').fill(str(output))
+            page.locator('#save-output').click()
             assert page.locator("#start").is_enabled()
-            assert api("/api/add", {"paths": [str(source)]})["skipped"] == 1
             page.locator("#start").click()
             waitFor(lambda: api("/api/project")["jobs"][0]["status"] in ("completed", "failed"), 300)
             assert api("/api/project")["jobs"][0]["status"] == "completed"

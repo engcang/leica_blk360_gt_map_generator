@@ -145,8 +145,8 @@ def run(args):
             np.testing.assert_allclose(values, poses, atol=1e-8)
             editor.locator("#moving").select_option("0")
             assert editor.locator("#x").is_disabled() and editor.locator("#yaw").is_disabled()
-            page.locator("#placement-clear").click()
-            assert page.evaluate("registrationDraft().initial_guesses") == [None]*3
+            assert page.locator("#placement-clear").count() == 0
+            np.testing.assert_allclose(page.evaluate("registrationDraft().initial_guesses"), poses, atol=1e-8)
             editor.close()
             # Verify initial guesses persist into a real new registration, not only a UI object.
             raw_output = root / "raw-output"

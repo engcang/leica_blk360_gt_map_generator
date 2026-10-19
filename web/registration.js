@@ -5,18 +5,30 @@ let registration_state = null,
     registration_signature = '',
     draft_timer,
     python_dirty = false;
-const initial_placements = new Map();
+let initial_placements = new Map();
+const placement_maps = new Map([['', initial_placements]]);
+let placement_output = '', placement_restore_error = '', registration_starting = false;
+function selectPlacementOutput()
+{
+    const output = element('map-output').value.trim();
+    if (output === placement_output) return;
+    placement_output = output;
+    if (!placement_maps.has(output)) placement_maps.set(output, new Map());
+    initial_placements = placement_maps.get(output);
+    placement_restore_error = '';
+}
 let placement_window = null, placement_context = null;
-let placement_automatic = false, placement_saving = false;
+let placement_saving = false, placement_restoring = false;
+let placement_restore_serial = 0;
 const identity_pose = [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]];
 const resume_pairs = new Map();
 const registration_visible_jobs = new Set();
 
 function registrationDraft()
 {
+    selectPlacementOutput();
     return {
         cloud_ids: registration_ids.slice(),
-        ignore_saved_placements: placement_automatic,
         initial_guesses: registration_ids.map(id => initial_placements.get(id) || null),
         name: element('map-name').value.trim(),
         output_directory: element('map-output').value.trim(),
@@ -35,9 +47,13 @@ function updateResultNames()
 
 function saveRegistrationDraft()
 {
+    selectPlacementOutput();
     updateResultNames();
+    ++placement_restore_serial;
+    updatePlacementStatus();
+    registrationControls();
     clearTimeout(draft_timer);
-    draft_timer = setTimeout(() => api('registration/draft', registrationDraft()).catch(error => notice(error.message, true)), 300);
+    draft_timer = setTimeout(() => loadSavedPlacements().catch(error => notice(error.message, true)), 300);
 }
 
 function addRegistrationScans(clouds)
@@ -55,9 +71,9 @@ function addRegistrationScans(clouds)
         const firstPath = first?.path || a, secondPath = second?.path || b;
         return firstPath < secondPath ? -1 : firstPath > secondPath ? 1 : 0;
     });
-    if (registration_ids.some(id => initial_placements.has(id))) placement_automatic = false;
     renderRegistrationScans();
     saveRegistrationDraft();
+    return loadSavedPlacements();
 }
 
 function renderRegistrationScans()
@@ -110,11 +126,9 @@ function renderRegistrationScans()
 
 function registrationControls()
 {
-    const busy = registration_state?.busy;
-    element('placement-open').disabled = !!busy || registration_ids.length < 2;
-    element('placement-clear').disabled = !!busy || !registration_ids.some(id => initial_placements.has(id));
-    element('placement-load').disabled = !!busy || registration_ids.length < 2;
-    element('registration-start').disabled = !registration_state || busy || placement_saving || registration_state.runtime.status !== 'completed' || registration_ids.length < 2;
+    const busy = registration_state?.busy || registration_starting;
+    element('placement-open').disabled = !!busy || registration_ids.length < 2 || !element('map-output').value.trim();
+    element('registration-start').disabled = !registration_state || busy || placement_saving || placement_restoring || registration_state.runtime.status !== 'completed' || registration_ids.length < 2 || !element('map-output').value.trim() || !!placement_restore_error;
     element('registration-stop').disabled = !busy;
     element('runtime-check').disabled = element('runtime-install').disabled = !!busy;
 }
@@ -238,8 +252,6 @@ async function refreshRegistration()
         if (!registration_loaded)
         {
             registration_loaded = true;
-            const draft = registration_state.draft ||
-            {};
             registration_ids = [];
             element('map-name').value = 'reference_map';
             element('map-voxel').value = '0.01';
@@ -300,15 +312,26 @@ for (const id of ['runtime-check', 'runtime-install']) action(id, async () =>
 });
 action('registration-start', async () =>
 {
+    if (registration_starting || placement_saving || registration_state?.busy) return;
+    registration_starting = true;
+    registrationControls();
     clearTimeout(draft_timer);
-    const draft = registrationDraft();
-    // The server rejects lost/stale placements before creating a job.
-    await api('registration/draft', draft);
-    const previous = new Set((registration_state?.jobs || []).map(job => job.id));
-    await api('registration/start', draft);
-    const current = await api('registration');
-    for (const job of current.jobs) if (!previous.has(job.id)) registration_visible_jobs.add(job.id);
-    await refreshRegistration();
+    try
+    {
+        const selection = JSON.stringify(registrationDraft());
+        if (!await loadSavedPlacements()) throw Error('Selection changed or is incomplete. Review selected scans and the output folder before starting.');
+        // Loading poses may change guesses, but must not switch the requested job inputs.
+        const before = JSON.parse(selection), draft = registrationDraft();
+        delete before.initial_guesses;
+        const inputs = {...draft}; delete inputs.initial_guesses;
+        if (JSON.stringify(before) !== JSON.stringify(inputs)) throw Error('Registration inputs changed while checking saved placements. Review them before starting.');
+        const previous = new Set((registration_state?.jobs || []).map(job => job.id));
+        await api('registration/start', draft);
+        const current = await api('registration');
+        for (const job of current.jobs) if (!previous.has(job.id)) registration_visible_jobs.add(job.id);
+        await refreshRegistration();
+    }
+    finally { registration_starting = false; registrationControls(); }
 });
 action('registration-stop', async () =>
 {
@@ -322,21 +345,20 @@ action('open-registration-result', () => openBrowser('registration-result'));
 
 function updatePlacementStatus()
 {
+    selectPlacementOutput();
     const placed = registration_ids.filter(id => initial_placements.has(id)).length;
-    element('placement-status').textContent = placed
+    element('placement-status').textContent = placement_restore_error
+        ? `Saved placements could not be verified: ${placement_restore_error}. Registration is blocked until they can be read.`
+        : placement_restoring ? 'Checking saved placements for the selected scans and output folder...'
+        : !registration_ids.length ? 'Select PLY files or a folder to begin.'
+        : !element('map-output').value.trim() ? 'Choose a map output folder to restore saved placements or arrange scans.'
+        : placed
         ? `${placed} / ${registration_ids.length} selected scans have initial placements. Removing or reordering scans preserves the remaining poses.`
-        : placement_automatic ? 'Automatic registration explicitly selected. Saved placements are preserved on disk.'
-        : 'No placements loaded. Load saved placements or arrange scans; saved poses will be checked before registration starts.';
+        : 'No saved placements for this selection. Registration will initialize these scans automatically; Arrange PLY scans can provide manual guesses.';
 }
-action('placement-clear', () =>
-{
-    for (const id of registration_ids) initial_placements.delete(id);
-    placement_automatic = true;
-    updatePlacementStatus();
-    registrationControls();
-});
 action('placement-open', () =>
 {
+    if (placement_window && !placement_window.closed) { placement_window.focus(); return; }
     if (!element('map-output').value.trim()) throw Error('Choose an output folder before arranging scans.');
     placement_context = registrationDraft();
     placement_window = window.open(`placement.html#${token}`, '_blank');
@@ -352,11 +374,11 @@ window.addEventListener('message', async event =>
         try
         {
         const context = placement_context;
-        const saved = context.ignore_saved_placements ? null : await api('registration/placements/load', context);
+        const saved = await api('registration/placements/load', context);
         const items = context.cloud_ids.map((id, row) =>
         {
             const cloud = project.point_clouds.find(item => item.id === id);
-            return {id, name: `${row + 1}. ${cloud.name}`, pose: initial_placements.get(id) || saved?.initial_guesses[row] || null,
+            return {id, name: `${row + 1}. ${cloud.name}`, pose: saved.initial_guesses[row] || null,
                 scans: [{name: cloud.name, points: cloud.valid_points, base: identity_pose,
                     url: `/api/placement-sample/${id}`} ]};
         });
@@ -366,6 +388,8 @@ window.addEventListener('message', async event =>
     }
     if (event.data?.type === 'placement-save')
     {
+        ++placement_restore_serial;
+        placement_restoring = false;
         placement_saving = true;
         registrationControls();
         try
@@ -375,17 +399,23 @@ window.addEventListener('message', async event =>
                 values.some((v,i) => v.id !== placement_context.cloud_ids[i] || (v.pose !== null &&
                     (!Array.isArray(v.pose) || v.pose.length !== 4 || !v.pose.every(Number.isFinite)))))
                 throw Error('Invalid placement data. Nothing was applied. Keep the editor open.');
-            const saved = await api('registration/placements/save', {...placement_context,
-                initial_guesses: values.map(value => value.pose)});
+            // The editor has already saved. Read back instead of overwriting newer autosaves.
+            const saved = await api('registration/placements/load', placement_context);
+            if (JSON.stringify(saved.initial_guesses) !== JSON.stringify(values.map(value => value.pose)))
+                throw Error('Saved placements changed since Apply. Latest edits remain saved; apply again from the editor.');
+            const output = placement_context.output_directory.trim();
+            if (!placement_maps.has(output)) placement_maps.set(output, new Map());
+            const applied = placement_maps.get(output);
+            ++placement_restore_serial;
+            placement_restoring = false;
             // Apply by ID even if rows were removed or reordered while the editor was open.
             for (const value of values)
             {
-                if (value.pose) initial_placements.set(value.id, value.pose.slice());
-                else initial_placements.delete(value.id);
+                if (value.pose) applied.set(value.id, value.pose.slice());
+                else applied.delete(value.id);
             }
-            placement_automatic = false;
             updatePlacementStatus();
-            event.source.postMessage({type:'placement-saved', path:saved.path}, location.origin);
+            event.source.postMessage({type:'placement-saved', path:saved.path, activeOutput:output === element('map-output').value.trim()}, location.origin);
         }
         catch (error)
         {
@@ -398,19 +428,46 @@ window.addEventListener('message', async event =>
 
 async function loadSavedPlacements()
 {
+    selectPlacementOutput();
+    const serial = ++placement_restore_serial;
     const selection = registration_ids.slice();
     const output = element('map-output').value.trim();
-    if (selection.length < 2 || !output) return;
-    const saved = await api('registration/placements/load', registrationDraft());
-    if (output !== element('map-output').value.trim() || selection.join(',') !== registration_ids.join(',')) return;
-    let restored = 0;
-    saved.initial_guesses.forEach((pose, index) =>
+    placement_restoring = false;
+    if (selection.length < 2 || !output)
     {
-        if (pose) { initial_placements.set(selection[index], pose); restored++; }
-        else initial_placements.delete(selection[index]);
-    });
-    if (restored) placement_automatic = false;
-    updatePlacementStatus(); registrationControls();
-    notice(restored ? `Restored ${restored} placements from ${saved.path}` : 'No saved placements for the selected scans in this output folder.');
+        updatePlacementStatus();
+        registrationControls();
+        return false;
+    }
+    placement_restore_error = '';
+    placement_restoring = true;
+    updatePlacementStatus();
+    registrationControls();
+    try
+    {
+        const saved = await api('registration/placements/load', registrationDraft());
+        if (serial !== placement_restore_serial ||
+            output !== element('map-output').value.trim() || selection.join(',') !== registration_ids.join(',')) return false;
+        // Only selected scans are updated; removed scans remain saved on disk.
+        saved.initial_guesses.forEach((pose, index) =>
+        {
+            if (pose) initial_placements.set(selection[index], pose);
+            else initial_placements.delete(selection[index]);
+        });
+        return true;
+    }
+    catch (error)
+    {
+        if (serial === placement_restore_serial) placement_restore_error = error.message;
+        throw error;
+    }
+    finally
+    {
+        if (serial === placement_restore_serial)
+        {
+            placement_restoring = false;
+            updatePlacementStatus();
+            registrationControls();
+        }
+    }
 }
-action('placement-load', loadSavedPlacements);

@@ -376,11 +376,6 @@ namespace blk_core
                 project_.remove(_request.matches[1]);
                 reply(_response, {{"ok", true}});
             });
-            server_.Post("/api/name", [this](const httplib::Request &_request, httplib::Response &_response)
-            {
-                project_.rename(nlohmann::json::parse(_request.body).at("name"));
-                reply(_response, {{"ok", true}});
-            });
             server_.Post("/api/open-folder", [this](const httplib::Request &, httplib::Response &_response)
             {
                 const auto path = project_.snapshot().value("output_directory", "");
@@ -395,11 +390,6 @@ namespace blk_core
             {
                 shutdown_.store(true);
                 reply(_response, {{"ok", true}});
-            });
-            server_.Get("/api/export-project", [this](const httplib::Request &, httplib::Response &_response)
-            {
-                _response.set_header("Content-Disposition", "attachment; filename=project.json");
-                reply(_response, project_.snapshot());
             });
             server_.Get("/api/scan/([0-9a-f]{32})", [this](const httplib::Request &_request, httplib::Response &_response)
             {

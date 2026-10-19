@@ -77,7 +77,6 @@ int main()
                 blk_core::InstanceLock second(root / "lock");
                 require(first.acquired() && !second.acquired(), "Project lock failed");
                 blk_core::Project project(root);
-                project.rename("persistent project");
                 project.setOutput((root / "output").u8string());
                 blk_core::writeText(root / "synthetic.blk", "invalid");
                 const auto added = project.addPaths({(root / "synthetic.blk").u8string()});
@@ -93,11 +92,13 @@ int main()
                 });
             }
             auto manifest = nlohmann::json::parse(blk_core::readText(root / "project.json"));
+            manifest["name"] = "obsolete project name";
             manifest["jobs"].push_back({{"id", id}, {"name", "synthetic.blk"}, {"source_path", (root / "synthetic.blk").u8string()}, {"status", "running"}});
             blk_core::writeText(root / "project.json", manifest.dump());
             {
                 blk_core::Project project(root);
-                require(project.snapshot()["name"] == "persistent project", "Project persistence failed");
+                require(!project.snapshot().contains("name"), "Obsolete project name was restored");
+                require(!nlohmann::json::parse(blk_core::readText(root / "project.json")).contains("name"), "Obsolete project name was saved");
                 require(project.snapshot()["jobs"][0]["status"] == "interrupted", "Interrupted job recovery failed");
                 project.retry(id);
                 require(project.snapshot()["jobs"][0]["status"] == "ready", "Retry failed");

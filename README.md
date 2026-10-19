@@ -87,9 +87,12 @@ Only the moving item and reference are loaded, at **1/10** display density by de
 saves and verifies `initial_placements.json` in the chosen output folder before
 applying guesses. Edits are also autosaved; keep the editor open if saving fails.
 Removing, adding, or reordering scans preserves the other poses. To recover after
-closing the app, select the PLYs and output folder, then **Load saved placements**.
-Registration refuses to silently ignore saved poses. **Clear initial placements**
-explicitly selects automatic registration without deleting the saved JSON.
+closing the app, select the PLYs and output folder; saved placements restore automatically.
+Registration uses the saved poses for selected scans and refuses to silently ignore them.
+Scans without saved poses use automatic registration. Placements are scoped to the
+selected output folder; changing folders does not mix arrangements. Registration
+checks the saved poses before starting and stops if they cannot be read or the
+selection changes during that check.
 
 For disconnected results, **Arrange chunks** offers the same controls and autosaves
 `chunk_initial_placements.json`; reopening the same chunks restores those edits. **Register

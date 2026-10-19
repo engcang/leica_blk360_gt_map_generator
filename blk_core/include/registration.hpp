@@ -595,13 +595,6 @@ namespace blk_core
 
         static void verifySavedPlacements(const nlohmann::json &_body, const nlohmann::json &_paths, const std::filesystem::path &_directory)
         {
-            if (_body.value("ignore_saved_placements", false))
-            {
-                for (const auto &pose : _body.value("initial_guesses", nlohmann::json::array()))
-                    if (!pose.is_null())
-                        throw std::runtime_error("Automatic mode conflicts with supplied placements");
-                return;
-            }
             const auto doc = placementDocument(_directory / "initial_placements.json");
             const auto guesses = _body.value("initial_guesses", nlohmann::json::array());
             for (std::size_t i = 0; i < _paths.size(); ++i)
@@ -610,7 +603,7 @@ namespace blk_core
                 if (doc["poses"].contains(key) &&
                     ((i >= guesses.size() && !doc["poses"][key].is_null()) ||
                      (i < guesses.size() && guesses[i] != doc["poses"][key])))
-                    throw std::runtime_error("Saved placements differ from this selection. Load saved placements or explicitly choose Clear initial placements for automatic registration. No job was started.");
+                    throw std::runtime_error("Saved placements differ from this selection. Reselect the PLYs and their output folder to restore saved poses, then retry. No job was started.");
             }
         }
 

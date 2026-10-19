@@ -377,7 +377,7 @@
             else
             {
                 await saveBackup();
-                if(!window.opener||window.opener.closed)throw Error('Placements are saved on disk. Open Register, select these PLYs and output folder, then click Load saved placements.');
+                if(!window.opener||window.opener.closed)throw Error('Placements are saved on disk. Open Register, select these PLYs and output folder, saved placements will be restored automatically.');
                 window.opener.postMessage({type:'placement-save',items:values},location.origin);
             }
         }
@@ -387,7 +387,9 @@
     {
         if(e.origin!==location.origin||e.source!==window.opener)return;
         if(e.data?.type==='placement-input'){saveContext=e.data.context||null;initialize(e.data.items);}
-        if(e.data?.type==='placement-saved')$('save-status').textContent=`Saved on disk and applied: ${e.data.path}. Return to Register and click Register scans.`;
+        if(e.data?.type==='placement-saved')$('save-status').textContent=e.data.activeOutput === false
+            ? `Saved on disk: ${e.data.path}. Register currently has a different output folder selected. Select this placement folder to use these poses.`
+            : `Saved on disk and verified: ${e.data.path}. Return to Register and click Register scans.`;
         if(e.data?.type==='placement-error')$('error').textContent=e.data.error;
     });
     canvas.addEventListener('webglcontextlost',e=>{e.preventDefault();controller?.abort();$('error').textContent='Graphics context lost. Reload the placement editor.';$('apply').disabled=true;});

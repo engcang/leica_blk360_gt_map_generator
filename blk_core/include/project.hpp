@@ -38,7 +38,7 @@ namespace blk_core
             root_(std::move(_root))
         {
             std::filesystem::create_directories(root_);
-            state_ = {{"schema_version", 2}, {"name", "My scan project"}, {"units", "metres"}, {"output_directory", ""}, {"jobs", nlohmann::json::array()}, {"registration", {{"status", "not_started"}, {"edges", nlohmann::json::array()}, {"map_frame", "map"}}}};
+            state_ = {{"schema_version", 2}, {"units", "metres"}, {"output_directory", ""}, {"jobs", nlohmann::json::array()}, {"registration", {{"status", "not_started"}, {"edges", nlohmann::json::array()}, {"map_frame", "map"}}}};
             if (std::filesystem::exists(root_ / "project.json"))
             {
                 state_ = nlohmann::json::parse(readText(root_ / "project.json"));
@@ -63,6 +63,8 @@ namespace blk_core
                     }
                 }
             }
+            // Discard obsolete project names; input selections are explicit.
+            state_.erase("name");
             refreshCompletedLocked();
             omitCompleted(state_);
             // File browsing is session-only. Never restore a library or scan the output folder.
@@ -433,17 +435,6 @@ namespace blk_core
             }
             saveLocked();
         }
-        void rename(const std::string &_name)
-        {
-            if (_name.empty() || _name.size() > 200)
-            {
-                throw std::runtime_error("Project name must contain 1-200 bytes");
-            }
-            std::lock_guard<std::mutex> lock(mutex_);
-            state_["name"] = _name;
-            saveLocked();
-        }
-
     private:
         static bool refreshCompletedJob(nlohmann::json &_job)
         {

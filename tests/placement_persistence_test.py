@@ -90,6 +90,7 @@ def main():
             assert len(json.loads(saved_file.read_text(encoding='utf-8'))['poses'])==61
             # Silent loss must fail before a job/output review is created.
             rejected(api,'registration/start',{**subset,'initial_guesses':[None]*60})
+            rejected(api,'registration/start',{**subset,'initial_guesses':[None]*60,'ignore_saved_placements':True})
             assert not (output/'html_source').exists()
             assert not api('registration')['jobs']
             rejected(api,'registration/placements/save',{**subset,'initial_guesses':[[1,2,3]]*60})

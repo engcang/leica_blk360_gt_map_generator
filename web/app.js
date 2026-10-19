@@ -207,7 +207,7 @@ function renderCloud(cloud)
         view.textContent = 'View 3D ↗';
         view.className = 'view';
         actions.append(view);
-        actions.append(button('Add to map', () => { addRegistrationScans([cloud]); selectTab('register'); }));
+        actions.append(button('Add to map', async () => { await addRegistrationScans([cloud]); selectTab('register'); }));
     }
     else
     {
@@ -226,15 +226,13 @@ async function refresh()
     {
         project = await api('project');
         element('connection').textContent = '● Local connection · files read in place';
-        element('directory').textContent = `Project record: ${project.project_directory}`;
-        if (document.activeElement !== element('project-name')) element('project-name').value = project.name;
         for (const job of project.jobs) if (['running', 'queued'].includes(job.status)) conversion_ids.add(job.id);
         const selectedJobs = project.jobs.filter(job => conversion_ids.has(job.id));
         element('job-count').textContent = selectedJobs.length;
         const count = status => selectedJobs.filter(job => job.status === status).length;
         element('open-folder').disabled = !element('output-path').value.trim();
         element('summary').textContent = selectedJobs.length ? `${count('completed')} completed · ${count('ready') + count('queued')} waiting · ${count('running')} processing` : 'Selected scans will appear here.';
-        element('start').disabled = adding || !count('ready');
+        element('start').disabled = adding || !count('ready') || !element('output-path').value.trim();
         element('cancel').disabled = !project.running && !count('queued');
         const clouds = (project.point_clouds || []).filter(cloud => viewed_cloud_ids.has(cloud.id));
         element('cloud-count').textContent = clouds.length;
@@ -438,7 +436,7 @@ async function openCloudPaths(paths, registration = false)
     const result = await api('add-clouds', {paths});
     if (!registration) viewed_cloud_ids = new Set(result.clouds.map(cloud => cloud.id));
     await refresh();
-    if (registration) addRegistrationScans(result.clouds);
+    if (registration) await addRegistrationScans(result.clouds);
     selectTab(registration ? 'register' : 'clouds');
     if (result.errors.length) notice(result.errors.map(item => `${item.path}: ${item.error}`).join('\n'), true);
     else notice(result.clouds.length ? `${result.clouds.length} PLY files selected. No files copied.` : 'No PLY files found in this folder.');
@@ -475,6 +473,7 @@ action('use-folder', async () =>
     {
         element('map-output').value = path;
         saveRegistrationDraft();
+        await loadSavedPlacements();
     }
     else if (['ply-folder', 'registration-folder'].includes(browser_mode)) await openCloudPaths([path], browser_mode === 'registration-folder');
     else await addPaths([path]);
@@ -513,16 +512,11 @@ action('cancel', async () =>
     notice('Stop requested. The current compressed block will finish before cleanup.');
     await refresh();
 });
-action('save-name', async () =>
+action('open-folder', async () =>
 {
-    await api('name',
-    {
-        name: element('project-name').value.trim()
-    });
-    notice('Project name saved.');
+    await saveOutput();
+    await api('open-folder', {path: element('output-path').value.trim()});
 });
-action('open-folder', () => api('open-folder',
-{}));
 action('quit', async () =>
 {
     if ((project?.running || registration_state?.busy) && !confirm('Stop active conversion/registration work and quit?')) return;
@@ -532,6 +526,5 @@ action('quit', async () =>
     element('connection').textContent = 'App closed. You can close this tab.';
     element('start').disabled = element('cancel').disabled = true;
 });
-element('export').href = `/api/export-project?token=${token}`;
 document.addEventListener('DOMContentLoaded', refresh);
 setInterval(refresh, 1200);

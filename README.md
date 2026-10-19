@@ -71,7 +71,7 @@ click **Convert scans** to recreate it. Pending/interrupted work is retained for
 
 ### Register scans
 
-1. Add overlapping, individual PLY scans with **Use converted scans**, **Add PLY files**, **Add folder**, or **Add to map**.
+1. Add overlapping, individual PLY scans with **Add PLY files**, **Add folder**, or **Add to map**.
 2. Confirm acquisition order with **Up / Down**. The first scan defines the map frame.
 3. Choose a product base name and output folder. Use a separate folder for each registration result.
 4. Check the Python environment under **Registration setup**, then click **Register scans**.
@@ -84,11 +84,15 @@ The first item is fixed; **Next** uses the previous item as a reference. Right/m
 drag always pans the view. **Height cut** hides points above a shared Z height after
 placement transforms; **Show all** restores them without changing registration inputs.
 Only the moving item and reference are loaded, at **1/10** display density by default. **Use placements in Register**
-applies enabled guesses to the current input selection; then click **Register scans**.
-Changing the selection/order clears those guesses. **Clear initial placements**
-restores fully automatic registration.
+saves and verifies `initial_placements.json` in the chosen output folder before
+applying guesses. Edits are also autosaved; keep the editor open if saving fails.
+Removing, adding, or reordering scans preserves the other poses. To recover after
+closing the app, select the PLYs and output folder, then **Load saved placements**.
+Registration refuses to silently ignore saved poses. **Clear initial placements**
+explicitly selects automatic registration without deleting the saved JSON.
 
-For disconnected results, **Arrange chunks** offers the same controls. **Register
+For disconnected results, **Arrange chunks** offers the same controls and autosaves
+`chunk_initial_placements.json`; reopening the same chunks restores those edits. **Register
 placed chunks** resumes with chunk-local poses composed with the edited XYZ/yaw
 transforms. Unchecked chunks remain automatic. Original PLYs and internal chunk
 geometry are unchanged. Placements initialize Nano-GICP; acceptance still checks
@@ -113,7 +117,9 @@ Original PLYs remain where selected; they are not copied if stored elsewhere.
 into the first scan/map frame: `p_map = T_map_scan @ [x, y, z, 1]`, in metres.
 Keep the originals and preserve their paths relative to the JSON when moving a dataset.
 
-To reopen a result, choose **Open existing result → relative_poses.json**.
+Tabs start with empty selections and output paths. Only active jobs are shown automatically.
+To reopen a result, choose **Open existing result → relative_poses.json**
+(or **partial_chunks.json** for a previous disconnected job).
 Working caches live under the app's `projects/default/registration_records/`;
 completed result viewing and generation do not require those caches.
 Fine ICP saves completed pairs for **Resume** and reuses their final correspondences

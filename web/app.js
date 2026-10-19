@@ -9,6 +9,7 @@ let closed = false,
     last_cloud_signature = '',
     notice_timer, output_dirty = false;
 let viewed_cloud_ids = new Set();
+const conversion_ids = new Set();
 let project = null,
     browser_state = null,
     browser_mode = 'files',
@@ -227,10 +228,12 @@ async function refresh()
         element('connection').textContent = '● Local connection · files read in place';
         element('directory').textContent = `Project record: ${project.project_directory}`;
         if (document.activeElement !== element('project-name')) element('project-name').value = project.name;
-        if (!output_dirty) element('output-path').value = project.output_directory;
-        element('job-count').textContent = project.jobs.length;
-        const count = status => project.jobs.filter(job => job.status === status).length;
-        element('summary').textContent = project.jobs.length ? `${count('completed')} completed · ${count('ready') + count('queued')} waiting · ${count('running')} processing` : 'Selected scans will appear here.';
+        for (const job of project.jobs) if (['running', 'queued'].includes(job.status)) conversion_ids.add(job.id);
+        const selectedJobs = project.jobs.filter(job => conversion_ids.has(job.id));
+        element('job-count').textContent = selectedJobs.length;
+        const count = status => selectedJobs.filter(job => job.status === status).length;
+        element('open-folder').disabled = !element('output-path').value.trim();
+        element('summary').textContent = selectedJobs.length ? `${count('completed')} completed · ${count('ready') + count('queued')} waiting · ${count('running')} processing` : 'Selected scans will appear here.';
         element('start').disabled = adding || !count('ready');
         element('cancel').disabled = !project.running && !count('queued');
         const clouds = (project.point_clouds || []).filter(cloud => viewed_cloud_ids.has(cloud.id));
@@ -248,15 +251,15 @@ async function refresh()
                 element('clouds').append(empty);
             }
         }
-        const cloud_errors = project.point_cloud_errors || [];
+        const cloud_errors = viewed_cloud_ids.size ? (project.point_cloud_errors || []) : [];
         element('cloud-errors').hidden = !cloud_errors.length;
         element('cloud-errors').textContent = cloud_errors.map(item => `${item.path}: ${item.error}`).join('\n');
-        const signature = JSON.stringify(project.jobs);
+        const signature = JSON.stringify(selectedJobs);
         if (signature !== last_signature)
         {
             last_signature = signature;
-            element('jobs').replaceChildren(...project.jobs.map(renderJob));
-            if (!project.jobs.length)
+            element('jobs').replaceChildren(...selectedJobs.map(renderJob));
+            if (!selectedJobs.length)
             {
                 const empty = document.createElement('div');
                 empty.className = 'empty';
@@ -290,6 +293,7 @@ async function addPaths(paths)
         {
             paths
         });
+        for (const id of result.ids) conversion_ids.add(id);
         element('import-status').textContent = `${result.added} scans added · ${result.skipped} already selected · ${result.errors.length} errors. No files copied.`;
         if (result.errors.length) notice(result.errors.map(item => `${item.path}: ${item.error}`).join('\n'), true);
     }
@@ -385,7 +389,7 @@ async function openBrowser(mode)
     browser_mode = mode;
     const ply_mode = ['ply', 'ply-folder', 'registration-ply', 'registration-folder'].includes(mode);
     const output_mode = ['output', 'map-output'].includes(mode);
-    element('browser-title').textContent = mode === 'registration-result' ? 'Open relative_poses.json' : ply_mode ? 'Open existing PLY files' : output_mode ? 'Choose output folder' : mode === 'folder' ? 'Select a scan folder' : 'Select BLK files';
+    element('browser-title').textContent = mode === 'registration-result' ? 'Open relative_poses.json or partial_chunks.json' : ply_mode ? 'Open existing PLY files' : output_mode ? 'Choose output folder' : mode === 'folder' ? 'Select a scan folder' : 'Select BLK files';
     element('use-files').hidden = !['files', 'ply', 'registration-ply', 'registration-result'].includes(mode);
     element('select-all').parentElement.hidden = !['files', 'ply', 'registration-ply'].includes(mode);
     element('select-all-label').textContent = ply_mode ? 'Select all PLY files' : 'Select all BLK files';
@@ -393,10 +397,9 @@ async function openBrowser(mode)
     element('new-folder').hidden = !output_mode;
     element('use-folder').textContent = output_mode ? 'Use this output folder' : ply_mode ? 'Open PLY files in this folder' : 'Add this folder';
     element('browser').showModal();
-    let path = browser_state?.path || '';
-    if (ply_mode && project?.output_directory) path = project.output_directory;
+    let path = '';
+    if (mode === 'output') path = element('output-path').value.trim();
     if (mode === 'map-output' && element('map-output').value) path = element('map-output').value;
-    if (!path && project?.jobs.length) path = project.jobs[0].source_path.replace(/[\\/][^\\/]+$/, '');
     await browse(path);
 }
 action('pick-files', () => openBrowser('files'));
@@ -450,7 +453,9 @@ action('use-files', async () =>
         const result = await api('registration/import', {path: paths[0]});
         registration_visible_jobs.add(result.id);
         await refreshRegistration();
-        await api(`registration/review/${result.id}`, {});
+        const job = registration_state.jobs.find(item => item.id === result.id);
+        if (job?.status === 'completed') await api(`registration/review/${result.id}`, {});
+        else if (job?.chunks_available) await api(`registration/chunks/${result.id}`, {});
         return;
     }
     if (['ply', 'registration-ply'].includes(browser_mode)) await openCloudPaths(paths, browser_mode === 'registration-ply');
@@ -498,8 +503,7 @@ action('save-output', async () =>
 action('start', async () =>
 {
     await saveOutput();
-    await api('start',
-    {});
+    await api('start', {ids: [...conversion_ids]});
     await refresh();
 });
 action('cancel', async () =>

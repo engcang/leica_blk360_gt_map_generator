@@ -229,6 +229,14 @@ namespace blk_core
                 registration_.saveDraft(nlohmann::json::parse(_request.body));
                 reply(_response, {{"ok", true}});
             });
+            server_.Post("/api/registration/placements/save", [this](const httplib::Request &_request, httplib::Response &_response)
+            {
+                reply(_response, registration_.placements(nlohmann::json::parse(_request.body), true));
+            });
+            server_.Post("/api/registration/placements/load", [this](const httplib::Request &_request, httplib::Response &_response)
+            {
+                reply(_response, registration_.placements(nlohmann::json::parse(_request.body), false));
+            });
             server_.Post("/api/registration/cancel", [this](const httplib::Request &, httplib::Response &_response)
             {
                 registration_.cancel();
@@ -347,9 +355,10 @@ namespace blk_core
                 }
                 reply(_response, {{"path", path.u8string()}});
             });
-            server_.Post("/api/start", [this](const httplib::Request &, httplib::Response &_response)
+            server_.Post("/api/start", [this](const httplib::Request &_request, httplib::Response &_response)
             {
-                project_.queue();
+                const auto body = nlohmann::json::parse(_request.body);
+                project_.queue(body.value("ids", nlohmann::json()));
                 reply(_response, {{"ok", true}});
             });
             server_.Post("/api/cancel", [this](const httplib::Request &, httplib::Response &_response)

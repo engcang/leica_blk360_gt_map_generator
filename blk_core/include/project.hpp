@@ -255,6 +255,7 @@ namespace blk_core
             }
             sortPathsByModification(candidates);
             std::size_t added = 0, skipped = 0;
+            auto selected_ids = nlohmann::json::array();
             for (const auto &candidate : candidates)
             {
                 try
@@ -269,6 +270,7 @@ namespace blk_core
                         std::error_code error;
                         if (existing == path || std::filesystem::equivalent(existing, path, error))
                         {
+                            selected_ids.push_back(job.at("id"));
                             duplicate = true;
                             break;
                         }
@@ -284,6 +286,7 @@ namespace blk_core
                         refreshCloudsLocked();
                     }
                     state_["jobs"].push_back({{"id", newId()}, {"name", path.filename().u8string()}, {"source_path", path.u8string()}, {"bytes", std::filesystem::file_size(path)}, {"status", "ready"}, {"message", "Ready"}, {"progress", 0.0}, {"output_path", ""}, {"result", nullptr}});
+                    selected_ids.push_back(state_["jobs"].back().at("id"));
                     saveLocked();
                     ++added;
                 }
@@ -292,7 +295,7 @@ namespace blk_core
                     errors.push_back({{"path", candidate.u8string()}, {"error", error.what()}});
                 }
             }
-            return {{"added", added}, {"skipped", skipped}, {"errors", errors}};
+            return {{"added", added}, {"skipped", skipped}, {"errors", errors}, {"ids", selected_ids}};
         }
         void setOutput(const std::string &_path)
         {
@@ -310,9 +313,11 @@ namespace blk_core
             refreshCloudsLocked();
             saveLocked();
         }
-        void queue()
+        void queue(const nlohmann::json &_ids = nullptr)
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (!_ids.is_null() && !_ids.is_array())
+                throw std::runtime_error("Conversion IDs must be an array");
             refreshCompletedLocked();
             sortRecordsByModification(state_["jobs"], "source_path");
             const auto output_text = state_.value("output_directory", "");
@@ -333,6 +338,8 @@ namespace blk_core
             std::vector<std::pair<std::string, std::filesystem::path>> pending;
             for (const auto &job : state_["jobs"])
             {
+                if (!_ids.is_null() && std::find(_ids.begin(), _ids.end(), job.at("id")) == _ids.end())
+                    continue;
                 if (job["status"] != "ready")
                 {
                     continue;

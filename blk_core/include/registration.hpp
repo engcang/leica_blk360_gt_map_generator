@@ -98,6 +98,77 @@ namespace blk_core
             saveLocked();
         }
 
+        nlohmann::json placements(const nlohmann::json &_body, bool _save)
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (_body.contains("resume_id"))
+            {
+                const auto &job = findJob(state_, _body.at("resume_id").get<std::string>());
+                const auto directory = std::filesystem::u8path(job.at("output_path").get<std::string>()).parent_path();
+                const auto chunks = readJson(directory / "partial_chunks.json").at("chunks");
+                const auto file = directory / "chunk_initial_placements.json";
+                auto document = nlohmann::json{{"schema_version", 1}, {"chunks", chunks}, {"poses", nlohmann::json::object()}};
+                if (std::filesystem::exists(file))
+                {
+                    document = readJson(file);
+                    if (document.at("chunks") != chunks)
+                        throw std::runtime_error("Saved chunk placements refer to different chunks. Preserve the saved JSON before starting a new arrangement.");
+                }
+                auto values = nlohmann::json::array();
+                if (_save && _body.at("initial_guesses").size() != chunks.size())
+                    throw std::runtime_error("Chunk placement count changed");
+                for (std::size_t i = 0; i < chunks.size(); ++i)
+                {
+                    const auto key = chunks[i].at("key").get<std::string>();
+                    auto pose = _save ? _body.at("initial_guesses")[i] : document["poses"].value(key, nlohmann::json());
+                    validatePlacement(pose);
+                    document["poses"][key] = pose;
+                    values.push_back(pose);
+                }
+                if (_save)
+                {
+                    saveJson(file, document);
+                    if (readJson(file) != document)
+                        throw std::runtime_error("Chunk placement save verification failed");
+                }
+                return {{"path", file.u8string()}, {"initial_guesses", values}};
+            }
+            const auto directory_text = _body.at("output_directory").get<std::string>();
+            if (directory_text.empty())
+                throw std::runtime_error("Choose an output folder for placements");
+            const auto directory = std::filesystem::weakly_canonical(std::filesystem::absolute(std::filesystem::u8path(directory_text)));
+            const auto file = directory / "initial_placements.json";
+            auto document = placementDocument(file);
+            const auto &ids = _body.at("cloud_ids");
+            if (!ids.is_array() || ids.size() < 2)
+                throw std::runtime_error("Select at least two scans");
+            if (_save && (!_body.at("initial_guesses").is_array() || _body.at("initial_guesses").size() != ids.size()))
+                throw std::runtime_error("Placement count does not match the selected scans");
+            auto values = nlohmann::json::array();
+            for (std::size_t i = 0; i < ids.size(); ++i)
+            {
+                const auto cloud = project_.pointCloud(ids[i].get<std::string>());
+                const auto key = std::filesystem::weakly_canonical(std::filesystem::u8path(cloud.at("path").get<std::string>())).u8string();
+                if (_save)
+                {
+                    const auto &pose = _body.at("initial_guesses")[i];
+                    validatePlacement(pose);
+                    document["poses"][key] = pose;
+                }
+                auto pose = document["poses"].contains(key) ? document["poses"][key] : nlohmann::json();
+                validatePlacement(pose);
+                values.push_back(pose);
+            }
+            if (_save)
+            {
+                std::filesystem::create_directories(directory);
+                saveJson(file, document);
+                if (readJson(file) != document)
+                    throw std::runtime_error("Placement save verification failed");
+            }
+            return {{"path", file.u8string()}, {"initial_guesses", values}};
+        }
+
         nlohmann::json snapshot()
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -210,8 +281,17 @@ namespace blk_core
         {
             std::lock_guard<std::mutex> lock(mutex_);
             requireIdleLocked();
-            const auto path = std::filesystem::canonical(std::filesystem::u8path(_path));
-            const auto directory = path.parent_path();
+            auto path = std::filesystem::canonical(std::filesystem::u8path(_path));
+            const auto directory = std::filesystem::is_directory(path) ? path : path.parent_path();
+            if (std::filesystem::is_directory(path))
+                path = directory / "relative_poses.json";
+            for (const auto &job : state_["jobs"])
+            {
+                const auto output = std::filesystem::u8path(job.value("poses_path", "")).parent_path();
+                if (!output.empty() && std::filesystem::weakly_canonical(output) == directory &&
+                    (path.filename() == "relative_poses.json" || path.filename() == "partial_chunks.json"))
+                    return job.at("id").get<std::string>();
+            }
             if (path.filename() != "relative_poses.json" || !std::filesystem::is_regular_file(directory / "result_review_and_manage.html"))
             {
                 throw std::runtime_error("Select relative_poses.json beside result_review_and_manage.html");
@@ -389,6 +469,7 @@ namespace blk_core
                     for (const auto &pose : guesses)
                         validatePlacement(pose);
                 }
+                verifySavedPlacements(_body, paths, directory);
                 id = newId();
                 report = root_ / "registration_records" / id;
                 std::filesystem::create_directories(directory);
@@ -438,7 +519,11 @@ namespace blk_core
             saveJson(report / "config.json", config);
             auto &job = findJob(state_, id);
             job["status"] = "running";
-            job["stage"] = "Starting registration";
+            job["initial_placement_count"] = 0;
+            for (const auto &pose : config.value("initial_guesses", nlohmann::json::array()))
+                if (!pose.is_null())
+                    job["initial_placement_count"] = job["initial_placement_count"].get<int>() + 1;
+            job["stage"] = "Starting registration with " + std::to_string(job["initial_placement_count"].get<int>()) + " scan initial placements";
             job["additional_pairs"] = config["additional_pairs"];
             launchLocked(id, report, {state_.at("python").get<std::string>(), "-u", (scripts_ / "studio_worker.py").u8string(), "--run", (report / "config.json").u8string(), "--report", report.u8string()});
         }
@@ -498,6 +583,37 @@ namespace blk_core
         }
 
     private:
+        static nlohmann::json placementDocument(const std::filesystem::path &_file)
+        {
+            if (!std::filesystem::exists(_file))
+                return {{"schema_version", 1}, {"kind", "scan_initial_placements"}, {"units", "metres_radians"}, {"poses", nlohmann::json::object()}};
+            const auto doc = readJson(_file);
+            if (doc.value("schema_version", 0) != 1 || doc.value("kind", "") != "scan_initial_placements" || !doc.at("poses").is_object())
+                throw std::runtime_error("Invalid initial_placements.json; keep the file and choose another output folder");
+            return doc;
+        }
+
+        static void verifySavedPlacements(const nlohmann::json &_body, const nlohmann::json &_paths, const std::filesystem::path &_directory)
+        {
+            if (_body.value("ignore_saved_placements", false))
+            {
+                for (const auto &pose : _body.value("initial_guesses", nlohmann::json::array()))
+                    if (!pose.is_null())
+                        throw std::runtime_error("Automatic mode conflicts with supplied placements");
+                return;
+            }
+            const auto doc = placementDocument(_directory / "initial_placements.json");
+            const auto guesses = _body.value("initial_guesses", nlohmann::json::array());
+            for (std::size_t i = 0; i < _paths.size(); ++i)
+            {
+                const auto key = std::filesystem::weakly_canonical(std::filesystem::u8path(_paths[i].get<std::string>())).u8string();
+                if (doc["poses"].contains(key) &&
+                    ((i >= guesses.size() && !doc["poses"][key].is_null()) ||
+                     (i < guesses.size() && guesses[i] != doc["poses"][key])))
+                    throw std::runtime_error("Saved placements differ from this selection. Load saved placements or explicitly choose Clear initial placements for automatic registration. No job was started.");
+            }
+        }
+
         static void validatePairs(const std::string &_text,
                                   std::size_t _count)
         {

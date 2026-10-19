@@ -104,6 +104,12 @@ int main()
                 const auto target = root / "output" / "synthetic.ply";
                 std::filesystem::create_directory(root / "output");
                 blk_core::writeText(target, "original");
+                project.queue(nlohmann::json::array());
+                require(project.snapshot()["jobs"][0]["status"] == "ready", "Unselected conversion was queued");
+                expectError([&project]
+                {
+                    project.queue("invalid");
+                });
                 expectError([&project]
                 {
                     project.queue();

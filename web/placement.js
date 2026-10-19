@@ -11,6 +11,7 @@
     let items = [], selected = 1, reference = 0, loading = false, generation = 0, controller = null;
     let drag = null, frame = 0, extent = 10, launched = false;
     let interactionMode = 'view', heightCut = null;
+    let saveContext = null, saveTimer = null, saveQueue = Promise.resolve(), dirty = false;
     const cache = new Map(), undo = [];
     const camera = {target: [0, 0, 0], distance: 20, azimuth: -Math.PI / 2, elevation: Math.PI / 2 - .001};
     const tanHalf = Math.tan(25 * Math.PI / 180);
@@ -247,7 +248,7 @@
         requestDraw();
     }
     function remember(){undo.push({index:selected,pose:items[selected].pose.slice(),enabled:items[selected].enabled});if(undo.length>100)undo.shift();}
-    function changed(){items[selected].enabled=true;$('save-status').textContent='Unsaved placement changes';sync();}
+    function changed(){items[selected].enabled=true;backupChanged();sync();}
     function choose(index,advance=false,inherit=true)
     {
         if(advance)reference=selected;
@@ -260,7 +261,7 @@
     {
         if(items.length||!Array.isArray(input)||input.length<2)return;
         items=input.map(item=>({...item,enabled:item.pose!==null,pose:item.pose?item.pose.slice():[0,0,0,0]}));
-        items[0].pose=[0,0,0,0];items[0].enabled=true;
+        if (!items[0].enabled) { items[0].pose=[0,0,0,0];items[0].enabled=true; }
         for(const [i,item] of items.entries())
         {
             for(const id of ['moving','reference']){const option=document.createElement('option');option.value=i;option.textContent=item.name;$(id).append(option);}
@@ -270,15 +271,15 @@
     }
     $('moving').onchange=e=>choose(Number(e.target.value));$('reference').onchange=e=>{reference=Number(e.target.value);sync();loadVisible(true);};
     $('previous').onclick=()=>choose(Math.max(0,selected-1));$('next').onclick=()=>choose(Math.min(items.length-1,selected+1),true);
-    $('use').onchange=()=>{remember();items[selected].enabled=$('use').checked;sync();};
+    $('use').onchange=()=>{remember();items[selected].enabled=$('use').checked;backupChanged();sync();};
     for(const [i,id] of ['x','y','z','yaw'].entries())$(id).onchange=()=>
     {
         const value=Number($(id).value)*(i===3?Math.PI/180:1);
         if(!Number.isFinite(value)||Math.abs(value)>1e6){$('error').textContent='Enter a finite placement value within supported bounds.';sync();return;}
         remember();items[selected].pose[i]=value;changed();
     };
-    $('undo').onclick=()=>{const step=undo.pop();if(!step)return;items[step.index].pose=step.pose;items[step.index].enabled=step.enabled;choose(step.index,false,false);};
-    $('zero').onclick=()=>{remember();items[selected].pose=[0,0,0,0];items[selected].enabled=false;sync();};
+    $('undo').onclick=()=>{const step=undo.pop();if(!step)return;items[step.index].pose=step.pose;items[step.index].enabled=step.enabled;choose(step.index,false,false);backupChanged();};
+    $('zero').onclick=()=>{remember();items[selected].pose=[0,0,0,0];items[selected].enabled=false;backupChanged();sync();};
     $('top').onclick=()=>{camera.azimuth=-Math.PI/2;camera.elevation=Math.PI/2-.001;requestDraw();};
     $('oblique').onclick=()=>{camera.azimuth=-Math.PI/4;camera.elevation=Math.PI/5;requestDraw();};
     $('fit').onclick=fit;$('projection').onchange=requestDraw;$('density').onchange=()=>loadVisible(false);
@@ -332,6 +333,34 @@
         else camera.target=add(camera.target,basis().back,.5*Math.max(.0001,extent*.001)*Math.max(-1000,Math.min(1000,delta)));
         requestDraw();
     },{passive:false});
+    function backupChanged()
+    {
+        dirty = true;
+        $('save-status').textContent = 'Saving placement changes...';
+        clearTimeout(saveTimer);
+        if (saveContext) saveTimer = setTimeout(() => saveBackup().catch(error => $('error').textContent = error.message), 300);
+    }
+    function saveBackup()
+    {
+        clearTimeout(saveTimer);
+        const values = items.map(item => item.enabled ? item.pose.slice() : null);
+        saveQueue = saveQueue.catch(() => {}).then(async () =>
+        {
+            if (!saveContext) throw Error('Placement save context is unavailable. Keep this editor open.');
+            const result = await api('registration/placements/save', {...saveContext, initial_guesses:values});
+            if (JSON.stringify(values) === JSON.stringify(items.map(item => item.enabled ? item.pose : null)))
+            {
+                dirty = false;
+                $('save-status').textContent = `Saved on disk: ${result.path}. ${job ? 'Click Register placed chunks to apply.' : 'Click Use placements in Register to apply.'}`;
+            }
+            return result;
+        });
+        return saveQueue;
+    }
+    window.addEventListener('beforeunload', event =>
+    {
+        if (dirty) { event.preventDefault(); event.returnValue = ''; }
+    });
     $('apply').onclick=async()=>
     {
         try
@@ -340,13 +369,15 @@
             if(job)
             {
                 $('apply').disabled=true;
+                await saveBackup();
                 await api('registration/start',{resume_id:job,chunk_initial_guesses:Object.fromEntries(values.map(v=>[v.id,v.pose]))});
-                launched=true;sync();$('apply').disabled=true;$('save-status').textContent='Registration started. Monitor Results and progress in the Register tab.';
+                launched=true;dirty=false;sync();$('apply').disabled=true;$('save-status').textContent='Registration started. Monitor Results and progress in the Register tab.';
                 window.opener?.postMessage({type:'chunk-placement-started'},location.origin);
             }
             else
             {
-                if(!window.opener||window.opener.closed)throw Error('The Register tab was closed. Reopen the editor from Register.');
+                await saveBackup();
+                if(!window.opener||window.opener.closed)throw Error('Placements are saved on disk. Open Register, select these PLYs and output folder, then click Load saved placements.');
                 window.opener.postMessage({type:'placement-save',items:values},location.origin);
             }
         }
@@ -355,14 +386,21 @@
     window.addEventListener('message',e=>
     {
         if(e.origin!==location.origin||e.source!==window.opener)return;
-        if(e.data?.type==='placement-input')initialize(e.data.items);
-        if(e.data?.type==='placement-saved')$('save-status').textContent='Initial placements applied. Return to Register and click Register scans.';
+        if(e.data?.type==='placement-input'){saveContext=e.data.context||null;initialize(e.data.items);}
+        if(e.data?.type==='placement-saved')$('save-status').textContent=`Saved on disk and applied: ${e.data.path}. Return to Register and click Register scans.`;
         if(e.data?.type==='placement-error')$('error').textContent=e.data.error;
     });
     canvas.addEventListener('webglcontextlost',e=>{e.preventDefault();controller?.abort();$('error').textContent='Graphics context lost. Reload the placement editor.';$('apply').disabled=true;});
     new ResizeObserver(requestDraw).observe(canvas);
     window.blkPlacement={items:()=>items,poseMatrix,multiply,fromRows,choose,fit,camera};
-    if(job)api('registration/placement/'+encodeURIComponent(job)).then(result=>{if(result.busy)throw Error('Stop the current registration before arranging chunks.');initialize(result.items);}).catch(error=>$('error').textContent=error.message);
+    if(job)api('registration/placement/'+encodeURIComponent(job)).then(async result=>
+    {
+        if(result.busy)throw Error('Stop the current registration before arranging chunks.');
+        saveContext={resume_id:job};
+        const saved=await api('registration/placements/load',saveContext);
+        saved.initial_guesses.forEach((pose,i)=>{if(pose)result.items[i].pose=pose;});
+        initialize(result.items);
+    }).catch(error=>$('error').textContent=error.message);
     else if(window.opener)window.opener.postMessage({type:'placement-ready'},location.origin);
     else $('error').textContent='Open this editor from the Register tab.';
 })();

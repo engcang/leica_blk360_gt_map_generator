@@ -43,13 +43,13 @@
         </div>
         <div id="panel-register" role="tabpanel" aria-labelledby="tab-register" hidden>
         <section id="registration" class="queue-panel" aria-label="Scan registration">
-            <div class="queue-toolbar"><div><h2>Register scans <span id="registration-count">0</span></h2><p>Align overlapping scans and build a reference map.</p></div><div class="conversion-actions"><button id="registration-converted" class="secondary">Use converted scans</button><button id="registration-pick" class="secondary">Add PLY files</button><button id="registration-folder" class="secondary">Add folder</button></div></div>
+            <div class="queue-toolbar"><div><h2>Register scans <span id="registration-count">0</span></h2><p>Align overlapping scans and build a reference map.</p></div><div class="conversion-actions"><button id="registration-pick" class="secondary">Add PLY files</button><button id="registration-folder" class="secondary">Add folder</button></div></div>
             <section class="registration-results" aria-label="Registration results">
                 <div class="results-heading"><div><h2>Results and progress</h2><p>Review alignment, generate maps, and open your output files here.</p></div><button id="open-registration-result" class="secondary">Open existing result</button></div>
                 <div id="registration-jobs"><p class="results-empty">Your current result will appear here. To revisit a previous result, open its relative_poses.json.</p></div>
             </section>
             <p class="hint">Files are added by modification time, oldest first. Adding more files re-sorts the selection; Up / Down can override this order. Review acquisition order below. Use individual scanner-frame scans with substantial overlap. KISS-Matcher initializes alignment, Nano-GICP aligns scans, and 1 cm ICP refines the poses. Sources are read in place and preserved.</p>
-            <div class="registration-actions"><button id="placement-open" class="secondary">Arrange PLY scans (optional)</button><button id="placement-clear" class="quiet">Clear initial placements</button><span id="placement-status" class="hint">No initial placements. Automatic registration is unchanged.</span></div>
+            <div class="registration-actions"><button id="placement-open" class="secondary">Arrange PLY scans (optional)</button><button id="placement-load" class="secondary" disabled>Load saved placements</button><button id="placement-clear" class="quiet">Clear initial placements</button><span id="placement-status" class="hint">No placements loaded. Select scans and an output folder to arrange or load saved placements.</span></div>
             <div id="registration-scans"><div class="empty">Select PLY files or a folder to begin. Input selections are not restored.</div></div>
             <div class="registration-settings">
                 <label>Map name<input id="map-name" value="reference_map" maxlength="100" aria-label="Map name"></label>

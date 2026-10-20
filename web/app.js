@@ -37,6 +37,7 @@ function selectTab(name, focus = false)
         if (active && focus) tab.focus();
     }
     element('open-folder').hidden = name !== 'convert';
+    if (name === 'additional') element('additional-log').scrollTop = element('additional-log').scrollHeight;
     if (name === 'register') element('registration-log').scrollTop = element('registration-log').scrollHeight;
 }
 for (const tab of document.querySelectorAll('[role="tab"]'))
@@ -320,7 +321,7 @@ async function browse(path = '')
     for (const id of ['browser-path', 'browser-go', 'browser-up', 'use-folder', 'new-folder']) element(id).disabled = true;
     try
     {
-        browser_state = await api('browse?path=' + encodeURIComponent(path) + (browser_mode === 'registration-result' ? '&type=json' : ['ply', 'ply-folder', 'registration-ply', 'registration-folder'].includes(browser_mode) ? '&type=ply' : ''));
+        browser_state = await api('browse?path=' + encodeURIComponent(path) + (['registration-result', 'additional-reference', 'additional-result'].includes(browser_mode) ? '&type=json' : ['ply', 'ply-folder', 'registration-ply', 'registration-folder', 'additional-ply', 'additional-folder'].includes(browser_mode) ? '&type=ply' : ''));
         selected.clear();
         element('browser-path').value = browser_state.path;
         element('browser-up').disabled = browser_state.parent === browser_state.path;
@@ -335,7 +336,7 @@ async function browse(path = '')
         const rows = [];
         for (const entry of browser_state.entries)
         {
-            if (!entry.directory && !['files', 'ply', 'registration-ply', 'registration-result'].includes(browser_mode)) continue;
+            if (!entry.directory && !['files', 'ply', 'registration-ply', 'registration-result', 'additional-ply', 'additional-reference', 'additional-result'].includes(browser_mode)) continue;
             const row = document.createElement('div');
             row.className = 'browser-entry';
             if (entry.directory)
@@ -383,23 +384,24 @@ async function browse(path = '')
 
 function updateSelection()
 {
-    element('use-files').disabled = !selected.size || (browser_mode === 'registration-result' && selected.size !== 1);
-    element('use-files').textContent = `${browser_mode === 'registration-result' ? 'Open selected poses JSON' : ['ply', 'ply-folder', 'registration-ply', 'registration-folder'].includes(browser_mode) ? 'Open selected PLY files' : 'Add selected files'}${selected.size ? ` (${selected.size})` : ''}`;
+    element('use-files').disabled = !selected.size || (['registration-result', 'additional-reference', 'additional-result'].includes(browser_mode) && selected.size !== 1);
+    element('use-files').textContent = `${['registration-result', 'additional-reference', 'additional-result'].includes(browser_mode) ? 'Open selected poses JSON' : ['ply', 'ply-folder', 'registration-ply', 'registration-folder', 'additional-ply', 'additional-folder'].includes(browser_mode) ? 'Open selected PLY files' : 'Add selected files'}${selected.size ? ` (${selected.size})` : ''}`;
 }
 async function openBrowser(mode)
 {
     browser_mode = mode;
-    const ply_mode = ['ply', 'ply-folder', 'registration-ply', 'registration-folder'].includes(mode);
-    const output_mode = ['output', 'map-output'].includes(mode);
-    element('browser-title').textContent = mode === 'registration-result' ? 'Open relative_poses.json or partial_chunks.json' : ply_mode ? 'Open existing PLY files' : output_mode ? 'Choose output folder' : mode === 'folder' ? 'Select a scan folder' : 'Select BLK files';
-    element('use-files').hidden = !['files', 'ply', 'registration-ply', 'registration-result'].includes(mode);
-    element('select-all').parentElement.hidden = !['files', 'ply', 'registration-ply'].includes(mode);
+    const ply_mode = ['ply', 'ply-folder', 'registration-ply', 'registration-folder', 'additional-ply', 'additional-folder'].includes(mode);
+    const output_mode = ['output', 'map-output', 'additional-output'].includes(mode);
+    element('browser-title').textContent = mode === 'additional-reference' ? 'Open reference relative_poses.json' : ['registration-result', 'additional-result'].includes(mode) ? 'Open relative_poses.json or partial_chunks.json' : ply_mode ? 'Open existing PLY files' : output_mode ? 'Choose output folder' : mode === 'folder' ? 'Select a scan folder' : 'Select BLK files';
+    element('use-files').hidden = !['files', 'ply', 'registration-ply', 'registration-result', 'additional-ply', 'additional-reference', 'additional-result'].includes(mode);
+    element('select-all').parentElement.hidden = !['files', 'ply', 'registration-ply', 'additional-ply'].includes(mode);
     element('select-all-label').textContent = ply_mode ? 'Select all PLY files' : 'Select all BLK files';
-    element('use-folder').hidden = ['ply', 'registration-ply', 'registration-result'].includes(mode);
+    element('use-folder').hidden = ['ply', 'registration-ply', 'registration-result', 'additional-ply', 'additional-reference', 'additional-result'].includes(mode);
     element('new-folder').hidden = !output_mode;
     element('use-folder').textContent = output_mode ? 'Use this output folder' : ply_mode ? 'Open PLY files in this folder' : 'Add this folder';
     element('browser').showModal();
     let path = '';
+    if (mode === 'additional-output') path = element('additional-output').value.trim();
     if (mode === 'output') path = element('output-path').value.trim();
     if (mode === 'map-output' && element('map-output').value) path = element('map-output').value;
     await browse(path);
@@ -450,10 +452,13 @@ action('use-files', async () =>
 {
     const paths = [...selected];
     element('browser').close();
-    if (browser_mode === 'registration-result')
+    if (browser_mode === 'additional-reference') { await loadAdditionalReference(paths[0]); return; }
+    if (browser_mode === 'additional-ply') { await addAdditionalPaths(paths); return; }
+    if (['registration-result', 'additional-reference', 'additional-result'].includes(browser_mode))
     {
         const result = await api('registration/import', {path: paths[0]});
-        registration_visible_jobs.add(result.id);
+        if (browser_mode === 'additional-result') additional_visible_jobs.add(result.id);
+        else registration_visible_jobs.add(result.id);
         await refreshRegistration();
         const job = registration_state.jobs.find(item => item.id === result.id);
         if (job?.status === 'completed') await api(`registration/review/${result.id}`, {});
@@ -468,6 +473,8 @@ action('use-folder', async () =>
     if (!browser_state) return;
     const path = browser_state.path;
     element('browser').close();
+    if (browser_mode === 'additional-output') { element('additional-output').value = path; await loadAdditionalPlacements(); return; }
+    if (browser_mode === 'additional-folder') { await addAdditionalPaths([path]); return; }
     if (browser_mode === 'output')
     {
         element('output-path').value = path;

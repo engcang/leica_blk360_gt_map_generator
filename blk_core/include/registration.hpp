@@ -98,17 +98,36 @@ namespace blk_core
             saveLocked();
         }
 
+        nlohmann::json reference(const nlohmann::json &_body)
+        {
+            const auto reference = readReference(_body);
+            auto items = nlohmann::json::array();
+            for (const auto &scan : reference.at("scans"))
+            {
+                const auto imported = project_.addPointClouds({scan.at("path").get<std::string>()});
+                if (!imported.at("errors").empty() || imported.at("clouds").size() != 1)
+                    throw std::runtime_error("Cannot read reference PLY: " + scan.at("path").get<std::string>());
+                const auto &cloud = imported.at("clouds")[0];
+                items.push_back({{"name", cloud.at("name")}, {"points", cloud.at("valid_points")}, {"base", scan.at("transform_map_from_scan")}, {"url", "/api/placement-sample/" + cloud.at("id").get<std::string>()}});
+            }
+            return {{"path", reference.at("path")}, {"sha256", reference.at("sha256")}, {"name", reference.at("name")}, {"scans", reference.at("scans")}, {"item", {{"id", "reference"}, {"name", "Fixed reference map"}, {"pose", {0, 0, 0, 0}}, {"scans", items}}}};
+        }
+
         nlohmann::json placements(const nlohmann::json &_body, bool _save)
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (_body.contains("reference_poses"))
+                return additionalPlacements(_body, _save);
             if (_body.contains("resume_id"))
             {
                 const auto &job = findJob(state_, _body.at("resume_id").get<std::string>());
                 const auto directory = std::filesystem::u8path(job.at("output_path").get<std::string>()).parent_path();
                 const auto chunks = readJson(directory / "partial_chunks.json").at("chunks");
-                if (_save) requireIdleLocked();
+                if (_save)
+                    requireIdleLocked();
                 auto keys = nlohmann::json::array();
-                for (const auto &chunk : chunks) keys.push_back(chunk.at("key"));
+                for (const auto &chunk : chunks)
+                    keys.push_back(chunk.at("key"));
                 if ((_save && !_body.contains("chunk_keys")) ||
                     (_body.contains("chunk_keys") && _body.at("chunk_keys") != keys))
                     throw std::runtime_error("Chunks changed; reopen Arrange chunks before editing");
@@ -180,7 +199,9 @@ namespace blk_core
             std::lock_guard<std::mutex> lock(mutex_);
             auto result = state_;
             result["busy"] = busy_;
+            result["log_job_id"] = active_id_;
             result["individual_scan_refinement_option"] = true;
+            result["additional_registration"] = true;
             for (auto &entry : result["jobs"])
             {
                 if (!entry.contains("poses_path"))
@@ -448,6 +469,21 @@ namespace blk_core
                 }
                 nlohmann::json paths = nlohmann::json::array();
                 nlohmann::json scans = nlohmann::json::array();
+                nlohmann::json reference;
+                if (_body.contains("reference_poses"))
+                {
+                    reference = readReference(_body);
+                    if (_body.at("cloud_ids").empty())
+                        throw std::runtime_error("Select at least one new PLY scan");
+                    for (const auto &scan : reference.at("scans"))
+                    {
+                        paths.push_back(scan.at("path"));
+                        scans.push_back({{"name", scan.at("name")}, {"path", scan.at("path")}});
+                    }
+                    const auto saved = additionalPlacements(_body, false);
+                    if (!_body.contains("initial_guesses") || _body.at("initial_guesses") != saved.at("initial_guesses"))
+                        throw std::runtime_error("Saved additional placements changed. Read them before starting.");
+                }
                 for (const auto &cloud_id : _body.at("cloud_ids"))
                 {
                     const auto cloud = project_.pointCloud(cloud_id.get<std::string>());
@@ -468,7 +504,7 @@ namespace blk_core
                 validatePairs(_body.value("additional_pairs", ""), paths.size());
                 if (_body.contains("chunk_initial_guesses"))
                     throw std::runtime_error("Chunk placements require an existing registration");
-                if (_body.contains("initial_guesses"))
+                if (_body.contains("initial_guesses") && reference.is_null())
                 {
                     const auto &guesses = _body.at("initial_guesses");
                     if (!guesses.is_array() || guesses.size() != paths.size())
@@ -476,7 +512,8 @@ namespace blk_core
                     for (const auto &pose : guesses)
                         validatePlacement(pose);
                 }
-                verifySavedPlacements(_body, paths, directory);
+                if (reference.is_null())
+                    verifySavedPlacements(_body, paths, directory);
                 id = newId();
                 report = root_ / "registration_records" / id;
                 std::filesystem::create_directories(directory);
@@ -490,12 +527,20 @@ namespace blk_core
                 }
                 config = {{"name", name}, {"paths", paths}, {"output_path", target.u8string()}, {"poses_path", poses.u8string()}, {"review_directory", review.u8string()}, {"voxel_m", voxel}, {"additional_pairs", _body.value("additional_pairs", "")}};
                 state_["jobs"].push_back({{"id", id}, {"name", name}, {"scans", scans}, {"voxel_m", voxel}, {"output_path", target.u8string()}, {"poses_path", poses.u8string()}, {"review_path", (review / "result_review_and_manage.html").u8string()}, {"report_directory", report.u8string()}});
+                if (!reference.is_null())
+                {
+                    config["reference_poses"] = reference.at("path");
+                    config["reference_sha256"] = reference.at("sha256");
+                    config["additional_initial_guesses"] = _body.at("initial_guesses");
+                    state_["jobs"].back()["kind"] = "additional";
+                    state_["jobs"].back()["new_scan_count"] = _body.at("cloud_ids").size();
+                }
             }
             if (std::filesystem::exists(std::filesystem::u8path(config.at("output_path").get<std::string>())))
             {
                 throw std::runtime_error("Map PLY already exists; open it from View saved point clouds or use a new map name");
             }
-            if (_body.contains("initial_guesses"))
+            if (_body.contains("initial_guesses") && !config.contains("reference_poses"))
             {
                 const auto &guesses = _body.at("initial_guesses");
                 if (!guesses.is_array() || guesses.size() != config.at("paths").size())
@@ -526,6 +571,8 @@ namespace blk_core
                 config["manual_chunks"] = manifest.at("chunks");
                 config["refine_individual_scans"] = _body.value("refine_individual_scans", false);
             }
+            if (config.contains("reference_poses") && config.value("refine_individual_scans", false))
+                throw std::runtime_error("Additional registration keeps the reference map fixed; individual scan refinement is unavailable");
             config["review_only"] = _body.value("review_only", false);
             saveJson(report / "config.json", config);
             auto &job = findJob(state_, id);
@@ -535,6 +582,16 @@ namespace blk_core
                 if (!pose.is_null())
                     job["initial_placement_count"] = job["initial_placement_count"].get<int>() + 1;
             job["stage"] = "Starting registration with " + std::to_string(job["initial_placement_count"].get<int>()) + " scan initial placements";
+            if (config.contains("reference_poses"))
+            {
+                int count = 0;
+                const auto &guesses = config.at("additional_initial_guesses");
+                for (std::size_t i = 1; i < guesses.size(); ++i)
+                    if (!guesses[i].is_null())
+                        ++count;
+                job["initial_placement_count"] = count;
+                job["stage"] = config.contains("manual_chunks") ? "Starting rigid chunk extension of the fixed reference map" : "Extending the fixed reference map with " + std::to_string(count) + " saved new-scan placements";
+            }
             job["additional_pairs"] = config["additional_pairs"];
             launchLocked(id, report, {state_.at("python").get<std::string>(), "-u", (scripts_ / "studio_worker.py").u8string(), "--run", (report / "config.json").u8string(), "--report", report.u8string()});
         }
@@ -594,6 +651,115 @@ namespace blk_core
         }
 
     private:
+        nlohmann::json readReference(const nlohmann::json &_body)
+        {
+            const auto path = std::filesystem::canonical(std::filesystem::u8path(_body.at("reference_poses").get<std::string>()));
+            const auto manifest = readJson(path);
+            if (manifest.value("units", "") != "metres" || !manifest.at("scans").is_array() || manifest.at("scans").empty())
+                throw std::runtime_error("Select a BLK Studio relative_poses.json with original PLY files available");
+            std::atomic<bool> cancelled(false);
+            const auto hash = hashFile(path, cancelled);
+            if (_body.contains("reference_sha256") && _body.at("reference_sha256") != hash)
+                throw std::runtime_error("Reference poses changed; select the reference again");
+            auto scans = nlohmann::json::array();
+            for (const auto &scan : manifest.at("scans"))
+            {
+                const auto source = std::filesystem::canonical(path.parent_path() / std::filesystem::u8path(scan.at("file").get<std::string>()));
+                for (const auto &previous : scans)
+                    if (std::filesystem::equivalent(source, std::filesystem::u8path(previous.at("path").get<std::string>())))
+                        throw std::runtime_error("Duplicate reference PLY source");
+                const auto &matrix = scan.at("transform_map_from_scan");
+                if (!matrix.is_array() || matrix.size() != 4)
+                    throw std::runtime_error("Invalid reference transform");
+                for (const auto &row : matrix)
+                {
+                    if (!row.is_array() || row.size() != 4)
+                        throw std::runtime_error("Invalid reference transform");
+                    for (const auto &value : row)
+                        if (!value.is_number() || !std::isfinite(value.get<double>()))
+                            throw std::runtime_error("Invalid reference transform");
+                }
+                for (int row = 0; row < 4; ++row)
+                    if (std::abs(matrix[3][row].get<double>() - (row == 3 ? 1. : 0.)) > 1e-8)
+                        throw std::runtime_error("Reference transform must be rigid SE(3)");
+                for (int row = 0; row < 3; ++row)
+                    for (int column = 0; column < 3; ++column)
+                    {
+                        double value = 0.;
+                        for (int k = 0; k < 3; ++k)
+                            value += matrix[k][row].get<double>() * matrix[k][column].get<double>();
+                        if (std::abs(value - (row == column ? 1. : 0.)) > 1e-6)
+                            throw std::runtime_error("Reference transform must be rigid SE(3)");
+                    }
+                const auto m = [&matrix](int row, int column)
+                {
+                    return matrix[row][column].get<double>();
+                };
+                const double determinant = m(0, 0) * (m(1, 1) * m(2, 2) - m(1, 2) * m(2, 1)) - m(0, 1) * (m(1, 0) * m(2, 2) - m(1, 2) * m(2, 0)) + m(0, 2) * (m(1, 0) * m(2, 1) - m(1, 1) * m(2, 0));
+                if (std::abs(determinant - 1.) > 1e-6)
+                    throw std::runtime_error("Reference transform must be rigid SE(3)");
+                if (inspectPly(source).at("valid_points") != scan.at("points") ||
+                    !std::regex_match(scan.at("sha256").get<std::string>(), std::regex("[0-9a-f]{64}")))
+                    throw std::runtime_error("Reference PLY metadata does not match the saved result");
+                scans.push_back({{"path", source.u8string()}, {"name", source.filename().u8string()}, {"transform_map_from_scan", matrix}});
+            }
+            return {{"path", path.u8string()}, {"sha256", hash}, {"name", manifest.value("result_name", "reference_map")}, {"scans", scans}};
+        }
+
+        nlohmann::json additionalPlacements(const nlohmann::json &_body, bool _save)
+        {
+            if (_save)
+                requireIdleLocked();
+            const auto reference = readReference(_body);
+            const auto output = _body.at("output_directory").get<std::string>();
+            if (output.empty())
+                throw std::runtime_error("Choose a separate output folder");
+            const auto directory = std::filesystem::weakly_canonical(std::filesystem::absolute(std::filesystem::u8path(output)));
+            if (directory == std::filesystem::u8path(reference.at("path").get<std::string>()).parent_path())
+                throw std::runtime_error("Choose a separate output folder to preserve the reference result");
+            const auto file = directory / "additional_initial_placements.json";
+            auto document = nlohmann::json{{"schema_version", 1}, {"references", nlohmann::json::object()}};
+            if (std::filesystem::exists(file))
+                document = readJson(file);
+            const auto key = reference.at("sha256").get<std::string>();
+            if (!document.at("references").contains(key))
+                document["references"][key] = {{"poses", nlohmann::json::object()}};
+            auto &entry = document["references"][key];
+            entry["reference_poses"] = reference.at("path");
+            const auto &ids = _body.at("cloud_ids");
+            if (!ids.is_array() || ids.empty())
+                throw std::runtime_error("Select at least one new PLY scan");
+            auto values = nlohmann::json::array({nlohmann::json::array({0, 0, 0, 0})});
+            if (_save && (_body.at("initial_guesses").size() != ids.size() + 1 || _body.at("initial_guesses")[0] != values[0]))
+                throw std::runtime_error("Reference is fixed; placement selection changed");
+            for (std::size_t i = 0; i < ids.size(); ++i)
+            {
+                const auto cloud = project_.pointCloud(ids[i].get<std::string>());
+                const auto path = std::filesystem::canonical(std::filesystem::u8path(cloud.at("path").get<std::string>()));
+                for (const auto &scan : reference.at("scans"))
+                    if (std::filesystem::equivalent(path, std::filesystem::u8path(scan.at("path").get<std::string>())))
+                        throw std::runtime_error("A selected new scan already belongs to the reference map");
+                const auto source = path.u8string();
+                if (_save)
+                {
+                    const auto &pose = _body.at("initial_guesses")[i + 1];
+                    validatePlacement(pose);
+                    entry["poses"][source] = pose;
+                }
+                auto pose = entry["poses"].value(source, nlohmann::json());
+                validatePlacement(pose);
+                values.push_back(pose);
+            }
+            if (_save)
+            {
+                std::filesystem::create_directories(directory);
+                saveJson(file, document);
+                if (readJson(file) != document)
+                    throw std::runtime_error("Additional placement save verification failed");
+            }
+            return {{"path", file.u8string()}, {"initial_guesses", values}};
+        }
+
         static nlohmann::json placementDocument(const std::filesystem::path &_file)
         {
             if (!std::filesystem::exists(_file))

@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="/app.css">
     <script src="/app.js" defer></script>
     <script src="/registration.js" defer></script>
+    <script src="/additional.js" defer></script>
 </head>
 <body>
     <header><a class="brand" href="/">▦ <strong>BLK Studio</strong></a><div class="header-actions"><button id="quit" class="quiet">Quit app</button></div></header>
@@ -15,6 +16,7 @@
             <button id="tab-convert" role="tab" aria-controls="panel-convert" aria-selected="true" tabindex="0">Convert</button>
             <button id="tab-clouds" role="tab" aria-controls="panel-clouds" aria-selected="false" tabindex="-1">View saved point clouds</button>
             <button id="tab-register" role="tab" aria-controls="panel-register" aria-selected="false" tabindex="-1">Register</button>
+            <button id="tab-additional" role="tab" aria-controls="panel-additional" aria-selected="false" tabindex="-1">Additional Register</button>
         </nav>
         <div id="panel-convert" role="tabpanel" aria-labelledby="tab-convert">
         <section id="dropzone" aria-label="Select original scans">
@@ -54,6 +56,22 @@
             <section class="registration-advanced worker-log" aria-label="Latest worker log"><h3>Latest worker log</h3><pre id="registration-log" tabindex="0">No active registration.</pre></section>
             <div class="registration-actions"><button id="open-registration-result" class="secondary">Open existing result</button></div>
             <div id="registration-jobs"></div>
+        </section>
+        </div>
+        <div id="panel-additional" role="tabpanel" aria-labelledby="tab-additional" hidden>
+        <section class="queue-panel" aria-label="Additional registration">
+            <div class="queue-toolbar"><h2>Extend a reference map</h2><button id="additional-reference" class="primary">Open relative_poses.json</button></div>
+            <p id="additional-reference-status" class="hint">Select an existing result. Its original PLY files must be available.</p>
+            <div class="registration-actions"><button id="additional-pick" class="secondary">Add PLY files</button><button id="additional-folder" class="secondary">Add folder</button></div>
+            <div id="additional-scans"><div class="empty">Select new scans to attach to the fixed reference map.</div></div>
+            <div class="registration-actions"><button id="additional-arrange" class="secondary" disabled>Arrange reference and scans (optional)</button><span id="additional-placement-status" class="hint"></span></div>
+            <div class="registration-settings"><label>Map name<input id="additional-name" value="extended_map" maxlength="100"></label><button id="additional-clear" class="quiet">Clear selection</button></div>
+            <label class="map-output-label" for="additional-output">NEW RESULT OUTPUT FOLDER</label><div class="map-output"><input id="additional-output" placeholder="Choose a separate folder; the original result stays unchanged"><button id="additional-browse" class="secondary">Browse</button></div>
+            <div class="registration-actions"><button id="additional-start" class="primary" disabled>Register additional scans</button><button id="additional-stop" class="secondary" disabled>Stop registration</button><button id="additional-setup" class="secondary">Registration setup</button></div>
+            <p id="additional-message" class="hint" role="status"></p>
+            <section class="registration-advanced worker-log" aria-label="Additional worker log"><h3>Latest worker log</h3><pre id="additional-log" tabindex="0">No active registration.</pre></section>
+            <div class="registration-actions"><button id="additional-result" class="secondary">Open existing result</button></div>
+            <div id="additional-jobs"></div>
         </section>
         </div>
         <p id="connection" role="status" hidden></p>

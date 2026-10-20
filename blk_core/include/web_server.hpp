@@ -171,7 +171,7 @@ namespace blk_core
             {
                 serveFile(_response, web_root_ / "index.html", "text/html; charset=utf-8");
             });
-            server_.Get("/(app\\.js|viewer\\.js|registration\\.js|placement\\.js)", [this](const httplib::Request &_request, httplib::Response &_response)
+            server_.Get("/(app\\.js|viewer\\.js|registration\\.js|placement\\.js|additional\\.js)", [this](const httplib::Request &_request, httplib::Response &_response)
             {
                 serveFile(_response, web_root_ / _request.matches[1].str(), "text/javascript; charset=utf-8");
             });
@@ -246,6 +246,10 @@ namespace blk_core
             {
                 registration_.generateProduct(_request.matches[1], nlohmann::json::parse(_request.body).at("product"));
                 reply(_response, registration_.snapshot());
+            });
+            server_.Post("/api/registration/reference", [this](const httplib::Request &_request, httplib::Response &_response)
+            {
+                reply(_response, registration_.reference(nlohmann::json::parse(_request.body)));
             });
             server_.Post("/api/registration/import", [this](const httplib::Request &_request, httplib::Response &_response)
             {

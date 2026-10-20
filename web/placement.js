@@ -377,7 +377,7 @@
     window.addEventListener('message',async e=>
     {
         if(e.origin!==location.origin||e.source!==window.opener)return;
-        if (job && ['placement-lock','placement-started','placement-unlock'].includes(e.data?.type))
+        if ((job || saveContext?.reference_poses) && ['placement-lock','placement-started','placement-unlock'].includes(e.data?.type))
         {
             locked = e.data.type !== 'placement-unlock'; drag = null; sync();
             if (e.data.type === 'placement-lock')
@@ -390,7 +390,7 @@
                 }
                 catch (error) { window.opener?.postMessage({type:'placement-locked', job, error:error.message}, location.origin); }
             }
-            if (e.data.type === 'placement-started') $('save-status').textContent = 'Registration started. Follow the worker log in the Register tab. Reopen Arrange chunks for the new result.';
+            if (e.data.type === 'placement-started') $('save-status').textContent = `Registration started. Follow the worker log in the ${saveContext?.reference_poses ? 'Additional Register' : 'Register'} tab. Reopen the editor for the new result.`;
         }
         if(e.data?.type==='placement-input'){saveContext=e.data.context||null;initialize(e.data.items);}
         if(e.data?.type==='placement-error')$('error').textContent=e.data.error;

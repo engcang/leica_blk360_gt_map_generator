@@ -181,12 +181,19 @@ def runRigidChunks(config, records, report, progress, publish):
             saveCache(path, points=np.asarray(cloud.points), normals=np.asarray(cloud.normals))
         return cloud, cloudFingerprint(cloud)
 
+    additional = bool(config.get("reference_poses"))
+    def bridgeCount(i, j):
+        return min(2, len(groups[i]), len(groups[j])) if additional else min(2, len(groups[i]) * len(groups[j]))
+
     pairs = [(i, j) for i in range(len(groups)) for j in range(i + 1, len(groups))]
+    if additional:
+        # ICP fitness uses the source denominator: match a small scan into the fixed map.
+        pairs = [(j, i) if len(merged[i]["fine"].points) > len(merged[j]["fine"].points) else (i, j) for i, j in pairs]
     edges = []
     for number, (i, j) in enumerate(pairs, 1):
         progress(f"Registering rigid chunks: {number}/{len(pairs)} (chunks {i + 1}:{j + 1}; internal scans fixed)")
         initial = np.linalg.inv(placed[j]) @ placed[i] if i in placed and j in placed else None
-        identity = {"mode": MODE, "source": keys[i], "target": keys[j],
+        identity = {"mode": MODE, "additional": additional, "source": keys[i], "target": keys[j],
                     "initial": None if initial is None else initial.tolist()}
         digest = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:24]
         path = directory / (digest + ".json")
@@ -204,13 +211,14 @@ def runRigidChunks(config, records, report, progress, publish):
             evaluate = o3d.pipelines.registration.evaluate_registration
             forward = evaluate(merged[i]["coarse"], merged[j]["coarse"], .8, initial).fitness
             backward = evaluate(merged[j]["coarse"], merged[i]["coarse"], .8, np.linalg.inv(initial)).fitness
-            valid = 2 * forward * backward / max(1e-12, forward + backward) >= .05
+            valid = forward >= .10 if additional else 2 * forward * backward / max(1e-12, forward + backward) >= .05
         if valid:
             match = refine(merged[i], merged[j], initial)
             edge.update(match)
             correction = transformError(initial, np.asarray(match["transform_target_from_source"]))
-            edge["accepted"] = bool(match["converged"] and match["harmonic_overlap_12cm"] >= .10
-                and min(match["forward_overlap_12cm"], match["backward_overlap_12cm"]) >= .05
+            overlap_ok = (match["forward_overlap_12cm"] >= .25 if additional else
+                match["harmonic_overlap_12cm"] >= .10 and min(match["forward_overlap_12cm"], match["backward_overlap_12cm"]) >= .05)
+            edge["accepted"] = bool(match["converged"] and overlap_ok
                 and match["inlier_rmse_m"] < .08 and match["relative_tilt_deg"] < 25
                 and (not edge["manual_placement"] or (correction[0] <= 1. and correction[1] <= 15.)))
             if edge["accepted"]:
@@ -234,7 +242,7 @@ def runRigidChunks(config, records, report, progress, publish):
             continue
         progress(f"Validating rigid chunk bridge {i + 1}:{j + 1} on at most 12 fixed scan pairs (no scan ICP)")
         verified, audit = verifyFixedBridge(groups[i], groups[j], bases, transform, clouds)
-        if len(verified) < min(2, len(groups[i]) * len(groups[j])):
+        if len(verified) < bridgeCount(i, j):
             continue
         fine.append({**edge, "transform_target_from_source": match["transform"],
                      "information": match["information"], "verification_pairs": verified,
@@ -247,7 +255,7 @@ def runRigidChunks(config, records, report, progress, publish):
             i, j = edge["source"], edge["target"]
             verified, audit = verifyFixedBridge(groups[i], groups[j], bases,
                 np.linalg.inv(chunk_poses[j]) @ chunk_poses[i], clouds)
-            if len(verified) >= min(2, len(groups[i]) * len(groups[j])):
+            if len(verified) >= bridgeCount(i, j):
                 checked.append({**edge, "verification_pairs": verified, "final_verification_audit": audit})
         if len(checked) == len(retained):
             retained = checked
@@ -277,8 +285,8 @@ def runRigidChunks(config, records, report, progress, publish):
         publish(virtual)
         return None
     # Preserve the original first scan as the exported map frame.
-    origin = np.linalg.inv(scan_poses[0])
-    final = [origin @ scan_poses[i] for i in range(len(records))]
+    from additional_registration import anchorReference
+    origin, final = anchorReference(config, scan_poses)
     membership = {scan: chunk for chunk, group in enumerate(groups) for scan in group}
     validation_pairs = set()
     for path in (report / "pairs").glob("*.json"):
@@ -314,6 +322,11 @@ def runRigidChunks(config, records, report, progress, publish):
                           "transform_map_from_chunk": (origin @ chunk_poses[number]).tolist(),
                           "scan_local_transforms": {str(i): bases[i].tolist() for i in groups[number]}}
                          for number, chunk in enumerate(config["manual_chunks"])]}
+    if additional:
+        result.update(registration_mode="additional_rigid_reference_v1",
+                      coordinate_frame=config["reference_coordinate_frame"],
+                      reference={"poses_sha256": config["reference_sha256"],
+                                 "fixed_scan_count": len(config["reference_fixed_poses"]), "poses_preserved_exactly": True})
     saveJson(report / "registration.json", result)
     saveJson(report / "quality.json", qualityDocument(quality))
     from export_dataset import saveLocalPoses

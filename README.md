@@ -41,10 +41,10 @@ Ubuntu runtime validation is still pending.
 
 ## Usage
 
-The main screen has **Convert** (default), **View saved point clouds**, and **Register** tabs.
+The main screen has **Convert** (default), **View saved point clouds**, **Register**, and **Additional Register** tabs.
 PLY viewing and registration input selections are not saved or restored; choose
 files or a folder each time. Viewing reads files in place without creating a library cache.
-All three tabs select files by modification time, oldest first (path breaks ties).
+All scan input tabs select files by modification time, oldest first (path breaks ties).
 New conversions preserve the BLK modification time on the PLY. Existing PLY timestamps
 are unchanged. Modification time reflects scan order only if the source timestamps do.
 Adding registration inputs re-sorts the selection; **Up / Down** allows manual correction.
@@ -109,6 +109,24 @@ allows the slower scan-level 1 cm ICP/PGO to change internal chunk geometry.
 The editor only autosaves and never launches registration. Changed chunk membership
 or geometry regenerates the placement JSON; previous user placements are preserved
 under `html_source/placement_history/`. An unchanged chunk set keeps its placements.
+
+### Extend an existing map
+
+1. In **Additional Register**, open the existing `relative_poses.json`. Keep its original PLY files at the paths recorded in the JSON.
+2. Add new PLY files or a folder, and choose a **separate output folder**.
+3. Optionally **Arrange reference and scans**. The reference is one fixed item;
+   new scan poses autosave to `additional_initial_placements.json`, keyed by source
+   path and reference hash. Removing a scan does not erase its saved pose.
+4. Click **Register additional scans**. Watch the log and open the result below it.
+
+The reference stays rigid and its original transforms/map frame are preserved exactly.
+New scans use saved guesses or KISS-Matcher, then Nano-GICP, robust 1 cm ICP and
+chunk-level PGO. Small scans are matched into the larger map; fixed original scan
+pairs validate each bridge (one passing pair for a single new scan, otherwise two).
+Disconnected groups remain available through **View chunks / Arrange chunks** and
+**Register chunks**. Individual-scan refinement is disabled for this workflow.
+The new JSON includes all old and new scans without copying their PLYs. Original
+results are unchanged. Generate merged PLYs or share HTML only when needed.
 
 After conversion and registration, the output is:
 

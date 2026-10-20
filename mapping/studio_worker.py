@@ -56,6 +56,10 @@ def runRegistration(_config, _report):
     if poses_target.exists():
         raise FileExistsError(f"Transform JSON already exists: {poses_target}")
 
+    reference = None
+    if _config.get("reference_poses"):
+        from additional_registration import loadReference
+        reference = loadReference(_config)
     partial_info = {}
 
     def progress(_stage, **_extra):
@@ -64,6 +68,9 @@ def runRegistration(_config, _report):
 
     progress("Loading cached scan clouds for rigid chunk aggregation" if _config.get("manual_chunks") else "Preparing KISS-Matcher clouds (30 cm) and Nano-GICP clouds (8 cm)")
     records = registration.prepare([{"output_path": str(path)} for path in paths], _report)
+    if reference is not None:
+        from additional_registration import prepareAdditional
+        prepareAdditional(_config, records, reference)
     from partial_chunks import createChunkReview
 
     def publishChunks(edges):

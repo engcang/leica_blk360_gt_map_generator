@@ -156,6 +156,7 @@ relative_poses.json
 partial_chunks.json
 initial_placements.json
 chunk_initial_placements.json
+additional_initial_placements.json
 /chunks_review.html
 /chunk_connections.json
 /chunk_search/

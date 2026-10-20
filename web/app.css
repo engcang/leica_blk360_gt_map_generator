@@ -705,7 +705,8 @@ dialog::backdrop
 }
 
 #registration input,
-#registration select
+#registration select,
+#panel-additional input
 {
     border: 1px solid var(--line);
     border-radius: 7px;
@@ -772,7 +773,8 @@ dialog::backdrop
     margin: 10px 0;
 }
 
-#registration-log
+#registration-log,
+#additional-log
 {
     max-height: 300px;
     overflow: auto;

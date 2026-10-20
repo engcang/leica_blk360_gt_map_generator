@@ -192,6 +192,7 @@ function renderRegistrationJob(job)
         caption.textContent = 'Refine individual scans afterward (slower; changes internal chunk alignment)';
         if (!registration_state.individual_scan_refinement_option) option.title = 'Available after starting the updated app.';
         option.append(refine, caption);
+        option.hidden = job.kind === "additional";
         const register = button('Register chunks', () => startChunkRegistration(job.id, false, refine.checked));
         register.className = 'primary';
         register.disabled = !!registration_state.busy || registration_starting || chunk_pending.has(job.id) || registration_state.runtime.status !== 'completed';
@@ -240,6 +241,7 @@ function renderRegistrationJob(job)
     initialization.className = 'hint';
     initialization.textContent = job.initial_placement_count === undefined
         ? 'Initial placement count: unavailable for this older job.'
+        : job.kind === "additional" ? `${job.initial_placement_count} / ${job.new_scan_count} new scan placements used; original reference poses remain fixed.`
         : `Initial placements used by this job: ${job.initial_placement_count} / ${job.scans.length} scans.`;
     row.append(heading, state, initialization, path, actions, scans);
     return row;
@@ -282,8 +284,10 @@ async function startChunkRegistration(id, automatic = false, refineScans = false
         if (chunk_pending.has(id)) throw Error('Wait for chunk placements to finish saving.');
         await api('registration/start', request);
         started = true;
-        registration_visible_jobs.add(id);
-        latest_worker_log = 'Waiting for worker output.';
+        if (registration_state.jobs.find(job => job.id === id)?.kind === 'additional' && typeof additional_visible_jobs !== 'undefined') additional_visible_jobs.add(id);
+        else registration_visible_jobs.add(id);
+        if (registration_state.jobs.find(job => job.id === id)?.kind === 'additional' && typeof additional_log !== 'undefined') additional_log = 'Waiting for worker output.';
+        else latest_worker_log = 'Waiting for worker output.';
     }
     finally
     {
@@ -299,7 +303,7 @@ async function refreshRegistration()
     try
     {
         registration_state = await api('registration');
-        for (const job of registration_state.jobs) if (job.status === 'running') registration_visible_jobs.add(job.id);
+        for (const job of registration_state.jobs) if (job.status === 'running' && job.kind !== 'additional') registration_visible_jobs.add(job.id);
         const runtime = registration_state.runtime;
         if (!python_dirty) element('registration-python').value = registration_state.python;
         element('runtime-state').textContent = runtime.status === 'completed' ? 'Ready' : runtime.status.replaceAll('_', ' ');
@@ -316,7 +320,7 @@ async function refreshRegistration()
             renderRegistrationScans();
         }
         registrationControls();
-        const visible_jobs = registration_state.jobs.filter(job => registration_visible_jobs.has(job.id) || job.status === 'running');
+        const visible_jobs = registration_state.jobs.filter(job => registration_visible_jobs.has(job.id) || (job.status === 'running' && job.kind !== 'additional'));
         const signature = JSON.stringify([visible_jobs, registration_state.busy, runtime.status, registration_starting, [...chunk_pending]]);
         if (signature !== registration_signature)
         {
@@ -332,11 +336,13 @@ async function refreshRegistration()
         }
         if (visible_jobs.some(job => job.status === 'running'))
             latest_worker_log = registration_state.log || 'Waiting for worker output.';
-        else if (registration_state.log && latest_worker_log !== 'No active registration.')
+        else if (registration_state.log && latest_worker_log !== 'No active registration.' &&
+            (registration_state.log_job_id === undefined || visible_jobs.some(job => job.id === registration_state.log_job_id)))
             latest_worker_log = registration_state.log;
         const log = element('registration-log');
         if (log.textContent !== latest_worker_log) log.textContent = latest_worker_log;
         log.scrollTop = log.scrollHeight;
+        if (typeof refreshAdditional === 'function') refreshAdditional();
         if (registration_state.storage_error) notice(registration_state.storage_error, true);
     }
     catch (error)

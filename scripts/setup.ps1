@@ -1,4 +1,4 @@
-param([switch]$NoLaunch, [int]$Jobs = 2)
+param([switch]$NoLaunch, [switch]$Rgb, [int]$Jobs = 2)
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -72,6 +72,7 @@ try
     }
     $setup_arguments = @((Join-Path $PSScriptRoot 'setup.py'), '--jobs', "$Jobs")
     if ($NoLaunch) { $setup_arguments += '--no-launch' }
+    if ($Rgb) { $setup_arguments += '--rgb' }
     & $python @setup_arguments
     if ($LASTEXITCODE -ne 0) { throw 'Build or runtime validation failed.' }
 }

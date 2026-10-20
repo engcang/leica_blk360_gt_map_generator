@@ -41,7 +41,10 @@ class AdditionalTests(unittest.TestCase):
                 scene = world + ([20,0,0] if i == 1 else [0,0,0])
                 xyz = (scene - transform[:3,3]) @ transform[:3,:3]
                 path = old / f"scan{i}.ply"
-                registration.writePly(path, xyz, np.arange(len(xyz),dtype=np.uint16))
+                values = np.arange(len(xyz),dtype=np.uint16)
+                if os.environ.get("BLK_TEST_RGB") == "1":
+                    values = np.column_stack([values % 256, (values * 3) % 256, (values * 7) % 256])
+                registration.writePly(path, xyz, values)
                 paths.append(path)
             manifest = {"schema_version":3,"units":"metres","result_name":"original","coordinate_frame":"survey_frame",
                 "registration_voxel_m":.01,"scans":[{"index":i,"file":path.name,"name":path.name,

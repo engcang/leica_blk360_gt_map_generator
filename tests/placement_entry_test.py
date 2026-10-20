@@ -17,6 +17,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--executable', required=True)
     parser.add_argument('--chrome', required=True)
+    parser.add_argument('--rgb', action='store_true')
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
     with tempfile.TemporaryDirectory(prefix='blk-arrange-entry-') as directory:
@@ -25,7 +26,7 @@ def main():
         app.mkdir()
         exe = app / Path(args.executable).name
         shutil.copy2(args.executable, exe)
-        shutil.copytree(repo / 'web', app / 'web')
+        shutil.copytree(Path(args.executable).resolve().parent / ('web_rgb' if args.rgb else 'web'), app / ('web_rgb' if args.rgb else 'web'))
         (app / 'mapping').mkdir()
         project = root / 'project'
         output = root
@@ -34,9 +35,9 @@ def main():
             path = root / f'Setup{scan}.ply'
             header = ('ply\nformat binary_little_endian 1.0\nelement vertex 1000\n'
                       'property float x\nproperty float y\nproperty float z\n'
-                      'property ushort intensity\nend_header\n').encode()
-            path.write_bytes(header + b''.join(struct.pack('<fffH', (i % 10) * .1,
-                ((i // 10) % 10) * .1, (i // 100) * .1, i * 50) for i in range(1000)))
+                      + ('property uchar red\nproperty uchar green\nproperty uchar blue\n' if args.rgb else 'property ushort intensity\n') + 'end_header\n').encode()
+            path.write_bytes(header + b''.join(struct.pack('<fffBBB' if args.rgb else '<fffH', (i % 10) * .1,
+                ((i // 10) % 10) * .1, (i // 100) * .1, *([255, 16, i % 256] if args.rgb else [i * 50])) for i in range(1000)))
             paths.append(str(path))
         # A stub worker tests launch/config plumbing without running real ICP.
         for name in ('chunk_placements.py', 'json_io.py'):
@@ -92,6 +93,7 @@ def main():
                 errors = []
                 page.on('pageerror', lambda error: errors.append(str(error)))
                 page.goto(base + '/#' + session['token'])
+                assert page.evaluate('Boolean(window.BLK_RGB)') == args.rgb
                 page.locator('#tab-register').click()
                 page.wait_for_function('registration_loaded')
                 assert page.locator('#placement-open').is_disabled()

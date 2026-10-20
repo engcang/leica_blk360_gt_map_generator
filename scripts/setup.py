@@ -24,7 +24,7 @@ def sourceFingerprint(_root):
     patterns = ["CMakeLists.txt", "cmake/*", "blk_core/**/*.hpp", "blk_core/**/*.cpp",
                 "mapping/*.py", "mapping/requirements.txt", "mapping/native/**/*.hpp", "mapping/native/**/*.cpp",
                 "mapping/native/*.cmake", "mapping/native/*.json", "mapping/native/CMakeLists.txt",
-                "web/*", "tests/core_tests.cpp", "scripts/setup*", "scripts/windows_tools.json",
+                "web/*", "tests/*_tests.cpp", "scripts/setup*", "scripts/windows_tools.json",
                 "LICENSE", "README.md", "THIRD_PARTY_NOTICES.txt"]
     result = hashlib.sha256()
     result.update(str(_root).encode())
@@ -49,10 +49,10 @@ def synchronizeBuildRuntime(_install, _build_app):
         shutil.copy2(path, target)
 
 
-def initializeProject(_install, _runtime):
+def initializeProject(_install, _runtime, _name="default"):
     if _runtime.get("status") != "completed":
         raise RuntimeError("Registration runtime validation did not complete")
-    project = _install / "projects" / "default"
+    project = _install / "projects" / _name
     project.mkdir(parents=True, exist_ok=True)
     try:
         with (project / "registration_jobs.json").open("x", encoding="utf-8") as stream:
@@ -66,6 +66,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--no-launch", action="store_true", help="Build and validate without opening the app")
     parser.add_argument("--jobs", type=int, default=2, help="Parallel compiler jobs (default: 2)")
+    parser.add_argument("--rgb", action="store_true", help="Launch the RGB edition (both editions are built)")
     args = parser.parse_args()
     if args.jobs < 1:
         parser.error("--jobs must be at least 1")
@@ -82,11 +83,11 @@ def main():
     suffix = ".exe" if os.name == "nt" else ""
     cmake = python_bin / ("cmake" + suffix)
     ctest = python_bin / ("ctest" + suffix)
-    app = install / ("blk_studio" + suffix)
+    app = install / (("blk_studio_rgb" if args.rgb else "blk_studio") + suffix)
     helper = install / "mapping" / "bin" / ("blk_registration" + suffix)
     stamp = build / "ready.sha256"
     fingerprint = sourceFingerprint(root)
-    current = stamp.is_file() and stamp.read_text() == fingerprint and app.is_file() and helper.is_file()
+    current = stamp.is_file() and stamp.read_text() == fingerprint and app.is_file() and helper.is_file() and (install / ("blk_studio_rgb" + suffix)).is_file() and (install / ("blk_studio" + suffix)).is_file()
     log_path = root / "build" / "setup.log"
     with log_path.open("a", encoding="utf-8") as log:
         if not current:
@@ -118,6 +119,8 @@ def main():
         runtime = json.loads((build / "runtime-check" / "progress.json").read_text(encoding="utf-8"))
         initializeProject(install, runtime)
         initializeProject(build / "app", runtime)
+        initializeProject(install, runtime, "rgb")
+        initializeProject(build / "app", runtime, "rgb")
         stamp.write_text(fingerprint, encoding="ascii")
     print("BLK Studio is ready.", flush=True)
     if not args.no_launch:

@@ -15,6 +15,7 @@ from automatic_connections import componentPoses
 from json_io import saveJson
 from chunk_placements import refreshChunkPlacements
 from register_scans import readPly, writePly
+from ply_io import colourValues
 from share_map import createShareViewer
 from studio_worker import connectedGroups
 
@@ -61,7 +62,7 @@ def createChunkReview(records, edges, output, report, progress, pose_method=None
                 xyz = np.column_stack([raw[axis][::stride] for axis in ("x", "y", "z")]).astype(float)
                 xyz = xyz @ poses[index][:3, :3].T + poses[index][:3, 3]
                 points.append(xyz)
-                intensities.append(np.array(raw["intensity"][::stride]))
+                intensities.append(colourValues(raw[::stride]).copy())
                 plotted.append(xyz[::max(1, len(xyz) // 20000)])
                 del raw
                 after = path.stat()

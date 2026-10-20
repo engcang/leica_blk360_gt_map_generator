@@ -11,6 +11,7 @@
 #include <string>
 
 #include <json.hpp>
+#include "color_mode.hpp"
 
 namespace blk_core
 {
@@ -41,15 +42,15 @@ namespace blk_core
         const std::string text(buffer.data(), static_cast<std::size_t>(stream.gcount()));
         const auto marker = text.find("\nend_header\n");
         const std::string prefix = "ply\nformat binary_little_endian 1.0\n";
-        const std::string suffix = "property float x\nproperty float y\nproperty float z\nproperty ushort intensity\nend_header\n";
+        const std::string suffix = std::string("property float x\nproperty float y\nproperty float z\n") + colourProperties() + "end_header\n";
         if (marker == std::string::npos || text.rfind(prefix, 0) != 0)
         {
-            throw std::runtime_error("Expected a BLK Studio binary XYZ/intensity PLY");
+            throw std::runtime_error("Expected a binary PLY matching this app edition (XYZ/intensity or XYZ/RGB)");
         }
         const auto header = text.substr(0, marker + 12);
         if (header.size() < prefix.size() + suffix.size() || header.compare(header.size() - suffix.size(), suffix.size(), suffix) != 0)
         {
-            throw std::runtime_error("Expected float XYZ and uint16 intensity PLY properties");
+            throw std::runtime_error("PLY colour format does not match this app edition");
         }
         std::istringstream fields(header.substr(prefix.size(), header.size() - prefix.size() - suffix.size()));
         std::string line;
@@ -72,7 +73,7 @@ namespace blk_core
             count = std::stoull(digits);
         }
         const auto bytes = std::filesystem::file_size(_path);
-        if (count == 0 || bytes < header.size() || (bytes - header.size()) % 14 != 0 || (bytes - header.size()) / 14 != count)
+        if (count == 0 || bytes < header.size() || (bytes - header.size()) % plyStride != 0 || (bytes - header.size()) / plyStride != count)
         {
             throw std::runtime_error("PLY size/count mismatch; the file may be incomplete");
         }

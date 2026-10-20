@@ -31,17 +31,17 @@ namespace blk_core
         if (_start >= total)
             throw std::runtime_error("Sample offset is outside the PLY");
         const auto take = std::min<std::uint64_t>(262144, total - _start);
-        const auto header = metadata.at("bytes").get<std::uint64_t>() - count * 14;
+        const auto header = metadata.at("bytes").get<std::uint64_t>() - count * plyStride;
         std::ifstream stream(_path, std::ios::binary);
-        stream.seekg(static_cast<std::streamoff>(header + _start * _stride * 14));
+        stream.seekg(static_cast<std::streamoff>(header + _start * _stride * plyStride));
         std::string output(static_cast<std::size_t>(take * 16), '\0');
-        std::vector<char> block(65536 * 14);
+        std::vector<char> block(65536 * plyStride);
         std::uint64_t read = 0, emitted = 0;
         const auto remaining = std::min(count - _start * _stride, take * _stride);
         while (read < remaining)
         {
             const auto records = std::min<std::uint64_t>(65536, remaining - read);
-            stream.read(block.data(), static_cast<std::streamsize>(records * 14));
+            stream.read(block.data(), static_cast<std::streamsize>(records * plyStride));
             if (!stream)
                 throw std::runtime_error("Incomplete PLY sample read");
             for (std::uint64_t q = 0; q < records; ++q)
@@ -49,10 +49,14 @@ namespace blk_core
                 if ((read + q) % _stride != 0)
                     continue;
                 float values[4];
-                std::memcpy(values, block.data() + q * 14, 12);
+                std::memcpy(values, block.data() + q * plyStride, 12);
                 std::uint16_t intensity;
-                std::memcpy(&intensity, block.data() + q * 14 + 12, 2);
+                std::memcpy(&intensity, block.data() + q * plyStride + 12, 2);
                 values[3] = intensity;
+                if (rgbEdition) {
+                    const auto *rgb = reinterpret_cast<const unsigned char *>(block.data() + q * plyStride + 12);
+                    values[3] = static_cast<float>((rgb[0] << 16) | (rgb[1] << 8) | rgb[2]);
+                }
                 for (int axis = 0; axis < 3; ++axis)
                     if (!std::isfinite(values[axis]))
                         throw std::runtime_error("Non-finite PLY coordinates");

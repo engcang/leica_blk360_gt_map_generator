@@ -49,9 +49,12 @@ def verifySources(_registration, _progress):
 
 def mergeRaw(_registration, _target, _progress):
     from register_scans import hashFile, readPly
+    from ply_io import layout, plyHeader
     count = sum(scan["original_points"] for scan in _registration["scans"])
-    header = (f"ply\nformat binary_little_endian 1.0\nelement vertex {count}\n"
-              "property float x\nproperty float y\nproperty float z\nproperty ushort intensity\nend_header\n")
+    rgb = layout(pathlib.Path(_registration["scans"][0]["source_path"]))[3]
+    if any(layout(pathlib.Path(scan["source_path"]))[3] != rgb for scan in _registration["scans"]):
+        raise ValueError("Cannot mix RGB and intensity scans in a map")
+    header = plyHeader(count, rgb)
     with _target.open("xb") as output:
         output.write(header.encode("ascii"))
         for scan in _registration["scans"]:
@@ -69,14 +72,15 @@ def mergeRaw(_registration, _target, _progress):
                 packed = np.empty(len(block), dtype=raw.dtype)
                 for axis, values in zip(("x", "y", "z"), xyz.T):
                     packed[axis] = values
-                packed["intensity"] = block["intensity"]
+                for channel in (("red", "green", "blue") if rgb else ("intensity",)):
+                    packed[channel] = block[channel]
                 output.write(packed.tobytes())
             del raw
             current = path.stat()
             if (initial.st_size, initial.st_mtime_ns) != (current.st_size, current.st_mtime_ns):
                 raise ValueError(f"Source changed during merge: {path}")
     return {**inspectPly(_target), "sha256": hashFile(_target), "voxel_m": None,
-            "aggregation": "Every source point transformed once; no filtering or deduplication; uint16 intensity unchanged; XYZ stored as float32."}
+            "aggregation": "Every source point transformed once; no filtering or deduplication; original colour channels unchanged; XYZ stored as float32."}
 
 
 def generateProduct(_poses, _kind, _report, _progress):

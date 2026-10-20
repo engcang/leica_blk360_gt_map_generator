@@ -31,7 +31,7 @@ def createViewer(_directory):
     document = document.replace("Coordinates are displayed as stored in the PLY. Accuracy against an official export has not been verified.",
                                 "Experimental registered reference map. Scanner-frame axes; no surveyed leveling. Independent accuracy has not been established.")
     document = document.replace("Full-resolution point cloud</h1>", html.escape(metadata["file"]) + "</h1>")
-    summary = f'<p>{metadata["points"]:,} map points | {metadata["voxel_m"] * 100:g} cm merge voxels | Intensity preserved by averaging. Open the map PLY below when using this HTML offline.</p>'
+    summary = f'<p>{metadata["points"]:,} map points | {metadata["voxel_m"] * 100:g} cm merge voxels | Colour channels preserved by averaging. Open the map PLY below when using this HTML offline.</p>'
     document = document.replace('<div class="load-controls">', summary + '<div class="load-controls">')
     bootstrap = """
     (async () =>

@@ -65,6 +65,30 @@ namespace blk_core
             return bytes;
         }
 
+        std::map<std::string, Block> ldrImages()
+        {
+            const auto length = std::min<std::uint64_t>(size_, 1048576);
+            const auto start = size_ - length;
+            const auto tail = read(start, length);
+            std::map<std::string, Block> result;
+            for (std::size_t i = 12; i + 40 < tail.size(); ++i) {
+                if (std::memcmp(tail.data() + i, "LDR_Image_", 10) != 0) continue;
+                std::size_t end = i + 10;
+                while (end < tail.size() && tail[end] >= '0' && tail[end] <= '9') ++end;
+                if (end == i + 10 || end >= tail.size() || tail[end] != 0) continue;
+                const auto n = end - i + 1;
+                if (i + n + 22 > tail.size() || readNumber<std::uint16_t>(tail, i-2) != n ||
+                    readNumber<std::uint16_t>(tail, i-12) != n+32 || readNumber<std::uint32_t>(tail, i-10) != 1 || tail[i+n] != 1) continue;
+                const auto offset = readNumber<std::uint64_t>(tail, i+n+1);
+                const auto bytes = readNumber<std::uint64_t>(tail, i+n+9);
+                if (offset < 25 || offset > size_ || !bytes || bytes > size_-offset || offset+bytes > start+i-12) continue;
+                const std::string name(reinterpret_cast<const char *>(tail.data()+i), n-1);
+                if (!result.emplace(name, Block{offset, bytes}).second) throw std::runtime_error("Ambiguous image directory");
+            }
+            if (result.empty()) throw std::runtime_error("This BLK has no supported LDR images. RGB requires an LDR scan; HDR is not supported yet.");
+            return result;
+        }
+
         ScanModel parse()
         {
             const auto prefix = read(0, 25);

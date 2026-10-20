@@ -27,6 +27,7 @@
         frame = 0,
         orbitAtEye = false,
         panDistance = 10;
+    let rgbMode = false;
     const camera = {
             target: [0, 0, 0],
             azimuth: -Math.PI / 4,
@@ -114,10 +115,10 @@
         if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw Error(gl.getProgramInfoLog(p));
         return p;
     }
-    const points = program(`attribute vec4 point;uniform mat4 mvp;uniform float size,clipZ;uniform vec2 intensityRange;varying vec3 rgb;varying float visible;void main(){gl_Position=mvp*vec4(point.xyz,1.0);gl_PointSize=size;visible=point.z<=clipZ?1.0:0.0;float v=clamp((point.w-intensityRange.x)/max(1.0,intensityRange.y-intensityRange.x),0.0,1.0);rgb=mix(vec3(.18,.3,.42),vec3(.95,.97,1.0),v);}`, `precision mediump float;varying vec3 rgb;varying float visible;void main(){if(visible<.5)discard;vec2 p=gl_PointCoord-vec2(.5);if(dot(p,p)>.25)discard;gl_FragColor=vec4(rgb,1.0);}`);
+    const points = program(`attribute vec4 point;uniform mat4 mvp;uniform float size,clipZ,rgbMode;uniform vec2 intensityRange;varying vec3 rgb;varying float visible;void main(){gl_Position=mvp*vec4(point.xyz,1.0);gl_PointSize=size;visible=point.z<=clipZ?1.0:0.0;float v=clamp((point.w-intensityRange.x)/max(1.0,intensityRange.y-intensityRange.x),0.0,1.0);rgb=rgbMode>.5?vec3(floor(point.w/65536.0),mod(floor(point.w/256.0),256.0),mod(point.w,256.0))/255.0:mix(vec3(.18,.3,.42),vec3(.95,.97,1.0),v);}`, `precision mediump float;varying vec3 rgb;varying float visible;void main(){if(visible<.5)discard;vec2 p=gl_PointCoord-vec2(.5);if(dot(p,p)>.25)discard;gl_FragColor=vec4(rgb,1.0);}`);
     const lineProgram = program('attribute vec3 position;attribute vec3 colour;uniform mat4 mvp;varying vec3 rgb;void main(){gl_Position=mvp*vec4(position,1.0);rgb=colour;}', 'precision mediump float;varying vec3 rgb;void main(){gl_FragColor=vec4(rgb,1.0);}');
     const u = {};
-    for (const n of ['mvp', 'size', 'clipZ', 'intensityRange']) u[n] = gl.getUniformLocation(points, n);
+    for (const n of ['mvp', 'size', 'clipZ', 'intensityRange', 'rgbMode']) u[n] = gl.getUniformLocation(points, n);
     const pointAttr = gl.getAttribLocation(points, 'point'),
         linePos = gl.getAttribLocation(lineProgram, 'position'),
         lineCol = gl.getAttribLocation(lineProgram, 'colour'),
@@ -231,6 +232,7 @@
         gl.uniform1f(u.size, Number($('size').value) * dpr);
         gl.uniform1f(u.clipZ, Number(clip.value) + .00001);
         gl.uniform2f(u.intensityRange, ilow, ihigh);
+        gl.uniform1f(u.rgbMode, rgbMode ? 1 : 0);
         const displayed = shown();
         gl.drawArrays(gl.POINTS, 0, displayed);
         gizmo(b);
@@ -580,10 +582,16 @@
             if (marker < 0) throw Error('PLY header not found.');
             const header = text.slice(0, marker + 11),
                 match = header.match(/^element vertex (\d+)$/m);
-            if (!header.startsWith('ply\nformat binary_little_endian 1.0\n') || !header.endsWith('property float x\nproperty float y\nproperty float z\nproperty ushort intensity\nend_header\n') || !match) throw Error('Expected a binary little-endian XYZ + uint16 intensity PLY.');
+            rgbMode = header.endsWith('property float x\nproperty float y\nproperty float z\nproperty uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n');
+            const intensityMode = header.endsWith('property float x\nproperty float y\nproperty float z\nproperty ushort intensity\nend_header\n');
+            if (!header.startsWith('ply\nformat binary_little_endian 1.0\n') || !match || (!rgbMode && !intensityMode)) throw Error('Expected binary XYZ/RGB or XYZ/intensity PLY.');
+            if (window.BLK_RGB && !rgbMode) throw Error('Select an RGB PLY for the RGB edition.');
+            const recordBytes = rgbMode ? 15 : 14;
+            $('color').textContent = rgbMode ? 'RGB' : 'Intensity';
+            $('colourDescription').textContent = rgbMode ? 'Colour represents camera RGB. Uncoloured points are gray.' : 'Colour represents laser-return intensity.';
             const total = Number(match[1]),
                 start = marker + 11;
-            if (!Number.isSafeInteger(total) || total <= 0 || source.size !== start + total * 14) throw Error('PLY size/count mismatch.');
+            if (!Number.isSafeInteger(total) || total <= 0 || source.size !== start + total * recordBytes) throw Error('PLY size/count mismatch.');
             if (expectedCount !== undefined && total !== expectedCount) throw Error('PLY count differs from the project record.');
             data = new Float32Array();
             gl.bindBuffer(gl.ARRAY_BUFFER, pointBuffer);
@@ -593,12 +601,12 @@
             for (let base = 0; base < total; base += chunk)
             {
                 const take = Math.min(chunk, total - base),
-                    raw = await source.slice(start + base * 14, start + (base + take) * 14).arrayBuffer();
-                if (raw.byteLength !== take * 14) throw Error('Incomplete PLY read.');
+                    raw = await source.slice(start + base * recordBytes, start + (base + take) * recordBytes).arrayBuffer();
+                if (raw.byteLength !== take * recordBytes) throw Error('Incomplete PLY read.');
                 const view = new DataView(raw);
                 for (let i = 0; i < take; i++)
                 {
-                    const q = i * 14,
+                    const q = i * recordBytes,
                         p = (base + i) * 4;
                     for (let k = 0; k < 3; k++)
                     {
@@ -606,7 +614,7 @@
                         if (!Number.isFinite(v)) throw Error('Non-finite PLY coordinate.');
                         vertices[p + k] = v;
                     }
-                    vertices[p + 3] = view.getUint16(q + 12, true);
+                    vertices[p + 3] = rgbMode ? view.getUint8(q + 12) * 65536 + view.getUint8(q + 13) * 256 + view.getUint8(q + 14) : view.getUint16(q + 12, true);
                 }
                 $('load-progress').value = (base + take) / total * 100;
                 $('load-status').textContent = 'Loading full PLY: ' + (base + take).toLocaleString('en-US') + ' / ' + total.toLocaleString('en-US') + ' points';

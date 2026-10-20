@@ -33,22 +33,7 @@ def hashFile(_path):
     return digest.hexdigest()
 
 
-def readPly(_path):
-    with _path.open("rb") as stream:
-        header = bytearray()
-        while not header.endswith(b"end_header\n"):
-            line = stream.readline()
-            if not line or len(header) > 65536:
-                raise ValueError(f"Invalid PLY header: {_path}")
-            header.extend(line)
-    expected = b"property float x\nproperty float y\nproperty float z\nproperty ushort intensity\nend_header\n"
-    if not header.startswith(b"ply\nformat binary_little_endian 1.0\n") or not header.endswith(expected):
-        raise ValueError("Only BLK Studio XYZ/intensity binary PLY is supported")
-    count = next(int(line.split()[-1]) for line in header.splitlines() if line.startswith(b"element vertex "))
-    if _path.stat().st_size != len(header) + count * 14:
-        raise ValueError("PLY count/size mismatch")
-    dtype = np.dtype([("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("intensity", "<u2")])
-    return np.memmap(_path, dtype=dtype, mode="r", offset=len(header), shape=(count,))
+from ply_io import readPly, colourValues, plyHeader
 
 
 def makeCloud(_points, _normals=None):
@@ -423,9 +408,12 @@ def refineGraph(_result, _output, _progress=None):
 
 
 def writePly(_path, _xyz, _intensity):
-    header = ("ply\nformat binary_little_endian 1.0\ncomment Experimental registered reference map; not independently validated\n"
-              f"element vertex {len(_xyz)}\nproperty float x\nproperty float y\nproperty float z\nproperty ushort intensity\nend_header\n")
-    dtype = np.dtype([("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("intensity", "<u2")])
+    rgb = np.asarray(_intensity).ndim == 2
+    if rgb and np.asarray(_intensity).shape != (len(_xyz), 3):
+        raise ValueError("Expected Nx3 RGB values")
+    header = plyHeader(len(_xyz), rgb)
+    dtype = np.dtype([("x", "<f4"), ("y", "<f4"), ("z", "<f4")] +
+                     ([(c, "u1") for c in ("red", "green", "blue")] if rgb else [("intensity", "<u2")]))
     if _path.exists():
         raise FileExistsError(_path)
     pending = _path.with_suffix(_path.suffix + ".pending")
@@ -436,7 +424,11 @@ def writePly(_path, _xyz, _intensity):
             block = np.empty(end - start, dtype=dtype)
             for i, name in enumerate(("x", "y", "z")):
                 block[name] = _xyz[start:end, i]
-            block["intensity"] = np.clip(np.rint(_intensity[start:end]), 0, 65535).astype(np.uint16)
+            if rgb:
+                for channel, name in enumerate(("red", "green", "blue")):
+                    block[name] = np.clip(np.rint(_intensity[start:end, channel]), 0, 255).astype(np.uint8)
+            else:
+                block["intensity"] = np.clip(np.rint(_intensity[start:end]), 0, 65535).astype(np.uint16)
             stream.write(block.tobytes())
     os.link(pending, _path)
     pending.unlink()
@@ -448,14 +440,19 @@ def merge(_result, _output, _voxel, _name=None, _viewer=True):
         raise ValueError(f"Output already exists: {target}")
     parts = []
     intensities = []
+    colour_mode = None
     for record in _result["scans"]:
         path = pathlib.Path(record["source_path"])
         if hashFile(path) != record["source_sha256"]:
             raise ValueError(f"Source changed since registration: {path}")
         raw = readPly(path)
         cloud = makeCloud(np.column_stack([raw["x"], raw["y"], raw["z"]]))
-        values = raw["intensity"].astype(np.float64) / 65535
-        cloud.colors = o3d.utility.Vector3dVector(np.column_stack([values, values, values]))
+        rgb = "red" in raw.dtype.names
+        if colour_mode is not None and colour_mode != rgb:
+            raise ValueError("Cannot mix RGB and intensity scans in a map")
+        colour_mode = rgb
+        values = colourValues(raw).astype(np.float64) / (255 if rgb else 65535)
+        cloud.colors = o3d.utility.Vector3dVector(values if rgb else np.column_stack([values, values, values]))
         cloud.transform(np.array(record["transform_map_from_scan"]))
         reduced = cloud.voxel_down_sample(_voxel)
         parts.append(np.asarray(reduced.points).copy())
@@ -467,12 +464,12 @@ def merge(_result, _output, _voxel, _name=None, _viewer=True):
     del parts, intensities
     reduced = cloud.voxel_down_sample(_voxel)
     xyz = np.asarray(reduced.points)
-    intensity = np.asarray(reduced.colors)[:, 0] * 65535
+    intensity = np.asarray(reduced.colors) * 255 if colour_mode else np.asarray(reduced.colors)[:, 0] * 65535
     writePly(target, xyz, intensity)
     metadata = {"file": target.name, "points": len(xyz), "voxel_m": _voxel,
                 "minimum_xyz": xyz.min(axis=0).tolist(), "maximum_xyz": xyz.max(axis=0).tolist(),
                 "sha256": hashFile(target), "independently_validated": False,
-                "aggregation": "Per-scan voxel centroids followed by merged voxel centroids; intensity averaged. Original full PLYs and rigid transforms are retained."}
+                "aggregation": "Per-scan voxel centroids followed by merged voxel centroids; colour channels averaged. Original full PLYs and rigid transforms are retained."}
     saveJson(_output / "map.json", metadata)
     if _viewer:
         from view_map import createViewer

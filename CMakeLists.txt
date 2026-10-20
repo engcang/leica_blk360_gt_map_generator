@@ -42,13 +42,28 @@ if(MINGW)
     target_link_options(blk_convert PRIVATE -static)
 endif()
 
+add_executable(blk_convert_rgb blk_core/src/main.cpp)
+add_executable(blk_studio_rgb WIN32 blk_core/src/studio.cpp)
+foreach(target blk_convert_rgb blk_studio_rgb)
+    target_include_directories(${target} PRIVATE blk_core/src)
+    target_link_libraries(${target} PRIVATE blk_core)
+    target_compile_definitions(${target} PRIVATE BLK_RGB=1)
+    if(MINGW)
+        target_link_options(${target} PRIVATE -static)
+    endif()
+endforeach()
+if(MINGW)
+    target_link_options(blk_studio_rgb PRIVATE -municode)
+endif()
+
 ### Copy runtime resources
 #Codex: Refresh assets without a relink; one target avoids concurrent writes to the shared runtime directory.
 add_custom_target(blk_runtime_resources ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/web $<TARGET_FILE_DIR:blk_studio>/web
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/mapping $<TARGET_FILE_DIR:blk_studio>/mapping
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE $<TARGET_FILE_DIR:blk_studio>/LICENSE
-    DEPENDS blk_studio blk_convert)
+    COMMAND ${CMAKE_COMMAND} -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/web -DDEST=$<TARGET_FILE_DIR:blk_studio>/web_rgb -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/rgb_web.cmake
+    DEPENDS blk_studio blk_convert blk_studio_rgb blk_convert_rgb)
 
 ### Test
 include(CTest)
@@ -59,11 +74,19 @@ if(BUILD_TESTING)
         target_link_options(core_tests PRIVATE -static)
     endif()
     add_test(NAME core_tests COMMAND core_tests)
+    add_executable(rgb_tests tests/rgb_tests.cpp)
+    target_link_libraries(rgb_tests PRIVATE blk_core)
+    target_compile_definitions(rgb_tests PRIVATE BLK_RGB=1)
+    if(MINGW)
+        target_link_options(rgb_tests PRIVATE -static)
+    endif()
+    add_test(NAME rgb_tests COMMAND rgb_tests)
 endif()
 
 ### Install
-install(TARGETS blk_studio blk_convert RUNTIME DESTINATION . BUNDLE DESTINATION .)
+install(TARGETS blk_studio blk_convert blk_studio_rgb blk_convert_rgb RUNTIME DESTINATION . BUNDLE DESTINATION .)
 install(DIRECTORY web DESTINATION .)
+install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/web_rgb" DESTINATION .)
 install(DIRECTORY mapping DESTINATION . FILES_MATCHING PATTERN "*.py" PATTERN "requirements.txt"
         PATTERN "__pycache__" EXCLUDE)
 install(DIRECTORY mapping/bin DESTINATION mapping OPTIONAL)

@@ -13,20 +13,9 @@ import re
 
 
 def inspectPly(_path):
-    size = _path.stat().st_size
-    with _path.open("rb") as stream:
-        prefix = stream.read(65536)
-    end = prefix.find(b"end_header\n")
-    if end < 0:
-        raise ValueError("PLY header not found")
-    header = prefix[:end + 11].decode("ascii")
-    match = re.search(r"^element vertex (\d+)$", header, re.MULTILINE)
-    if not header.startswith("ply\nformat binary_little_endian 1.0\n") or not match or not header.endswith("property float x\nproperty float y\nproperty float z\nproperty ushort intensity\nend_header\n"):
-        raise ValueError("Expected a BLK Studio binary XYZ/intensity PLY")
-    points = int(match[1])
-    if points <= 0 or size != end + 11 + points * 14:
-        raise ValueError("PLY size/count mismatch")
-    return {"file": _path.name, "points": points, "bytes": size}
+    from ply_io import layout
+    points, _, _, rgb = layout(_path)
+    return {"file": _path.name, "points": points, "bytes": _path.stat().st_size, "colour_mode": "rgb" if rgb else "intensity"}
 
 
 def createShareViewer(_ply, _output, _poses=None, _embed=True, _map_metadata=None):

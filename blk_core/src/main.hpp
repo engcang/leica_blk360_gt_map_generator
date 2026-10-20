@@ -22,7 +22,7 @@ namespace blk_core
             try
             {
                 const auto directory = executablePath().parent_path();
-                auto project_root = directory / "projects" / "default";
+                auto project_root = directory / "projects" / (rgbEdition ? "rgb" : "default");
                 bool open_browser = true;
                 for (std::size_t i = 0; i < _arguments.size(); ++i)
                 {
@@ -59,11 +59,11 @@ namespace blk_core
                     }
                     return 0;
                 }
-                if (!std::filesystem::exists(directory / "web/index.html"))
+                if (!std::filesystem::exists(directory / (rgbEdition ? "web_rgb" : "web") / "index.html"))
                 {
                     throw std::runtime_error("Keep the web folder beside the application. Extract the complete ZIP before opening it.");
                 }
-                return WebServer(project_root, directory / "web").run(open_browser);
+                return WebServer(project_root, directory / (rgbEdition ? "web_rgb" : "web")).run(open_browser);
             }
             catch (const std::exception &error)
             {

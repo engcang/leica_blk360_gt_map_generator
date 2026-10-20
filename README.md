@@ -56,7 +56,34 @@ Adding registration inputs re-sorts the selection; **Up / Down** allows manual c
 3. Each scan becomes one full-resolution file: `Setup26.blk → Setup26.ply`.
 4. Click **View 3D**, or open **View saved point clouds** and choose **Open PLY files** / **Open folder**.
 
-Color is always **Intensity**. Display density is **1/10**, **1/5**, **1/2**, or **Full** (default);
+Two editions are built together on both platforms:
+
+| Edition | Windows executable | Ubuntu executable | PLY colour |
+|---|---|---|---|
+| Intensity | `install/blk_studio.exe` | `install/blk_studio` | uint16 intensity |
+| RGB | `install/blk_studio_rgb.exe` | `install/blk_studio_rgb` | uint8 red, green, blue (no intensity field) |
+
+To launch RGB, use **`Start-BLK-Studio-RGB.bat`** on Windows or **`bash start.sh --rgb`** on Ubuntu.
+Both launchers build both editions; `--no-launch` / `-NoLaunch` builds without opening either.
+CLI converters are `blk_convert` and `blk_convert_rgb` (with `.exe` on Windows).
+Each app has separate local work records (`projects/default` and `projects/rgb`).
+Use separate output folders for the two editions; existing PLY files are never overwritten.
+
+RGB currently supports **BLK360 G1 LDR images with the decoded pinhole calibration**.
+Scans without LDR images or with unsupported camera models fail explicitly. HDR decoding
+is not yet supported. Camera projection uses the embedded intrinsics and extrinsics,
+a depth visibility check, and the closest optical axis. Uncoloured points are gray;
+coverage counts appear in conversion metadata. Colour seams and boundary artifacts
+are possible; calibration has not been independently validated against Leica exports.
+No new Python/image-codec package is needed for conversion: both use the existing native JPEG XR codec.
+
+All tabs and registration functions are shared: scan/chunk placement, Additional Register,
+quality reports, raw/1 cm exports, and offline share HTML. RGB channels are preserved in
+raw exports and averaged in voxel maps. Registration and quality metrics use geometry,
+not colour. Inputs must match the edition; RGB and intensity scans cannot be mixed.
+Do not run setup or replace installed files while a registration worker is running.
+
+Color is fixed to **Intensity** or **RGB** according to the edition. Display density is **1/10**, **1/5**, **1/2**, or **Full** (default);
 navigation temporarily draws at most 2,000,000 points. Left-drag orbits around
 the surface near the screen center, or looks around in place when no surface is
 found. The pivot updates at drag start without moving the camera, and stays fixed

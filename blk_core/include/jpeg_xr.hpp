@@ -49,14 +49,14 @@ namespace blk_core
         std::vector<std::uint8_t> decode(std::vector<std::uint8_t> &_encoded,
                                          int _bits,
                                          int &_rows,
-                                         int _columns)
+                                         int _columns, int *_height = nullptr)
         {
             check(CreateWS_Memory(&stream_, _encoded.data(), _encoded.size()), "memory stream");
             check(PKImageDecode_Create_WMP(&decoder_), "decoder");
             check(decoder_->Initialize(decoder_, stream_), "JPEG XR header");
             PKPixelFormatGUID format;
             check(decoder_->GetPixelFormat(decoder_, &format), "pixel format");
-            const auto &expected = _bits == 32 ? GUID_PKPixelFormat32bppGrayFixedPoint : GUID_PKPixelFormat16bppGray;
+            const auto &expected = _bits == 24 ? GUID_PKPixelFormat24bppRGB : (_bits == 32 ? GUID_PKPixelFormat32bppGrayFixedPoint : GUID_PKPixelFormat16bppGray);
             if (std::memcmp(&format, &expected, sizeof(format)) != 0)
             {
                 throw std::runtime_error("Unsupported JPEG XR integer format");
@@ -64,11 +64,12 @@ namespace blk_core
             I32 width = 0;
             I32 height = 0;
             check(decoder_->GetSize(decoder_, &width, &height), "image size");
-            if (width <= 0 || width > 100000 || height != _columns || (_rows != 0 && _rows != width))
+            if (width <= 0 || width > 100000 || height <= 0 || height > 100000 || (_columns > 0 && height != _columns) || (_rows != 0 && _rows != width))
             {
                 throw std::runtime_error("Inconsistent JPEG XR plane dimensions");
             }
             _rows = width;
+            if (_height) *_height = height;
             const auto stride = static_cast<std::size_t>(width) * (_bits / 8);
             const auto bytes = stride * static_cast<std::size_t>(height);
             if (bytes > 2147483647)

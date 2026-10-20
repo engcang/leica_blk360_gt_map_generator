@@ -20,6 +20,8 @@
 #include "blk_container.hpp"
 #include "jpeg_xr.hpp"
 #include "platform.hpp"
+#include "color_mode.hpp"
+#include "rgb_colour.hpp"
 
 namespace blk_core
 {
@@ -101,8 +103,12 @@ namespace blk_core
         nlohmann::json convert(const std::filesystem::path &_input,
                                const std::filesystem::path &_destination,
                                const std::atomic<bool> &_cancel,
-                               const std::function<void(const Progress &)> &_progress) const
+                               const std::function<void(const Progress &)> &_callback) const
         {
+            const auto _progress = [&](Progress value) {
+                if (rgbEdition && value.fraction_ < .96) value.fraction_ *= .55;
+                _callback(value);
+            };
             requireLittleEndian();
             if (_destination.extension() != ".ply")
             {
@@ -117,6 +123,7 @@ namespace blk_core
             BlkContainer container(_input);
             const auto display_name = _input.filename().u8string();
             auto model = container.parse();
+            if (rgbEdition) container.ldrImages();
             const auto work = _destination.parent_path() / (".blk-work-" + newId());
             std::filesystem::create_directories(work);
             try
@@ -226,6 +233,12 @@ namespace blk_core
                 {
                     throw std::runtime_error("Output count/size verification failed");
                 }
+                nlohmann::json colour = {{"colour_mode", "intensity"}};
+                if (rgbEdition) {
+                    colour = colourPly(container, work / "cloud.ply", work / "rgb.ply", count, _cancel, _callback);
+                    std::filesystem::remove(work / "cloud.ply");
+                    std::filesystem::rename(work / "rgb.ply", work / "cloud.ply");
+                }
                 checkCancel(_cancel);
                 _progress({"Finishing PLY", 0.96});
                 if (std::filesystem::file_size(_input) != source_size || std::filesystem::last_write_time(_input) != source_time)
@@ -248,6 +261,7 @@ namespace blk_core
                                          {"independently_validated", false},
                                          {"transform_map_from_scan", nullptr},
                                          {"registration_status", "not_registered"}};
+                result.update(colour);
                 for (const auto &name : names)
                 {
                     std::filesystem::remove(work / (name + ".raw"));

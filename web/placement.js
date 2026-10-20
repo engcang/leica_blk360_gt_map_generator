@@ -51,9 +51,10 @@
         const result=gl.createShader(kind);gl.shaderSource(result,source);gl.compileShader(result);
         if(!gl.getShaderParameter(result,gl.COMPILE_STATUS)) throw Error(gl.getShaderInfoLog(result));return result;
     }
+    const rgbMode = Boolean(window.BLK_RGB);
     const program=gl.createProgram();
-    gl.attachShader(program,shader(gl.VERTEX_SHADER,'attribute vec4 point;uniform mat4 mvp;uniform float size,clipZ,clipEnabled;uniform vec4 heightRow;varying float intensity,visible;void main(){gl_Position=mvp*vec4(point.xyz,1.0);gl_PointSize=size;intensity=point.w;visible=clipEnabled<.5||dot(heightRow,vec4(point.xyz,1.0))<=clipZ?1.:0.;}'));
-    gl.attachShader(program,shader(gl.FRAGMENT_SHADER,'precision mediump float;varying float intensity,visible;uniform vec2 range;void main(){if(visible<.5)discard;vec2 q=gl_PointCoord-.5;if(dot(q,q)>.25)discard;float t=clamp((intensity-range.x)/max(1.,range.y-range.x),0.,1.);gl_FragColor=vec4(mix(vec3(.18,.3,.42),vec3(.95,.97,1.),t),1.);}'));
+    gl.attachShader(program,shader(gl.VERTEX_SHADER,'attribute vec4 point;uniform mat4 mvp;uniform float size,clipZ,clipEnabled;uniform vec4 heightRow;varying float intensity,visible;varying vec3 rgb;void main(){gl_Position=mvp*vec4(point.xyz,1.0);gl_PointSize=size;intensity=point.w;rgb=vec3(floor(point.w/65536.),mod(floor(point.w/256.),256.),mod(point.w,256.))/255.;visible=clipEnabled<.5||dot(heightRow,vec4(point.xyz,1.0))<=clipZ?1.:0.;}'));
+    gl.attachShader(program,shader(gl.FRAGMENT_SHADER,'precision mediump float;varying float intensity,visible;varying vec3 rgb;uniform vec2 range;void main(){if(visible<.5)discard;vec2 q=gl_PointCoord-.5;if(dot(q,q)>.25)discard;float t=clamp((intensity-range.x)/max(1.,range.y-range.x),0.,1.);gl_FragColor=vec4('+(rgbMode?'rgb':'mix(vec3(.18,.3,.42),vec3(.95,.97,1.),t)')+',1.);}'));
     gl.linkProgram(program);
     if(!gl.getProgramParameter(program,gl.LINK_STATUS)) throw Error(gl.getProgramInfoLog(program));
     const uniforms={mvp:gl.getUniformLocation(program,'mvp'),size:gl.getUniformLocation(program,'size'),range:gl.getUniformLocation(program,'range')};
@@ -167,7 +168,7 @@
         $('tool').disabled=mode!=='place';
         canvas.style.cursor=mode==='view'?'grab':'move';
         document.body.dataset.interactionMode=mode;
-        $('details').textContent=(mode==='view'?'Left drag: orbit view.':'Left drag: move/rotate selected scan or chunk.')+' Right/middle drag: pan view. Wheel: navigate. Shift: fine adjustment. Colour: intensity. Height cut affects display only.';
+        $('details').textContent=(mode==='view'?'Left drag: orbit view.':'Left drag: move/rotate selected scan or chunk.')+' Right/middle drag: pan view. Wheel: navigate. Shift: fine adjustment. Colour: '+(rgbMode?'RGB':'intensity')+'. Height cut affects display only.';
         requestDraw();
     }
     $('mode-view').onclick=()=>setInteractionMode('view');

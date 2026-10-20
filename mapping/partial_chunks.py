@@ -13,6 +13,7 @@ import numpy as np
 
 from automatic_connections import componentPoses
 from json_io import saveJson
+from chunk_placements import refreshChunkPlacements
 from register_scans import readPly, writePly
 from share_map import createShareViewer
 from studio_worker import connectedGroups
@@ -30,7 +31,7 @@ def writeText(path, text):
     pending.replace(path)
 
 
-def createChunkReview(records, edges, output, report, progress):
+def createChunkReview(records, edges, output, report, progress, pose_method=None):
     output.mkdir(parents=True, exist_ok=True)
     assets = output / "html_source" / "chunks"
     assets.mkdir(parents=True, exist_ok=True)
@@ -121,12 +122,15 @@ def createChunkReview(records, edges, output, report, progress):
 .chunk-embedded #cloud{height:100%;min-height:0}
 </style><script>if(window.parent!==window)document.body.classList.add('chunk-embedded');</script>'''
             writeText(view_path, document.replace("</body>", layout + "</body>"))
+        if pose_method is not None:
+            chunk["pose_method"] = pose_method
         chunks.append({**chunk, "number": number, "viewer": f"html_source/chunks/{key}/view.html",
                        "image": f"html_source/chunks/{key}/stations.png"})
     manifest = {"schema_version": 1, "status": "disconnected_partial_result", "generated_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 "shared_coordinate_frame": False, "final_refinement_applied": False,
                 "transform_convention": "p_chunk = T_chunk_scan @ [x,y,z,1]; metres; each chunk anchored at its first row",
                 "groups": groups, "chunks": chunks}
+    refreshChunkPlacements(output, chunks)
     saveJson(output / "partial_chunks.json", manifest)
     template = pathlib.Path(__file__).resolve().parents[1] / "web" / "chunks_review.html"
     payload = json.dumps(manifest, allow_nan=False).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")

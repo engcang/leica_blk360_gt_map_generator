@@ -159,6 +159,7 @@
     {
         const ctx = $('axes').getContext('2d');
         ctx.clearRect(0, 0, 140, 140);
+        if (!$('grid').checked) return;
         ctx.fillStyle = 'rgba(10,17,26,.8)';
         ctx.beginPath();
         ctx.arc(70, 70, 64, 0, Math.PI * 2);

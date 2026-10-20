@@ -9,7 +9,7 @@
     const gl = canvas.getContext('webgl', {antialias: true});
     if (!gl) { $('error').textContent = 'WebGL is unavailable.'; return; }
     let items = [], selected = 1, reference = 0, loading = false, generation = 0, controller = null;
-    let drag = null, frame = 0, extent = 10, launched = false;
+    let drag = null, frame = 0, extent = 10, locked = false;
     let interactionMode = 'view', heightCut = null;
     let saveContext = null, saveTimer = null, saveQueue = Promise.resolve(), dirty = false;
     const cache = new Map(), undo = [];
@@ -96,7 +96,7 @@
             }
         }
         const ctx=overlay.getContext('2d');ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,canvas.clientWidth,canvas.clientHeight);
-        if(items[selected])
+        if(items[selected] && $('axes-visible').checked)
         {
             const origin=items[selected].pose.slice(0,3),o=project(origin,b.mvp);
             if(o)
@@ -190,7 +190,7 @@
     async function loadVisible(refit=false)
     {
         const version=++generation;controller?.abort();controller=new AbortController();const signal=controller.signal;
-        loading=true;document.body.dataset.loaded='false';$('apply').disabled=true;$('error').textContent='';$('progress').hidden=false;
+        loading=true;document.body.dataset.loaded='false';$('error').textContent='';$('progress').hidden=false;
         const keep=new Set(visible().map(i=>items[i].id)),stride=Number($('density').value);
         for(const [id,entry] of cache)if(!keep.has(id)||entry.stride!==stride||!entry.complete){dispose(entry);cache.delete(id);}
         try
@@ -231,17 +231,17 @@
             if(refit)fit();
         }
         catch(error){if(error.name!=='AbortError'&&version===generation)$('error').textContent=error.message;}
-        finally{if(version===generation){loading=false;$('progress').hidden=true;$('apply').disabled=launched||!!$('error').textContent;requestDraw();}}
+        finally{if(version===generation){loading=false;$('progress').hidden=true;requestDraw();}}
     }
     function sync()
     {
         if(!items.length)return;
         const item=items[selected];$('moving').value=selected;$('reference').value=reference;
         for(const option of $('reference').options)option.disabled=Number(option.value)===selected;
-        ['x','y','z','yaw'].forEach((id,i)=>{$(id).value=(item.pose[i]*(i===3?180/Math.PI:1)).toFixed(i===3?2:3);$(id).disabled=selected===0||launched;});
-        $('use').checked=item.enabled;$('use').disabled=selected===0||launched;
+        ['x','y','z','yaw'].forEach((id,i)=>{$(id).value=(item.pose[i]*(i===3?180/Math.PI:1)).toFixed(i===3?2:3);$(id).disabled=selected===0||locked;});
+        $('use').checked=item.enabled;$('use').disabled=selected===0||locked;
         $('previous').disabled=selected===0;$('next').disabled=selected===items.length-1;
-        $('zero').disabled=selected===0||launched;$('undo').disabled=!undo.length||launched;
+        $('zero').disabled=selected===0||locked;$('undo').disabled=!undo.length||locked;
         $('pose-note').textContent=selected===0?'First item is the fixed coordinate anchor.':`${item.name}: drag to move, or enter numerical offsets. Yellow axes mark its scanner/chunk origin.`;
         updateHeightControls();
         [...$('items').children].forEach((button,i)=>{button.classList.toggle('selected',i===selected);button.textContent=(items[i].enabled?'[Placed] ':'')+items[i].name;});
@@ -267,7 +267,7 @@
             for(const id of ['moving','reference']){const option=document.createElement('option');option.value=i;option.textContent=item.name;$(id).append(option);}
             const button=document.createElement('button');button.textContent=item.name;button.onclick=()=>choose(i);$('items').append(button);
         }
-        if(job)$('apply').textContent='Register placed chunks';sync();loadVisible(true);
+        sync();loadVisible(true);
     }
     $('moving').onchange=e=>choose(Number(e.target.value));$('reference').onchange=e=>{reference=Number(e.target.value);sync();loadVisible(true);};
     $('previous').onclick=()=>choose(Math.max(0,selected-1));$('next').onclick=()=>choose(Math.min(items.length-1,selected+1),true);
@@ -282,6 +282,7 @@
     $('zero').onclick=()=>{remember();items[selected].pose=[0,0,0,0];items[selected].enabled=false;backupChanged();sync();};
     $('top').onclick=()=>{camera.azimuth=-Math.PI/2;camera.elevation=Math.PI/2-.001;requestDraw();};
     $('oblique').onclick=()=>{camera.azimuth=-Math.PI/4;camera.elevation=Math.PI/5;requestDraw();};
+    $('axes-visible').onchange=requestDraw;
     $('fit').onclick=fit;$('projection').onchange=requestDraw;$('density').onchange=()=>loadVisible(false);
     const units=()=>2*camera.distance*tanHalf/canvas.clientHeight;
     function xyAt(x,y,z)
@@ -296,9 +297,10 @@
     canvas.oncontextmenu=e=>e.preventDefault();
     canvas.onpointerdown=e=>
     {
-        if(e.button>2||!items.length||launched)return;e.preventDefault();
+        if(e.button>2||!items.length)return;e.preventDefault();
         const rect=canvas.getBoundingClientRect(),x=e.clientX-rect.left,y=e.clientY-rect.top;
         const mode=e.button===1||e.button===2?'pan':interactionMode==='view'?'orbit':$('tool').value;
+        if(locked&&mode!=='pan'&&mode!=='orbit')return;
         if(mode!=='pan'&&mode!=='orbit'&&selected===0){$('save-status').textContent='Select another item; the first item is the fixed anchor.';return;}
         if(mode!=='pan'&&mode!=='orbit')remember();
         drag={id:e.pointerId,x,y,mode};canvas.setPointerCapture(e.pointerId);canvas.focus();requestDraw();
@@ -336,6 +338,7 @@
     function backupChanged()
     {
         dirty = true;
+        window.opener?.postMessage({type:'placement-saving', job}, location.origin);
         $('save-status').textContent = 'Saving placement changes...';
         clearTimeout(saveTimer);
         if (saveContext) saveTimer = setTimeout(() => saveBackup().catch(error => $('error').textContent = error.message), 300);
@@ -347,11 +350,21 @@
         saveQueue = saveQueue.catch(() => {}).then(async () =>
         {
             if (!saveContext) throw Error('Placement save context is unavailable. Keep this editor open.');
+            if (job)
+            {
+                const current = await api('registration/placement/' + encodeURIComponent(job));
+                if (current.busy || JSON.stringify(current.items.map(item => item.id)) !== JSON.stringify(saveContext.chunk_keys))
+                {
+                    locked = true; sync();
+                    throw Error('Registration is running or chunks changed. Keep this tab open to preserve unsaved edits; reopen Arrange chunks after registration.');
+                }
+            }
             const result = await api('registration/placements/save', {...saveContext, initial_guesses:values});
             if (JSON.stringify(values) === JSON.stringify(items.map(item => item.enabled ? item.pose : null)))
             {
                 dirty = false;
-                $('save-status').textContent = `Saved on disk: ${result.path}. ${job ? 'Click Register placed chunks to apply.' : 'Click Use placements in Register to apply.'}`;
+                $('save-status').textContent = `Saved on disk: ${result.path}`;
+                window.opener?.postMessage({type:'placement-autosaved', job}, location.origin);
             }
             return result;
         });
@@ -361,46 +374,37 @@
     {
         if (dirty) { event.preventDefault(); event.returnValue = ''; }
     });
-    $('apply').onclick=async()=>
-    {
-        try
-        {
-            const values=items.map(item=>({id:item.id,pose:item.enabled?item.pose.slice():null}));
-            if(job)
-            {
-                $('apply').disabled=true;
-                await saveBackup();
-                await api('registration/start',{resume_id:job,chunk_initial_guesses:Object.fromEntries(values.map(v=>[v.id,v.pose]))});
-                launched=true;dirty=false;sync();$('apply').disabled=true;$('save-status').textContent='Registration started. Monitor Results and progress in the Register tab.';
-                window.opener?.postMessage({type:'chunk-placement-started'},location.origin);
-            }
-            else
-            {
-                await saveBackup();
-                if(!window.opener||window.opener.closed)throw Error('Placements are saved on disk. Open Register, select these PLYs and output folder, saved placements will be restored automatically.');
-                window.opener.postMessage({type:'placement-save',items:values},location.origin);
-            }
-        }
-        catch(error){$('error').textContent=error.message;$('apply').disabled=false;}
-    };
-    window.addEventListener('message',e=>
+    window.addEventListener('message',async e=>
     {
         if(e.origin!==location.origin||e.source!==window.opener)return;
+        if (job && ['placement-lock','placement-started','placement-unlock'].includes(e.data?.type))
+        {
+            locked = e.data.type !== 'placement-unlock'; drag = null; sync();
+            if (e.data.type === 'placement-lock')
+            {
+                try
+                {
+                    if (dirty) await saveBackup();
+                    else await saveQueue;
+                    window.opener?.postMessage({type:'placement-locked', job}, location.origin);
+                }
+                catch (error) { window.opener?.postMessage({type:'placement-locked', job, error:error.message}, location.origin); }
+            }
+            if (e.data.type === 'placement-started') $('save-status').textContent = 'Registration started. Follow the worker log in the Register tab. Reopen Arrange chunks for the new result.';
+        }
         if(e.data?.type==='placement-input'){saveContext=e.data.context||null;initialize(e.data.items);}
-        if(e.data?.type==='placement-saved')$('save-status').textContent=e.data.activeOutput === false
-            ? `Saved on disk: ${e.data.path}. Register currently has a different output folder selected. Select this placement folder to use these poses.`
-            : `Saved on disk and verified: ${e.data.path}. Return to Register and click Register scans.`;
         if(e.data?.type==='placement-error')$('error').textContent=e.data.error;
     });
-    canvas.addEventListener('webglcontextlost',e=>{e.preventDefault();controller?.abort();$('error').textContent='Graphics context lost. Reload the placement editor.';$('apply').disabled=true;});
+    canvas.addEventListener('webglcontextlost',e=>{e.preventDefault();controller?.abort();$('error').textContent='Graphics context lost. Reload the placement editor.';});
     new ResizeObserver(requestDraw).observe(canvas);
     window.blkPlacement={items:()=>items,poseMatrix,multiply,fromRows,choose,fit,camera};
     if(job)api('registration/placement/'+encodeURIComponent(job)).then(async result=>
     {
-        if(result.busy)throw Error('Stop the current registration before arranging chunks.');
-        saveContext={resume_id:job};
+        if(result.busy)throw Error('Wait for the current registration to finish before arranging chunks.');
+        saveContext={resume_id:job, chunk_keys:result.items.map(item=>item.id)};
         const saved=await api('registration/placements/load',saveContext);
-        saved.initial_guesses.forEach((pose,i)=>{if(pose)result.items[i].pose=pose;});
+        if (saved.initial_guesses.length !== result.items.length) throw Error('Chunks changed. Reopen Arrange chunks.');
+        saved.initial_guesses.forEach((pose,i)=>{result.items[i].pose=pose || null;});
         initialize(result.items);
     }).catch(error=>$('error').textContent=error.message);
     else if(window.opener)window.opener.postMessage({type:'placement-ready'},location.origin);

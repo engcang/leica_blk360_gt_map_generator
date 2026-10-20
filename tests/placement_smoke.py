@@ -110,8 +110,8 @@ def run(args):
             editor = popup.value
             editor.on("pageerror", lambda error: errors.append(str(error)))
             editor.wait_for_function("window.blkPlacement?.items().length === 3 && document.body.dataset.loaded === 'true'")
-            assert editor.locator("#density").input_value() == "10"
-            assert int(editor.locator("body").get_attribute("data-shown")) == 2 * ((len(world) + 9)//10)
+            assert editor.locator("#density").input_value() == "1"
+            assert int(editor.locator("body").get_attribute("data-shown")) == 2 * len(world)
             editor.locator("#mode-place").click()
             before = editor.evaluate("blkPlacement.items()[1].pose.slice()")
             box = editor.locator("#scene").bounding_box()
@@ -140,7 +140,8 @@ def run(args):
             editor.locator("#oblique").click()
             editor.locator("#fit").click()
             editor.screenshot(path=str(root / "placement.png"))
-            editor.locator("#apply").click()
+            assert editor.locator("#apply").count() == 0
+            editor.wait_for_function("document.querySelector('#save-status').textContent.startsWith('Saved on disk:')")
             page.wait_for_function("initial_placements.size === 3")
             values = page.evaluate("registrationDraft().initial_guesses")
             np.testing.assert_allclose(values, poses, atol=1e-8)
@@ -174,11 +175,11 @@ def run(args):
             chunk_editor.on("pageerror", lambda error: errors.append(str(error)))
             chunk_editor.goto(base + '/placement.html?job=' + job['id'] + '#' + session['token'])
             chunk_editor.wait_for_function("window.blkPlacement?.items().length === 2 && document.body.dataset.loaded === 'true'")
-            assert int(chunk_editor.locator('body').get_attribute('data-shown')) == 3 * ((len(world)+9)//10)
+            assert int(chunk_editor.locator('body').get_attribute('data-shown')) == 3 * len(world)
             for id_,value in zip(('x','y','z','yaw'),(2.2,-.3,.2,np.degrees(-.1))):
                 chunk_editor.locator('#'+id_).fill(str(value));chunk_editor.locator('#'+id_).press('Tab')
-            chunk_editor.locator('#apply').click()
-            chunk_editor.wait_for_function("document.querySelector('#save-status').textContent.includes('Registration started')")
+            chunk_editor.wait_for_function("document.querySelector('#save-status').textContent.startsWith('Saved on disk:')")
+            page.evaluate("id => startChunkRegistration(id)", job['id'])
             completed = waitFor(idle, 180)
             resumed = next(item for item in completed['jobs'] if item['id']==job['id'])
             assert resumed['status']=='completed', resumed

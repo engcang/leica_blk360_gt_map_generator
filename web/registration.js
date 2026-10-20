@@ -18,10 +18,13 @@ function selectPlacementOutput()
     placement_restore_error = '';
 }
 let placement_window = null, placement_context = null;
-let placement_saving = false, placement_restoring = false;
+const placement_pending_outputs = new Set();
+const chunk_windows = new Map(), chunk_pending = new Set(), chunk_locks = new Map();
+let latest_worker_log = 'No active registration.';
+const placementSaving = () => placement_pending_outputs.has(element('map-output').value.trim());
+let placement_restoring = false;
 let placement_restore_serial = 0;
 const identity_pose = [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]];
-const resume_pairs = new Map();
 const registration_visible_jobs = new Set();
 
 function registrationDraft()
@@ -32,8 +35,7 @@ function registrationDraft()
         initial_guesses: registration_ids.map(id => initial_placements.get(id) || null),
         name: element('map-name').value.trim(),
         output_directory: element('map-output').value.trim(),
-        voxel_m: Number(element('map-voxel').value),
-        additional_pairs: element('map-pairs').value.trim()
+        voxel_m: Number(element('map-voxel').value)
     };
 }
 
@@ -133,7 +135,7 @@ function registrationControls()
 {
     const busy = registration_state?.busy || registration_starting;
     element('placement-open').disabled = !!busy || registration_ids.length < 2;
-    element('registration-start').disabled = !registration_state || busy || placement_saving || placement_restoring || registration_state.runtime.status !== 'completed' || registration_ids.length < 2 || !element('map-output').value.trim() || !!placement_restore_error;
+    element('registration-start').disabled = !registration_state || busy || placementSaving() || placement_restoring || registration_state.runtime.status !== 'completed' || registration_ids.length < 2 || !element('map-output').value.trim() || !!placement_restore_error;
     element('registration-stop').disabled = !busy;
     element('runtime-check').disabled = element('runtime-install').disabled = !!busy;
 }
@@ -165,13 +167,6 @@ function renderRegistrationJob(job)
         scans.append(groups);
         scans.open = true;
     }
-    if (job.additional_pairs)
-    {
-        const pairs = document.createElement('p');
-        pairs.className = 'hint';
-        pairs.textContent = `Additional pairs tried: ${job.additional_pairs.replace(/^,/, '')}`;
-        scans.append(pairs);
-    }
     const actions = document.createElement('div');
     actions.className = 'registration-actions result-actions';
     if (job.chunks_available && job.status !== 'completed')
@@ -180,10 +175,27 @@ function renderRegistrationJob(job)
         chunks.className = 'primary review-result';
         const arrange = button('Arrange chunks', () =>
         {
-            window.open(`placement.html?job=${encodeURIComponent(job.id)}#${token}`, '_blank');
+            const existing = chunk_windows.get(job.id);
+            if (existing && !existing.closed) { existing.focus(); return; }
+            const editor = window.open(`placement.html?job=${encodeURIComponent(job.id)}#${token}`, '_blank');
+            if (!editor) throw Error('Allow a new tab to open the chunk editor.');
+            chunk_windows.set(job.id, editor);
         });
         arrange.disabled = !!registration_state.busy;
-        actions.append(chunks, arrange);
+        const refine = document.createElement('input');
+        refine.type = 'checkbox';
+        refine.checked = false;
+        refine.disabled = !!registration_state.busy || !registration_state.individual_scan_refinement_option;
+        const option = document.createElement('label');
+        option.className = 'chunk-refinement-option';
+        const caption = document.createElement('span');
+        caption.textContent = 'Refine individual scans afterward (slower; changes internal chunk alignment)';
+        if (!registration_state.individual_scan_refinement_option) option.title = 'Available after starting the updated app.';
+        option.append(refine, caption);
+        const register = button('Register chunks', () => startChunkRegistration(job.id, false, refine.checked));
+        register.className = 'primary';
+        register.disabled = !!registration_state.busy || registration_starting || chunk_pending.has(job.id) || registration_state.runtime.status !== 'completed';
+        actions.append(chunks, arrange, register, option);
     }
     else if (job.status === 'needs_connections')
     {
@@ -214,24 +226,13 @@ function renderRegistrationJob(job)
     }
     else if (['needs_connections', 'failed', 'cancelled', 'interrupted'].includes(job.status))
     {
-        const pairs = document.createElement('input');
-        pairs.placeholder = 'Optional extra pairs, e.g. 1:4,2:5';
-        pairs.setAttribute('aria-label', `Additional pairs for ${job.name}`);
-        pairs.value = resume_pairs.get(job.id) || '';
-        pairs.oninput = () => resume_pairs.set(job.id, pairs.value);
         const resume = button('Resume', async () =>
         {
-            await api('registration/start',
-            {
-                resume_id: job.id,
-                additional_pairs: pairs.value
-            });
-            registration_visible_jobs.add(job.id);
-            resume_pairs.delete(job.id);
-            await refreshRegistration();
+            await startChunkRegistration(job.id, true);
+            return;
         });
-        resume.disabled = !!registration_state.busy || registration_state.runtime.status !== 'completed';
-        actions.append(pairs, resume);
+        resume.disabled = !!registration_state.busy || registration_starting || chunk_pending.has(job.id) || registration_state.runtime.status !== 'completed';
+        actions.append(resume);
     }
     actions.append(button('Open output folder', () => api(`registration/open/${job.id}`,
     {})));
@@ -242,6 +243,55 @@ function renderRegistrationJob(job)
         : `Initial placements used by this job: ${job.initial_placement_count} / ${job.scans.length} scans.`;
     row.append(heading, state, initialization, path, actions, scans);
     return row;
+}
+
+async function startChunkRegistration(id, automatic = false, refineScans = false)
+{
+    if (registration_starting || registration_state?.busy) return;
+    if (chunk_pending.has(id)) throw Error('Wait for chunk placements to finish saving.');
+    registration_starting = true;
+    registrationControls();
+    const editor = chunk_windows.get(id);
+    let started = false;
+    try
+    {
+        if (editor && !editor.closed)
+        {
+            await new Promise((resolve, reject) =>
+            {
+                const timer = setTimeout(() => { chunk_locks.delete(id); reject(Error('The chunk editor did not respond. Keep it open and check that edits are saved.')); }, 10000);
+                chunk_locks.set(id, result => { clearTimeout(timer); chunk_locks.delete(id); result.error ? reject(Error(result.error)) : resolve(); });
+                editor.postMessage({type:'placement-lock'}, location.origin);
+            });
+        }
+        const request = {resume_id: id};
+        if (!automatic)
+        {
+            const layout = await api('registration/placement/' + encodeURIComponent(id));
+            if (layout.busy) throw Error('Wait for the active registration to finish.');
+            const keys = layout.items.map(item => item.id);
+            const saved = await api('registration/placements/load', {resume_id: id, chunk_keys: keys});
+            if (saved.initial_guesses.length !== keys.length || (saved.chunk_keys && JSON.stringify(saved.chunk_keys) !== JSON.stringify(keys)))
+                throw Error('Chunks changed. Reopen Arrange chunks to inspect the current result.');
+            if (saved.initial_guesses.filter(Boolean).length < 2)
+                throw Error('Place at least two chunks in Arrange chunks first, or use Resume for automatic matching.');
+            request.refine_individual_scans = refineScans;
+            request.chunk_initial_guesses = Object.fromEntries(keys.map((key, index) => [key, saved.initial_guesses[index]]));
+        }
+        // The editor can report a final pending edit while these reads are in flight.
+        if (chunk_pending.has(id)) throw Error('Wait for chunk placements to finish saving.');
+        await api('registration/start', request);
+        started = true;
+        registration_visible_jobs.add(id);
+        latest_worker_log = 'Waiting for worker output.';
+    }
+    finally
+    {
+        registration_starting = false;
+        if (editor && !editor.closed) editor.postMessage({type: started ? 'placement-started' : 'placement-unlock'}, location.origin);
+        if (started) chunk_windows.delete(id);
+        await refreshRegistration();
+    }
 }
 
 async function refreshRegistration()
@@ -261,14 +311,13 @@ async function refreshRegistration()
             element('map-name').value = 'reference_map';
             element('map-voxel').value = '0.01';
             element('map-output').value = '';
-            element('map-pairs').value = '';
 
             element('registration-setup').open = runtime.status !== 'completed';
             renderRegistrationScans();
         }
         registrationControls();
         const visible_jobs = registration_state.jobs.filter(job => registration_visible_jobs.has(job.id) || job.status === 'running');
-        const signature = JSON.stringify([visible_jobs, registration_state.busy, runtime.status]);
+        const signature = JSON.stringify([visible_jobs, registration_state.busy, runtime.status, registration_starting, [...chunk_pending]]);
         if (signature !== registration_signature)
         {
             registration_signature = signature;
@@ -281,7 +330,13 @@ async function refreshRegistration()
                 element('registration-jobs').append(empty);
             }
         }
-        element('registration-log').textContent = visible_jobs.some(job => job.status === 'running') ? (registration_state.log || 'Waiting for worker output.') : 'No active registration.';
+        if (visible_jobs.some(job => job.status === 'running'))
+            latest_worker_log = registration_state.log || 'Waiting for worker output.';
+        else if (registration_state.log && latest_worker_log !== 'No active registration.')
+            latest_worker_log = registration_state.log;
+        const log = element('registration-log');
+        if (log.textContent !== latest_worker_log) log.textContent = latest_worker_log;
+        log.scrollTop = log.scrollHeight;
         if (registration_state.storage_error) notice(registration_state.storage_error, true);
     }
     catch (error)
@@ -291,7 +346,7 @@ async function refreshRegistration()
     }
 }
 
-for (const id of ['map-name', 'map-output', 'map-pairs', 'map-voxel']) element(id).addEventListener('input', saveRegistrationDraft);
+for (const id of ['map-name', 'map-output', 'map-voxel']) element(id).addEventListener('input', saveRegistrationDraft);
 element('registration-python').oninput = () =>
 {
     python_dirty = true;
@@ -317,7 +372,7 @@ for (const id of ['runtime-check', 'runtime-install']) action(id, async () =>
 });
 action('registration-start', async () =>
 {
-    if (registration_starting || placement_saving || registration_state?.busy) return;
+    if (registration_starting || placementSaving() || registration_state?.busy) return;
     registration_starting = true;
     registrationControls();
     clearTimeout(draft_timer);
@@ -355,6 +410,7 @@ function updatePlacementStatus()
     element('placement-status').hidden = !registration_ids.length && !placement_restore_error;
     element('placement-status').textContent = placement_restore_error
         ? `Saved placements could not be verified: ${placement_restore_error}. Registration is blocked until they can be read.`
+        : placementSaving() ? 'Saving placements...'
         : placement_restoring ? 'Checking saved placements?'
         : !registration_ids.length ? 'Select PLY files or a folder to begin.'
         : !element('map-output').value.trim() ? 'Choose a map output folder.'
@@ -379,7 +435,15 @@ action('placement-open', openPlacementEditor);
 window.addEventListener('message', async event =>
 {
     if (event.origin !== location.origin) return;
-    if (event.data?.type === 'chunk-placement-started') { refreshRegistration(); return; }
+    if (event.data?.job && event.source === chunk_windows.get(event.data.job))
+    {
+        if (event.data.type === 'placement-locked') { chunk_locks.get(event.data.job)?.(event.data); return; }
+        if (event.data.type === 'placement-saving') chunk_pending.add(event.data.job);
+        else if (event.data.type === 'placement-autosaved') chunk_pending.delete(event.data.job);
+        else return;
+        await refreshRegistration();
+        return;
+    }
     if (event.source !== placement_window) return;
     if (event.data?.type === 'placement-ready')
     {
@@ -398,43 +462,26 @@ window.addEventListener('message', async event =>
         }
         catch (error) { event.source.postMessage({type:'placement-error', error:error.message}, location.origin); }
     }
-    if (event.data?.type === 'placement-save')
+    if (event.data?.type === 'placement-saving' || event.data?.type === 'placement-autosaved')
     {
-        ++placement_restore_serial;
-        placement_restoring = false;
-        placement_saving = true;
-        registrationControls();
-        try
+        const output = placement_context.output_directory.trim();
+        if (event.data.type === 'placement-saving')
         {
-            const values = event.data.items;
-            if (!Array.isArray(values) || values.length !== placement_context.cloud_ids.length ||
-                values.some((v,i) => v.id !== placement_context.cloud_ids[i] || (v.pose !== null &&
-                    (!Array.isArray(v.pose) || v.pose.length !== 4 || !v.pose.every(Number.isFinite)))))
-                throw Error('Invalid placement data. Nothing was applied. Keep the editor open.');
-            // The editor has already saved. Read back instead of overwriting newer autosaves.
-            const saved = await api('registration/placements/load', placement_context);
-            if (JSON.stringify(saved.initial_guesses) !== JSON.stringify(values.map(value => value.pose)))
-                throw Error('Saved placements changed since Apply. Latest edits remain saved; apply again from the editor.');
-            const output = placement_context.output_directory.trim();
-            if (!placement_maps.has(output)) placement_maps.set(output, new Map());
-            const applied = placement_maps.get(output);
+            placement_pending_outputs.add(output);
             ++placement_restore_serial;
             placement_restoring = false;
-            // Apply by ID even if rows were removed or reordered while the editor was open.
-            for (const value of values)
-            {
-                if (value.pose) applied.set(value.id, value.pose.slice());
-                else applied.delete(value.id);
-            }
-            updatePlacementStatus();
-            event.source.postMessage({type:'placement-saved', path:saved.path, activeOutput:output === element('map-output').value.trim()}, location.origin);
         }
-        catch (error)
+        else
         {
-            event.source.postMessage({type:'placement-error', error:error.message}, location.origin);
-            notice(error.message, true);
+            placement_pending_outputs.delete(output);
+            if (output === element('map-output').value.trim())
+            {
+                try { await loadSavedPlacements(); }
+                catch (error) { notice(error.message, true); }
+            }
         }
-        finally { placement_saving = false; registrationControls(); }
+        updatePlacementStatus();
+        registrationControls();
     }
 });
 

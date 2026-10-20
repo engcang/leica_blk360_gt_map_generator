@@ -108,11 +108,24 @@ def main():
             assert job['status']=='needs_connections',job
             chunks=[{'key':'chunk-1'}, {'key':'chunk-2'}]
             (output/'partial_chunks.json').write_text(json.dumps({'chunks':chunks}),encoding='utf-8')
-            chunk_request={'resume_id':job['id'],'initial_guesses':[[0,0,0,0],[2,3,4,.5]]}
+            chunk_request={'resume_id':job['id'],'chunk_keys':['chunk-1','chunk-2'],'initial_guesses':[[0,0,0,0],[2,3,4,.5]]}
             api('registration/placements/save',chunk_request)
             assert api('registration/placements/load',{'resume_id':job['id']})['initial_guesses']==chunk_request['initial_guesses']
+            rejected(api,'registration/placements/save',{**chunk_request,'chunk_keys':['old-1','old-2']})
+            rejected(api,'registration/placements/load',{'resume_id':job['id'],'chunk_keys':['old-1','old-2']})
+            assert api('registration/placements/load',{'resume_id':job['id']})['initial_guesses']==chunk_request['initial_guesses']
+            # A stale start cannot silently replace a newer on-disk arrangement.
+            rejected(api,'registration/start',{'resume_id':job['id'],
+                'chunk_initial_guesses':{'chunk-1':[0,0,0,0],'chunk-2':[999,0,0,0]}})
             assert api('registration/import',{'path':str(output/'partial_chunks.json')})['id']==job['id']
             assert api('registration/import',{'path':str(output)})['id']==job['id']
+            api('registration/start',{'resume_id':job['id'],'chunk_initial_guesses':{
+                'chunk-1':[0,0,0,0],'chunk-2':[2,3,4,.5]},'refine_individual_scans':True})
+            for _ in range(100):
+                if not api('registration')['busy']:break
+                time.sleep(.1)
+            updated=json.loads((Path(job['report_directory'])/'config.json').read_text(encoding='utf-8'))
+            assert updated['refine_individual_scans'] is True
             (output/'partial_chunks.json').write_text(json.dumps({'chunks':[{'key':'different'}]}),encoding='utf-8')
             rejected(api,'registration/placements/load',{'resume_id':job['id']})
 

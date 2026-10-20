@@ -106,6 +106,12 @@ namespace blk_core
                 const auto &job = findJob(state_, _body.at("resume_id").get<std::string>());
                 const auto directory = std::filesystem::u8path(job.at("output_path").get<std::string>()).parent_path();
                 const auto chunks = readJson(directory / "partial_chunks.json").at("chunks");
+                if (_save) requireIdleLocked();
+                auto keys = nlohmann::json::array();
+                for (const auto &chunk : chunks) keys.push_back(chunk.at("key"));
+                if ((_save && !_body.contains("chunk_keys")) ||
+                    (_body.contains("chunk_keys") && _body.at("chunk_keys") != keys))
+                    throw std::runtime_error("Chunks changed; reopen Arrange chunks before editing");
                 const auto file = directory / "chunk_initial_placements.json";
                 auto document = nlohmann::json{{"schema_version", 1}, {"chunks", chunks}, {"poses", nlohmann::json::object()}};
                 if (std::filesystem::exists(file))
@@ -131,7 +137,7 @@ namespace blk_core
                     if (readJson(file) != document)
                         throw std::runtime_error("Chunk placement save verification failed");
                 }
-                return {{"path", file.u8string()}, {"initial_guesses", values}};
+                return {{"path", file.u8string()}, {"initial_guesses", values}, {"chunk_keys", keys}};
             }
             const auto directory_text = _body.at("output_directory").get<std::string>();
             if (directory_text.empty())
@@ -174,6 +180,7 @@ namespace blk_core
             std::lock_guard<std::mutex> lock(mutex_);
             auto result = state_;
             result["busy"] = busy_;
+            result["individual_scan_refinement_option"] = true;
             for (auto &entry : result["jobs"])
             {
                 if (!entry.contains("poses_path"))
@@ -511,9 +518,13 @@ namespace blk_core
                         throw std::runtime_error("Chunks changed; reopen the placement editor");
                     validatePlacement(guesses.at(key));
                 }
+                const auto saved = readJson(directory / "chunk_initial_placements.json");
+                if (saved.at("chunks") != manifest.at("chunks") || saved.at("poses") != guesses)
+                    throw std::runtime_error("Saved chunk placements changed. Read the current placements before starting.");
                 config.erase("initial_guesses");
                 config["chunk_initial_guesses"] = guesses;
                 config["manual_chunks"] = manifest.at("chunks");
+                config["refine_individual_scans"] = _body.value("refine_individual_scans", false);
             }
             config["review_only"] = _body.value("review_only", false);
             saveJson(report / "config.json", config);

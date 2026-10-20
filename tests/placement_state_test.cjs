@@ -4,12 +4,12 @@ const path = require('path');
 assert.equal(fs.readFileSync(path.join(__dirname,'../web/index.html'),'utf8').includes('placement-load'),false);
 assert.equal(fs.readFileSync(path.join(__dirname,'../web/index.html'),'utf8').includes('registration-converted'),false);
 assert.equal(fs.readFileSync(path.join(__dirname,'../web/registration.js'),'utf8').includes('registration-converted'),false);
-for (const id of ['project-name', 'save-name', 'export', 'directory']) {
+for (const id of ['project-name', 'save-name', 'export', 'directory', 'map-pairs']) {
     assert.equal(fs.readFileSync(path.join(__dirname,'../web/index.html'),'utf8').includes(`id="${id}"`),false);
     assert.equal(fs.readFileSync(path.join(__dirname,'../web/app.js'),'utf8').includes(`element('${id}')`),false);
 }
 class Element {
-    constructor() { this.children = []; this.value = ''; this.textContent = ''; this.disabled = false; this.handlers = {}; }
+    constructor() { this.dataset = {}; this.children = []; this.value = ''; this.textContent = ''; this.disabled = false; this.handlers = {}; }
     append(...items) { this.children.push(...items); }
     replaceChildren(...items) { this.children = items; }
     setAttribute() {}
@@ -48,7 +48,6 @@ run('api = mockApi;');
     assert.equal(element('registration-scans').children.length,1);
     assert.match(element('registration-scans').children[0].textContent,/Select PLY/);
     assert.equal(element('map-name').value,'reference_map');
-    assert.equal(element('map-pairs').value,'');
     assert.equal(element('open-folder').disabled,true);
     assert.match(element('registration-log').textContent,/No active registration/);
     await run('refresh()');
@@ -77,24 +76,27 @@ run('api = mockApi;');
     const start=calls.find(call=>call.route==='registration/start').body;
     assert.equal(start.initial_guesses.filter(Boolean).length,60);
     assert.equal(start.cloud_ids.includes('id20'),false);
-    // Apply must verify disk content and never overwrite it.
+    assert.equal(Object.hasOwn(start,'additional_pairs'),false);
+    // Autosave updates the main page without a manual Apply or another write.
     const popup={postMessage:value=>messages.push(value)};
     context.popup=popup;
     run("placement_window=popup; placement_context=registrationDraft();");
-    const values=JSON.parse(run('JSON.stringify(registrationDraft())'));
-    const event={origin:'http://test',source:popup,data:{type:'placement-save',items:values.cloud_ids.map((id,i)=>({id,pose:values.initial_guesses[i]}))}};
-    context.failLoad=true;
+    const event={origin:'http://test',source:popup,data:{type:'placement-saving'}};
     await callbacks.message(event);
-    assert.equal(messages.at(-1).type,'placement-error');
-    assert.equal(messages.some(m=>m.type==='placement-saved'),false);
+    assert.equal(element('registration-start').disabled,true);
+    assert.match(element('placement-status').textContent,/Saving placements/);
+    context.failLoad=true;
+    event.data.type='placement-autosaved';
+    await callbacks.message(event);
+    assert.equal(element('registration-start').disabled,true);
+    assert.match(element('placement-status').textContent,/could not be verified/);
     context.failLoad=false;
     await callbacks.message(event);
-    assert.equal(messages.at(-1).type,'placement-saved');
-    assert.equal(messages.at(-1).path,'/output/initial_placements.json');
+    assert.equal(element('registration-start').disabled,false);
     assert.equal(calls.some(call=>call.route==='registration/placements/save'),false);
     context.savedById.id21=[200,200,200,0];
     await callbacks.message(event);
-    assert.equal(messages.at(-1).type,'placement-error');
+    assert.deepEqual(JSON.parse(run("JSON.stringify(initial_placements.get('id21'))")),[200,200,200,0]);
     assert.deepEqual(context.savedById.id21,[200,200,200,0]);
     // Selecting PLYs with an output folder restores poses without a separate button.
     context.savedById=Object.fromEntries(clouds.map((cloud,i)=>[cloud.id,[i,2*i,3*i,i*.01]]));
@@ -161,6 +163,15 @@ run('api = mockApi;');
     assert.equal(calls.filter(call=>call.route==='output').at(-1).body.path,'/selected/output');
     assert.equal(calls.filter(call=>call.route==='open-folder').at(-1).body.path,'/selected/output');
     assert.equal(calls.some(call=>call.route==='registration/draft'),false);
+    // Resume retains automatic connection search without a numerical pair input.
+    const row=run('renderRegistrationJob(registration_state.jobs[0])');
+    const descendants=node=>[node,...node.children.flatMap(descendants)];
+    const controls=descendants(row);
+    assert.equal(controls.some(node=>Object.hasOwn(node,'placeholder')),false);
+    const resume=controls.find(node=>node.textContent==='Resume');
+    assert.ok(resume);
+    await resume.onclick();
+    assert.deepEqual(calls.filter(call=>call.route==='registration/start').at(-1).body,{resume_id:'old-reg'});
     run('clearTimeout(draft_timer); clearTimeout(notice_timer);');
-    console.log('PASS: 61 -> 60 exact poses; anchor removal/reorder/add; disk read failure prevents acknowledgement; output isolation; stale Apply never writes; guarded start; empty initial tabs; automatic restoration; stale responses cannot overwrite edited selections; no clear/ignore control.');
+    console.log('PASS: 61 -> 60 exact poses; anchor removal/reorder/add; autosave updates without Apply; failed verification blocks launch; output isolation; autosave notifications never write; guarded start; empty initial tabs; automatic restoration; stale responses cannot overwrite edited selections; no clear/ignore control.');
 })().catch(error=>{console.error(error);process.exitCode=1;run('clearTimeout(draft_timer); clearTimeout(notice_timer);');});

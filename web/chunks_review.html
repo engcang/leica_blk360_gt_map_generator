@@ -6,7 +6,7 @@ body{margin:0;padding:24px;background:#f1f5f3;color:#203b35;font:15px system-ui}
 </style></head><body>
 <h1>Disconnected chunk review</h1>
 <p id="summary"></p><div class="warning"><strong>These chunks do not share a coordinate frame.</strong> Each view is anchored at its own first scan. Similar on-screen positions do not mean physical overlap. The views use sampled raw points and accepted pair poses, before final 1 cm refinement. This is a partial diagnostic result, not a ground-truth map.</div>
-<p class="hint">Compare two chunks, inspect the station images, and select scans that actually cover the same place. Enter the resulting original row-number pair under Additional pairs in BLK Studio, then Resume. A hint requests another attempt; it does not force an unverified connection.</p>
+<p class="hint">Use Arrange chunks in BLK Studio to place overlapping chunks, then return to the Register tab and click Register chunks. Resume searches for connections automatically.</p>
 <label>Connection hint <input id="pair" readonly aria-label="Connection hint"></label><span id="pair-note"></span>
 <p><a href="partial_chunks.json">Download all chunk-local poses and scan identities</a></p>
 <div class="panels"><section class="panel" id="left"></section><section class="panel" id="right"></section></div>

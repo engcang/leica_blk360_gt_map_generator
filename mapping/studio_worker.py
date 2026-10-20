@@ -62,60 +62,75 @@ def runRegistration(_config, _report):
         saveJson(_report / "progress.json", {"status": "running", "stage": _stage, **partial_info, **_extra})
         print(_stage, flush=True)
 
-    progress("Preparing KISS-Matcher clouds (30 cm) and Nano-GICP clouds (8 cm)")
+    progress("Loading cached scan clouds for rigid chunk aggregation" if _config.get("manual_chunks") else "Preparing KISS-Matcher clouds (30 cm) and Nano-GICP clouds (8 cm)")
     records = registration.prepare([{"output_path": str(path)} for path in paths], _report)
     from partial_chunks import createChunkReview
 
     def publishChunks(edges):
         if len(connectedGroups(edges, len(records))) > 1:
-            partial_info.update(createChunkReview(records, edges, target.parent, _report, progress))
+            method = "Rigid chunk alignment and chunk PGO; internal scan transforms fixed" if _config.get("manual_chunks") else None
+            partial_info.update(createChunkReview(records, edges, target.parent, _report, progress, pose_method=method))
 
     if _config.get("review_only", False):
-        edges = [json.loads(path.read_text(encoding="utf-8")) for path in (_report / "pairs").glob("*.json")]
+        rigid_edges = _report / "rigid_chunks" / "rigid_chunks_v1" / "viewer_edges.json"
+        if _config.get("manual_chunks") and rigid_edges.is_file():
+            edges = json.loads(rigid_edges.read_text(encoding="utf-8"))
+        else:
+            edges = [json.loads(path.read_text(encoding="utf-8")) for path in (_report / "pairs").glob("*.json")]
         publishChunks(edges)
         saveJson(_report / "progress.json", {"status": "needs_connections", "stage": "Chunk review ready. Resume to search for connections.", **partial_info})
         return
-    clouds = registration.loadClouds(_report, len(records))
-    from manual_placement import applyPlacements, collectPriors
-    cached_edges = [json.loads(path.read_text(encoding="utf-8")) for path in (_report / "pairs").glob("*.json")]
-    applyPlacements(_config, clouds, records, cached_edges, _report, progress)
-    progress("Registering consecutive scans")
-    edges = registration.adjacent(clouds, records, _report)
-    for i, j in pairs:
-        progress(f"Checking additional connection {i + 1}:{j + 1}")
-        path = _report / "pairs" / f"{i:02d}_{j:02d}.json"
-        if path.exists():
+    if _config.get("manual_chunks"):
+        from rigid_chunks import runRigidChunks
+        progress("Rigid chunk registration: internal scan poses stay fixed")
+        result = runRigidChunks(_config, records, _report, progress, publishChunks)
+        if result is None:
+            saveJson(_report / "progress.json", {"status": "needs_connections",
+                "stage": "Rigid chunks remain disconnected. Review the updated chunks and adjust their placements.", **partial_info})
+            return
+        groups = [list(range(1, len(records) + 1))]
+    else:
+        clouds = registration.loadClouds(_report, len(records))
+        from manual_placement import applyPlacements, collectPriors
+        cached_edges = [json.loads(path.read_text(encoding="utf-8")) for path in (_report / "pairs").glob("*.json")]
+        applyPlacements(_config, clouds, records, cached_edges, _report, progress)
+        progress("Registering consecutive scans")
+        edges = registration.adjacent(clouds, records, _report)
+        for i, j in pairs:
+            progress(f"Checking additional connection {i + 1}:{j + 1}")
+            path = _report / "pairs" / f"{i:02d}_{j:02d}.json"
+            if path.exists():
+                edge = json.loads(path.read_text(encoding="utf-8"))
+            else:
+                edge = registration.registerPair(clouds[i], clouds[j], i, j)
+                registration.saveJson(path, edge)
+            edges.append(edge)
+            print(f"Additional pair {i + 1}:{j + 1}: accepted {edge['accepted']}, overlap {edge['harmonic_overlap_12cm']:.3f}", flush=True)
+        existing = {(edge["source"], edge["target"]): edge for edge in edges}
+        for path in (_report / "pairs").glob("*.json"):
             edge = json.loads(path.read_text(encoding="utf-8"))
-        else:
-            edge = registration.registerPair(clouds[i], clouds[j], i, j)
-            registration.saveJson(path, edge)
-        edges.append(edge)
-        print(f"Additional pair {i + 1}:{j + 1}: accepted {edge['accepted']}, overlap {edge['harmonic_overlap_12cm']:.3f}", flush=True)
-    existing = {(edge["source"], edge["target"]): edge for edge in edges}
-    for path in (_report / "pairs").glob("*.json"):
-        edge = json.loads(path.read_text(encoding="utf-8"))
-        existing[(edge["source"], edge["target"])] = edge
-    edges = list(existing.values())
-    publishChunks(edges)
-    from automatic_connections import discoverConnections
-    priors, _ = collectPriors(_config, records)
-    edges = discoverConnections(clouds, edges, _report, progress, priors) if priors else discoverConnections(clouds, edges, _report, progress)
-    publishChunks(edges)
-    from chunk_connections import discoverChunkConnections
-    edges = discoverChunkConnections(clouds, edges, records, _report, progress, publishChunks, priors)
-    groups = connectedGroups(edges, len(records))
-    if len(groups) > 1:
-        saveJson(_report / "progress.json", {"status": "needs_connections",
-                                             "stage": "Scan-pair and merged-chunk searches could not verify all connections. View or arrange chunks, then provide initial placements, connection hints, or additional scans.",
-                                             **partial_info,
-                                             "groups": groups,
-                                             "rejected_pairs": [[edge["source"] + 1, edge["target"] + 1] for edge in edges if not edge["accepted"]]})
-        return
-    progress("Finding overlap constraints and optimizing scan poses")
-    result = registration.optimize(clouds, records, _report)
-    del clouds
-    progress("Refining point-to-plane registration on 1 cm clouds")
-    result = registration.refineGraph(result, _report, progress)
+            existing[(edge["source"], edge["target"])] = edge
+        edges = list(existing.values())
+        publishChunks(edges)
+        from automatic_connections import discoverConnections
+        priors, _ = collectPriors(_config, records)
+        edges = discoverConnections(clouds, edges, _report, progress, priors) if priors else discoverConnections(clouds, edges, _report, progress)
+        publishChunks(edges)
+        from chunk_connections import discoverChunkConnections
+        edges = discoverChunkConnections(clouds, edges, records, _report, progress, publishChunks, priors)
+        groups = connectedGroups(edges, len(records))
+        if len(groups) > 1:
+            saveJson(_report / "progress.json", {"status": "needs_connections",
+                                                 "stage": "Scan-pair and merged-chunk searches could not verify all connections. View or arrange chunks, then provide initial placements, connection hints, or additional scans.",
+                                                 **partial_info,
+                                                 "groups": groups,
+                                                 "rejected_pairs": [[edge["source"] + 1, edge["target"] + 1] for edge in edges if not edge["accepted"]]})
+            return
+        progress("Finding overlap constraints and optimizing scan poses")
+        result = registration.optimize(clouds, records, _report)
+        del clouds
+        progress("Refining point-to-plane registration on 1 cm clouds")
+        result = registration.refineGraph(result, _report, progress)
     from result_products import verifySources
     verifySources(result, progress)
     progress("Creating scan position and inferred-level review images")

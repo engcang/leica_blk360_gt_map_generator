@@ -791,11 +791,6 @@ dialog::backdrop
 .workspace-tabs [role="tab"] { flex: 1; min-width: 0; white-space: normal; background: transparent; color: #4b6260; padding: 14px 18px; font-size: 15px; }
 .workspace-tabs [aria-selected="true"] { background: #176e5b; color: white; box-shadow: 0 3px 9px #153f3020; }
 #registration { margin-top: 0; }
-.registration-results { margin: 0 20px 24px; border: 2px solid #58a58d; border-radius: 12px; overflow: hidden; background: #eff9f3; }
-.results-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; padding: 20px; background: #dcefe4; }
-.results-heading h2 { font-size: 19px; color: #145342; }
-.results-heading p, .results-empty { font-size: 13px; line-height: 1.6; color: #365c4e; }
-.results-heading p { margin: 6px 0 0; }
 .results-empty { padding: 6px 20px 16px; }
 .registration-job.result-ready { background: #f0faf4; border-top: 1px solid #a6d1bb; }
 .registration-job.result-pending { background: #fffaf0; }
@@ -805,4 +800,8 @@ dialog::backdrop
 .result-actions .hint { flex: 1; min-width: 180px; padding: 0; border: 0; background: none; color: #244d3d; font-size: 13px; }
 .registration-job > details { font-size: 12px; margin-top: 16px; }
 .registration-job > details > summary { cursor: pointer; }
-@media(max-width:760px) { .workspace-tabs [role="tab"] { padding: 12px 7px; font-size: 13px; } .registration-results { margin-inline: 12px; } }
+@media(max-width:760px) { .workspace-tabs [role="tab"] { padding: 12px 7px; font-size: 13px; } }
+
+.worker-log h3 { margin: 0 0 12px; font-size: 13px; }
+
+.chunk-refinement-option { display: flex; align-items: center; gap: 8px; width: 100%; font-size: 12px; }

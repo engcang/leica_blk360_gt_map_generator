@@ -29,6 +29,14 @@ def run(_chrome):
             payload += b"".join(struct.pack("<fffH", index % 20 * 0.1, index // 20 % 20 * 0.1, index // 400 * 0.1, index * 13) for index in range(4000))
             page.locator("#file").set_input_files({"name": "navigation.ply", "mimeType": "application/octet-stream", "buffer": payload})
             page.wait_for_function("window.blkViewer?.count === 4000")
+            assert page.locator('#density').input_value() == '1'
+            assert not page.locator('#grid').is_checked()
+            assert page.locator('body').get_attribute('data-shown') == '4000'
+            assert page.evaluate("!document.getElementById('axes').getContext('2d').getImageData(0,0,140,140).data.some(v=>v)")
+            page.locator('#grid').check()
+            page.wait_for_function("document.getElementById('axes').getContext('2d').getImageData(0,0,140,140).data.some(v=>v)")
+            page.locator('#grid').uncheck()
+            page.wait_for_function("!document.getElementById('axes').getContext('2d').getImageData(0,0,140,140).data.some(v=>v)")
             canvas = page.locator("#cloud")
             canvas.scroll_into_view_if_needed()
             canvas.focus()

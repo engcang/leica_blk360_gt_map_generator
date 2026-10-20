@@ -17,6 +17,8 @@ def poseManifest(_registration, _paths):
             "transform_convention": "column vector: p_map = T_map_scan @ [x, y, z, 1]; rigid SE(3), no scale",
             "independently_validated": False,
             "pipeline_id": _registration.get("pipeline_id", "legacy"),
+            "registration_mode": _registration.get("registration_mode", "individual_scans"),
+            "internal_scan_poses_fixed": _registration.get("internal_scan_poses_fixed", False),
             "native_backend": _registration.get("native_backend"),
             "registration_voxel_m": _registration["registration_voxel_m"],
             "scans": [{"index": record["index"], "file": path, "name": pathlib.Path(record["source_path"]).name,

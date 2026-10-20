@@ -56,7 +56,7 @@ Adding registration inputs re-sorts the selection; **Up / Down** allows manual c
 3. Each scan becomes one full-resolution file: `Setup26.blk → Setup26.ply`.
 4. Click **View 3D**, or open **View saved point clouds** and choose **Open PLY files** / **Open folder**.
 
-Color is always **Intensity**. Display density is **1/10**, **1/5**, **1/2**, or **Full**;
+Color is always **Intensity**. Display density is **1/10**, **1/5**, **1/2**, or **Full** (default);
 navigation temporarily draws at most 2,000,000 points. Left-drag orbits around
 the surface near the screen center, or looks around in place when no surface is
 found. The pivot updates at drag start without moving the camera, and stays fixed
@@ -75,7 +75,7 @@ click **Convert scans** to recreate it. Pending/interrupted work is retained for
 2. Confirm acquisition order with **Up / Down**. The first scan defines the map frame.
 3. Confirm the product base name and output folder (defaults to the first selected PLY folder). Use a separate folder for each registration result.
 4. Check the Python environment under **Registration setup**, then click **Register scans**.
-5. In the highlighted **Results and progress** panel, open **Review and manage** to inspect quality metrics, scan positions, and inferred-level images.
+5. Below the always-open **Latest worker log**, open **Review and manage** to inspect quality metrics, scan positions, and inferred-level images.
 
 **Optional initial placement:** after selecting PLYs, click **Arrange PLY scans** to open the editor directly. Placements save beside the selected PLYs unless you choose another output folder.
 Switch **Move view / Place scan / chunk** to choose the left-drag action (view movement is the default).
@@ -83,9 +83,10 @@ In placement mode, select XY, X, Y, Z, or yaw, or enter numeric values.
 The first item is fixed; **Next** uses the previous item as a reference. Right/middle
 drag always pans the view. **Height cut** hides points above a shared Z height after
 placement transforms; **Show all** restores them without changing registration inputs.
-Only the moving item and reference are loaded, at **1/10** display density by default. **Use placements in Register**
-saves and verifies `initial_placements.json` in the chosen output folder before
-applying guesses. Edits are also autosaved; keep the editor open if saving fails.
+Only the moving item and reference are loaded, at **Full** display density by default. Grid and axes start off in all 3D viewers.
+Edits automatically save to `initial_placements.json` in the output folder. No Apply
+button is needed: Register reads the saved poses before starting. Wait for the saved
+status before closing the editor; keep it open if saving fails.
 Removing, adding, or reordering scans preserves the other poses. To recover after
 closing the app, select the PLYs and output folder; saved placements restore automatically.
 Registration uses the saved poses for selected scans and refuses to silently ignore them.
@@ -94,14 +95,20 @@ selected output folder; changing folders does not mix arrangements. Registration
 checks the saved poses before starting and stops if they cannot be read or the
 selection changes during that check.
 
-For disconnected results, **Arrange chunks** offers the same controls and autosaves
-`chunk_initial_placements.json`; reopening the same chunks restores those edits. **Register
-placed chunks** resumes with chunk-local poses composed with the edited XYZ/yaw
-transforms. Unchecked chunks remain automatic. Original PLYs and internal chunk
-geometry are unchanged. Placements initialize Nano-GICP; acceptance still checks
-convergence/overlap and limits correction to 1 m / 15 degrees, followed by the
-existing 1 cm refinement and PGO. Failed guesses are reported in the worker log;
-manual-pair results are cached in the registration record, not the output folder.
+For disconnected results, **Arrange chunks** autosaves `chunk_initial_placements.json`.
+Return to **Register** and click **Register chunks**. Each chunk is one rigid body:
+merged-cloud Nano-GICP, robust 1 cm ICP, then **chunk-level PGO**. The saved chunk
+transform initializes matching; unplaced chunks use KISS-Matcher. Internal scan
+transforms remain fixed, and final scan poses are composed from the chunk pose and
+the saved scan-local pose. There is no consecutive-scan search or scan-level ICP/PGO
+in this mode. Each bridge is checked on at most 12 original scan pairs at fixed
+poses (no scan registration); two distinct passing pairs are required, or one for
+two single-scan chunks. Quality metrics evaluate final fixed poses on 1 cm scans.
+**Refine individual scans afterward** is unchecked by default; enabling it explicitly
+allows the slower scan-level 1 cm ICP/PGO to change internal chunk geometry.
+The editor only autosaves and never launches registration. Changed chunk membership
+or geometry regenerates the placement JSON; previous user placements are preserved
+under `html_source/placement_history/`. An unchanged chunk set keeps its placements.
 
 After conversion and registration, the output is:
 
@@ -182,7 +189,7 @@ accuracy. Scan-to-map trajectory estimation is not implemented.
 ## Troubleshooting
 
 - **Missing file:** select a moved PLY again. Generation requires originals at the paths recorded in the poses JSON.
-- **Disconnected groups:** click **View chunks** (or **Build chunk review** for an older job). `chunks_review.html`, `partial_chunks.json`, and `html_source/chunks/` show sampled 3D previews, scan positions, and original row numbers in separate chunk-local frames. These are diagnostic poses before final 1 cm refinement, not a common GT map. Compare two chunks and supply pair hints such as `1:4,2:5`; **Resume** reuses caches and attempts merged-chunk connections. No final map/poses are published until all groups connect.
+- **Disconnected groups:** click **View chunks** (or **Build chunk review** for an older job). `chunks_review.html`, `partial_chunks.json`, and `html_source/chunks/` show sampled 3D previews, scan positions, and original row numbers in separate chunk-local frames. These are diagnostic poses before final 1 cm refinement, not a common GT map. Use **Arrange chunks** to provide initial placements; **Resume** reuses caches and searches for chunk connections automatically. No final map/poses are published until all groups connect.
 - **Slow viewer or large output:** lower display density for navigation. The full cloud still occupies memory; raw maps and embedded HTML can be large.
 - **Existing output:** move/remove the generated file before regenerating, or choose a different folder for a new registration.
 

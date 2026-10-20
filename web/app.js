@@ -37,6 +37,7 @@ function selectTab(name, focus = false)
         if (active && focus) tab.focus();
     }
     element('open-folder').hidden = name !== 'convert';
+    if (name === 'register') element('registration-log').scrollTop = element('registration-log').scrollHeight;
 }
 for (const tab of document.querySelectorAll('[role="tab"]'))
 {

@@ -83,7 +83,7 @@ In placement mode, select XY, X, Y, Z, or yaw, or enter numeric values.
 The first item is fixed; **Next** uses the previous item as a reference. Right/middle
 drag always pans the view. **Height cut** hides points above a shared Z height after
 placement transforms; **Show all** restores them without changing registration inputs.
-Only the moving item and reference are loaded, at **Full** display density by default. Grid and axes start off in all 3D viewers.
+Only the moving item and reference are loaded, at **1/10** display density with **Axes on** by default in placement editors (scans, chunks, and Additional Register). Other 3D viewers default to Full density with grid and axes off.
 Edits automatically save to `initial_placements.json` in the output folder. No Apply
 button is needed: Register reads the saved poses before starting. Wait for the saved
 status before closing the editor; keep it open if saving fails.

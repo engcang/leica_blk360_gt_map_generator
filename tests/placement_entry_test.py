@@ -113,8 +113,8 @@ def main():
                 editor = popup.value
                 editor.on('pageerror', lambda error: errors.append(str(error)))
                 editor.wait_for_function('window.blkPlacement?.items().length === 3 && document.body.dataset.loaded === "true"')
-                assert editor.locator('#density').input_value() == '1'
-                assert not editor.locator('#axes-visible').is_checked()
+                assert editor.locator('#density').input_value() == '10'
+                assert editor.locator('#axes-visible').is_checked()
                 editor.locator('#x').fill('1.25')
                 editor.locator('#x').press('Tab')
                 editor.wait_for_function('document.querySelector("#save-status").textContent.startsWith("Saved on disk:")')

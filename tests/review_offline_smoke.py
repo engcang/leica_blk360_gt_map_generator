@@ -20,12 +20,23 @@ def run(_args):
         page.on("request", lambda _request: network.append(_request.url) if _request.url.startswith(("http:", "https:")) else None)
         page.goto(review.as_uri())
         assert page.locator("#offline-help").is_visible()
+        assert page.locator("a[download]").count() == 0
+
+        def selectProduct(kind):
+            base = kind.removesuffix("3cm")
+            if base != "raw":
+                page.locator(f"#{base}-resolution").select_option(kind)
+            return page.locator(f"#{base}-result")
+
         for kind, product in products.items():
             if not (review.parent / product["file"]).is_file():
                 continue
-            container = page.locator(f"#{kind}-result")
+            container = selectProduct(kind)
             assert product["file"] in container.inner_text()
-            assert container.locator("a").evaluate("node => node.href") == (review.parent / product["file"]).as_uri()
+            if kind.startswith("share"):
+                assert container.locator("a").evaluate("node => node.href") == (review.parent / product["file"]).as_uri()
+            else:
+                assert container.locator("a").count() == 0
         for kind in ("raw", "voxel", "share"):
             page.locator(f"[data-product={kind}]").click()
             assert page.locator("#app-required").is_visible()
@@ -34,13 +45,16 @@ def run(_args):
         page.wait_for_function("document.getElementById('local-files-status').textContent.startsWith('Checked saved')")
         for kind, product in products.items():
             if (review.parent / product["file"]).is_file():
-                assert page.locator(f"#{kind}-result a").evaluate("node => node.href").startswith("blob:")
+                container = selectProduct(kind)
+                if kind.startswith("share"):
+                    assert container.locator("a").evaluate("node => node.href").startswith("blob:")
         with tempfile.TemporaryDirectory() as directory:
             (pathlib.Path(directory) / "relative_poses.json").write_text("{}", encoding="utf-8")
             page.locator("#local-folder").set_input_files(directory)
             for kind in products:
-                page.locator(f"#{kind}-result").get_by_text("missing or size changed", exact=False).wait_for()
-                assert page.locator(f"#{kind}-result a").count() == 0
+                container = selectProduct(kind)
+                container.get_by_text("missing or size changed", exact=False).wait_for()
+                assert container.locator("a").count() == 0
         assert not errors, errors
         assert not network, "Offline review made network requests"
         browser.close()

@@ -35,7 +35,7 @@ function registrationDraft()
         initial_guesses: registration_ids.map(id => initial_placements.get(id) || null),
         name: element('map-name').value.trim(),
         output_directory: element('map-output').value.trim(),
-        voxel_m: Number(element('map-voxel').value)
+        voxel_m: 0.01
     };
 }
 
@@ -215,7 +215,7 @@ function renderRegistrationJob(job)
         actions.append(review);
         const detail = document.createElement('span');
         detail.className = 'hint';
-        detail.textContent = 'Poses saved. Generate a 1 cm map, raw map, or share HTML from the management page.';
+        detail.textContent = 'Poses saved. Generate maps or share HTML from Review and manage.';
         actions.append(detail);
         if (job.export)
         {
@@ -313,7 +313,6 @@ async function refreshRegistration()
             registration_loaded = true;
             registration_ids = [];
             element('map-name').value = 'reference_map';
-            element('map-voxel').value = '0.01';
             element('map-output').value = '';
 
             element('registration-setup').open = runtime.status !== 'completed';
@@ -352,7 +351,7 @@ async function refreshRegistration()
     }
 }
 
-for (const id of ['map-name', 'map-output', 'map-voxel']) element(id).addEventListener('input', saveRegistrationDraft);
+for (const id of ['map-name', 'map-output']) element(id).addEventListener('input', saveRegistrationDraft);
 element('registration-python').oninput = () =>
 {
     python_dirty = true;

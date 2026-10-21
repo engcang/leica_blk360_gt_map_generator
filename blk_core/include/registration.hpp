@@ -290,9 +290,9 @@ namespace blk_core
             {
                 throw std::runtime_error("Complete registration before generating products");
             }
-            if (_kind != "raw" && _kind != "voxel" && _kind != "share")
+            if (_kind != "raw" && _kind != "voxel" && _kind != "share" && _kind != "voxel3cm" && _kind != "share3cm")
             {
-                throw std::runtime_error("Choose raw, voxel, or share");
+                throw std::runtime_error("Choose raw, voxel, share, voxel3cm, or share3cm");
             }
             if (state_["runtime"].value("status", "") != "completed")
             {
@@ -317,7 +317,8 @@ namespace blk_core
             {
                 const auto output = std::filesystem::u8path(job.value("poses_path", "")).parent_path();
                 if (!output.empty() && std::filesystem::weakly_canonical(output) == directory &&
-                    (path.filename() == "relative_poses.json" || path.filename() == "partial_chunks.json"))
+                    (path.filename() == "partial_chunks.json" ||
+                     (path.filename() == "relative_poses.json" && job.value("status", "") != "completed")))
                     return job.at("id").get<std::string>();
             }
             if (path.filename() != "relative_poses.json" || !std::filesystem::is_regular_file(directory / "result_review_and_manage.html"))
@@ -351,7 +352,7 @@ namespace blk_core
                 {
                     const auto filename = std::filesystem::u8path(product.value("file", ""));
                     const auto ply = directory / filename;
-                    if ((kind != "raw" && kind != "voxel") || filename != filename.filename() || !std::filesystem::is_regular_file(ply))
+                    if ((kind != "raw" && kind != "voxel" && kind != "voxel3cm") || filename != filename.filename() || !std::filesystem::is_regular_file(ply))
                     {
                         continue;
                     }

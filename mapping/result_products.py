@@ -86,13 +86,17 @@ def mergeRaw(_registration, _target, _progress):
 def generateProduct(_poses, _kind, _report, _progress):
     from register_scans import hashFile, merge
     from studio_worker import saveJson
-    if _kind not in ("raw", "voxel", "share"):
-        raise ValueError("Choose raw, voxel, or share")
+    if _kind not in ("raw", "voxel", "share", "voxel3cm", "share3cm"):
+        raise ValueError("Choose raw, voxel, share, voxel3cm, or share3cm")
+    voxel = 0.03 if _kind.endswith("3cm") else 0.01
+    resolution = "3cm" if voxel == 0.03 else "1cm"
+    share = _kind.startswith("share")
+    voxel_kind = "voxel3cm" if voxel == 0.03 else "voxel"
     poses = _poses.resolve(strict=True)
     registration, manifest_hash = loadRegistration(poses)
     directory = poses.parent
     name = registration["result_name"]
-    filename = {"raw": f"{name}_raw.ply", "voxel": f"{name}_1cm.ply", "share": f"{name}_1cm_share.html"}[_kind]
+    filename = f"{name}_raw.ply" if _kind == "raw" else f"{name}_{resolution}{'_share.html' if share else '.ply'}"
     target = directory / filename
     if target.exists():
         raise FileExistsError(f"Output already exists: {target}. Move or remove it before regenerating.")
@@ -110,24 +114,22 @@ def generateProduct(_poses, _kind, _report, _progress):
             verifySources(registration, _progress)
             metadata = mergeRaw(registration, work / filename, _progress)
         else:
-            cached = products.get("voxel", {})
-            cached_path = directory / f"{name}_1cm.ply"
-            use_cached = (_kind == "share" and cached_path.is_file()
+            cached = products.get(voxel_kind, {})
+            cached_path = directory / f"{name}_{resolution}.ply"
+            use_cached = (share and cached_path.is_file() and cached.get("voxel_m") == voxel
                           and cached.get("poses_sha256") == manifest_hash
                           and hashFile(cached_path) == cached.get("sha256"))
             if use_cached:
                 ply = cached_path
                 metadata = cached
             else:
-                verifySources(registration, _progress)
-                _progress("Merging original scans into 1 cm voxels")
-                merge(registration, work, 0.01, f"{name}_1cm.ply", False)
+                merge(registration, work, voxel, f"{name}_{resolution}.ply", False, _progress)
                 metadata = json.loads((work / "map.json").read_text(encoding="utf-8"))
                 ply = work / metadata["file"]
-            if _kind == "share":
-                _progress("Embedding the complete 1 cm map into a standalone HTML")
+            if share:
+                _progress(f"Embedding the complete {voxel * 100:g} cm map into a standalone HTML")
                 createShareViewer(ply, work / filename, poses, _map_metadata=metadata)
-                metadata = {"points": metadata["points"], "voxel_m": 0.01,
+                metadata = {"points": metadata["points"], "voxel_m": voxel,
                             "sha256": hashFile(work / filename), "embedded_map_sha256": metadata["sha256"]}
         if hashFile(poses) != manifest_hash:
             raise ValueError("Poses changed during generation; no output was published")
@@ -135,10 +137,13 @@ def generateProduct(_poses, _kind, _report, _progress):
         os.link(work / filename, target)
     products[_kind] = metadata
     saveJson(products_path, products)
-    from result_page import writeProductSnapshot
-    writeProductSnapshot(directory)
+    from result_page import writeProductSnapshot, writeReviewPage
+    if (assets / "review_summary.json").is_file():
+        writeReviewPage(directory)
+    else:
+        writeProductSnapshot(directory)
     result = {"status": "completed", "stage": "Product ready", "product": _kind,
               "output_path": str(target), **metadata}
-    if _kind != "share":
+    if not share:
         result["ply_path"] = str(target)
     return result

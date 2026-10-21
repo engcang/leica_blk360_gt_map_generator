@@ -69,10 +69,16 @@ def run(_args):
                 const draw = prototype.drawArrays;
                 const upload = prototype.bufferData;
                 window.pointDraws = [];
+                window.currentPointDraw = 0;
                 window.bufferUploads = 0;
+                const clear = prototype.clear;
+                prototype.clear = function(mask) {
+                    window.currentPointDraw = 0;
+                    return clear.call(this, mask);
+                };
                 prototype.drawArrays = function(mode, first, count) {
                     if (mode === this.POINTS) {
-                        window.pointDraws.push(count);
+                        window.pointDraws.push(window.currentPointDraw += count);
                         if (window.pointDraws.length > 100) window.pointDraws.shift();
                     }
                     return draw.call(this, mode, first, count);

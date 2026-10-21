@@ -103,7 +103,7 @@ def run(_args):
             page.locator(".registration-scan").first.get_by_role("button", name="Move", exact=False).nth(1).click()
             assert page.locator(".registration-scan > span").all_text_contents() == original
             page.locator("#map-name").fill("Integration map")
-            page.locator("#map-voxel").select_option("0.01")
+            assert page.locator("#map-voxel").count() == 0
             page.locator("#map-browse").click()
             page.locator("#browser-path").fill(str(output))
             page.locator("#browser-go").click()

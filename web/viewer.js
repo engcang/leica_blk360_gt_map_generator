@@ -123,8 +123,14 @@
         linePos = gl.getAttribLocation(lineProgram, 'position'),
         lineCol = gl.getAttribLocation(lineProgram, 'colour'),
         lineMvp = gl.getUniformLocation(lineProgram, 'mvp');
-    const pointBuffer = gl.createBuffer(),
+    const pointBuffers = [], pointsPerBuffer = 1048576,
         lineBuffer = gl.createBuffer();
+
+    function releasePointBuffers()
+    {
+        for (const buffer of pointBuffers) gl.deleteBuffer(buffer);
+        pointBuffers.length = 0;
+    }
     let lineCount = 0,
         gridStep = 1;
     gl.enable(gl.DEPTH_TEST);
@@ -225,16 +231,19 @@
             gl.disableVertexAttribArray(lineCol);
         }
         gl.useProgram(points);
-        gl.bindBuffer(gl.ARRAY_BUFFER, pointBuffer);
         gl.enableVertexAttribArray(pointAttr);
-        gl.vertexAttribPointer(pointAttr, 4, gl.FLOAT, false, 16, 0);
         gl.uniformMatrix4fv(u.mvp, false, b.mvp);
         gl.uniform1f(u.size, Number($('size').value) * dpr);
         gl.uniform1f(u.clipZ, Number(clip.value) + .00001);
         gl.uniform2f(u.intensityRange, ilow, ihigh);
         gl.uniform1f(u.rgbMode, rgbMode ? 1 : 0);
         const displayed = shown();
-        gl.drawArrays(gl.POINTS, 0, displayed);
+        for (let base = 0, index = 0; base < displayed; base += pointsPerBuffer, ++index)
+        {
+            gl.bindBuffer(gl.ARRAY_BUFFER, pointBuffers[index]);
+            gl.vertexAttribPointer(pointAttr, 4, gl.FLOAT, false, 16, 0);
+            gl.drawArrays(gl.POINTS, 0, Math.min(pointsPerBuffer, displayed - base));
+        }
         gizmo(b);
         document.body.dataset.loaded = String(count);
         document.body.dataset.shown = String(displayed);
@@ -321,9 +330,16 @@
         }
         center = min.map((v, i) => (v + max[i]) / 2);
         extent = Math.max(.001, ...max.map((v, i) => v - min[i]));
-        gl.bindBuffer(gl.ARRAY_BUFFER, pointBuffer);
-        gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
-        if (gl.getError() !== gl.NO_ERROR) throw Error('The graphics device could not allocate the full cloud. Close other 3D tabs and try again.');
+        releasePointBuffers();
+        for (let base = 0; base < count; base += pointsPerBuffer)
+        {
+            const buffer = gl.createBuffer();
+            if (!buffer) throw Error('Not enough GPU memory. Generate a 3 cm PLY in Review and manage.');
+            pointBuffers.push(buffer);
+            gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+            gl.bufferData(gl.ARRAY_BUFFER, data.subarray(base * 4, Math.min(count, base + pointsPerBuffer) * 4), gl.STATIC_DRAW);
+            if (gl.getError() !== gl.NO_ERROR) throw Error(`Not enough GPU memory for ${count.toLocaleString('en-US')} points (${(count * 16 / 1e9).toFixed(2)} GB). Generate a 3 cm PLY in Review and manage.`);
+        }
         makeGrid();
         clip.min = min[2];
         clip.max = max[2];
@@ -594,10 +610,11 @@
             if (!Number.isSafeInteger(total) || total <= 0 || source.size !== start + total * recordBytes) throw Error('PLY size/count mismatch.');
             if (expectedCount !== undefined && total !== expectedCount) throw Error('PLY count differs from the project record.');
             data = new Float32Array();
-            gl.bindBuffer(gl.ARRAY_BUFFER, pointBuffer);
-            gl.bufferData(gl.ARRAY_BUFFER, 0, gl.STATIC_DRAW);
-            const vertices = new Float32Array(total * 4),
-                chunk = 262144;
+            releasePointBuffers();
+            let vertices;
+            try { vertices = new Float32Array(total * 4); }
+            catch (error) { throw Error(`Not enough browser memory for ${total.toLocaleString('en-US')} points (${(total * 16 / 1e9).toFixed(2)} GB). Generate a 3 cm PLY in Review and manage.`); }
+            const chunk = 262144;
             for (let base = 0; base < total; base += chunk)
             {
                 const take = Math.min(chunk, total - base),
@@ -635,8 +652,10 @@
         {
             count = 0;
             data = new Float32Array();
+            releasePointBuffers();
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
             $('error').textContent = error.message;
-            $('load-status').textContent = 'Unable to load the complete cloud. No sampled substitute was displayed.';
+            $('load-status').textContent = 'Could not load PLY.';
             document.body.dataset.loaded = '0';
             document.body.dataset.shown = '0';
         }
@@ -720,7 +739,7 @@
         count = 0;
         document.body.dataset.loaded = '0';
         document.body.dataset.shown = '0';
-        $('error').textContent = 'Graphics context lost. Reload the view to load the full cloud again.';
+        $('error').textContent = 'Graphics context lost. Reload the view, or generate a 3 cm PLY in Review and manage.';
     });
     window.blkViewer = {
         camera,

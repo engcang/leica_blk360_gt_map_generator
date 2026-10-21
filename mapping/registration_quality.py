@@ -99,7 +99,7 @@ def qualityDocument(_pairs):
             "primary_threshold_m": 0.03,
             "thresholds_m": [0.01, 0.02, 0.03, 0.05],
             "distance_unit": "m",
-            "description": "Internal consistency at fixed final poses, not independent GT accuracy. All points of the 1 cm working clouds are queried. Distances at or above each threshold are excluded, not capped. Each direction is normalized by its own inlier count; inlier Chamfer is the mean of the two directional mean Euclidean distances (not squared). Empty sets have null statistics. Coverage uses all source points in that direction. Low residuals alone do not establish correct alignment or sufficient overlap.",
+            "description": "Scan-pair distances and coverage on 1 cm clouds at the saved poses.",
             "point_to_plane_description": "Absolute residuals for every distance-gated correspondence with valid unit normals and absolute normal dot product above 0.9. No additional residual clipping or Tukey weighting is used for evaluation. Counts may differ from point-to-point inlier counts.",
             "connection_scope": "Retained registration constraints only. These diagnostics do not change poses, connection acceptance, optimizer weights, or exported geometry.",
             "pairs": _pairs}
@@ -116,9 +116,7 @@ def writeQualityPage(_quality,
 p{line-height:1.5;max-width:1100px}a{color:#08687a}label{display:inline-block;margin:8px 20px 8px 0}select,input{font:inherit;padding:6px}
 .scroll{overflow:auto}table{border-collapse:collapse;background:white;width:100%}th,td{padding:10px;text-align:left;border-bottom:1px solid #dde3e8}th{white-space:nowrap}td{white-space:pre-line;min-width:120px}
 th{background:#e9eff3}small{display:block;color:#526777}.missing{color:#9b3b16}</style>
-<h1>Registration quality</h1><p><a href="../result_review_and_manage.html#alignment" target="_top">Alignment images and station positions</a> &middot; <a id="download" download="quality.json">Download quality JSON</a></p>
-<p>Diagnostics only: these values do not change poses, registration decisions, or the saved map. They measure internal consistency, not independent GT accuracy.</p>
-<p>Distances at or above the selected threshold are excluded. Inlier Chamfer averages the two directional mean distances. Read it together with both coverage ratios and counts: a small matching patch can have a low error. Coverage is a distance-based proxy, not a visibility mask.</p>
+<h1>Registration quality</h1><p><a href="../result_review_and_manage.html#alignment" target="_top">Alignment images and station positions</a>DOWNLOAD</p>
 <label>Distance threshold <select id="threshold"><option value="0.01">1 cm</option><option value="0.02">2 cm</option><option value="0.03" selected>3 cm</option><option value="0.05">5 cm</option></select></label>
 <label>Sort <select id="sort"><option value="order">Scan order</option><option value="error">Highest Chamfer first</option><option value="coverage">Lowest coverage first</option></select></label>
 <label>Scan filter <input id="filter" type="search" placeholder="Scan name or row number"></label>
@@ -126,10 +124,10 @@ th{background:#e9eff3}small{display:block;color:#526777}.missing{color:#9b3b16}<
 <th>A → B coverage<small>inliers / all A points</small></th><th>B → A coverage<small>inliers / all B points</small></th>
 <th>A → B distance<small>mean / RMSE / p95, mm</small></th><th>B → A distance<small>mean / RMSE / p95, mm</small></th>
 <th>A → B plane residual<small>p50 / p95, mm; count</small></th><th>B → A plane residual<small>p50 / p95, mm; count</small></th></tr></thead><tbody id="pairs"></tbody></table></div>
-<p>Point-to-plane statistics additionally require valid normals with |normal dot product| &gt; 0.9. They use every accepted correspondence, without robust weights. N/A means no usable correspondences; it does not mean zero error. Only retained scan connections are evaluated, using 1 cm working clouds at fixed final poses.</p>
 <script id="quality-data" type="application/json">PAYLOAD</script><script>
 const quality = JSON.parse(document.getElementById('quality-data').textContent);
-document.getElementById('download').href = URL.createObjectURL(new Blob([JSON.stringify(quality, null, 2) + '\\n'], {type: 'application/json'}));
+const download = document.getElementById('download');
+if (download) download.href = URL.createObjectURL(new Blob([JSON.stringify(quality, null, 2) + '\\n'], {type: 'application/json'}));
 const mm = value => value === null ? 'N/A' : (value * 1000).toFixed(2);
 const count = value => value.toLocaleString('en-US');
 function render() {
@@ -153,11 +151,11 @@ function render() {
         for (const value of values) { const cell = document.createElement('td'); cell.textContent = value; row.append(cell); }
         body.append(row);
     }
-    document.getElementById('summary').textContent = `${rows.length} of ${quality.pairs.length} scan pairs shown. Display units: mm. JSON distances: metres. Threshold: ${threshold * 100} cm.`;
+    document.getElementById('summary').textContent = `${rows.length} / ${quality.pairs.length} scan pairs`;
 }
 for (const id of ['threshold', 'sort', 'filter']) document.getElementById(id).addEventListener('input', render);
 render();</script></html>
-""".replace("PAYLOAD", payload)
+""".replace("DOWNLOAD", "" if (_destination / "quality.json").is_file() else ' &middot; <a id="download" download="quality.json">Download quality JSON</a>').replace("PAYLOAD", payload)
     pending = _destination / "quality.html.pending"
     pending.write_text(document, encoding="utf-8")
     pending.replace(_destination / "quality.html")

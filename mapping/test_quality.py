@@ -78,6 +78,10 @@ class QualityTests(unittest.TestCase):
             self.assertIn("\\u003c/script\\u003e", page)
             self.assertIn('"inlier_chamfer_m": null', page)
             self.assertEqual(quality, before)
+            self.assertIn('id="download"', page)
+            (pathlib.Path(directory) / "quality.json").write_text(json.dumps(quality), encoding="utf-8")
+            writeQualityPage(quality, pathlib.Path(directory))
+            self.assertNotIn('id="download"', (pathlib.Path(directory) / "quality.html").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

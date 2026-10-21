@@ -52,7 +52,7 @@ Adding registration inputs re-sorts the selection; **Up / Down** allows manual c
 ### Convert and view
 
 1. Click **Select files** or **Select folder** to add BLK scans.
-2. Choose an **Output folder**, then click **Convert scans**.
+2. The **Output folder** defaults to `output` beside the selected scans. Change it if needed, then click **Convert scans**.
 3. Each scan becomes one full-resolution file: `Setup26.blk → Setup26.ply`.
 4. Click **View 3D**, or open **View saved point clouds** and choose **Open PLY files** / **Open folder**.
 
@@ -192,9 +192,9 @@ Registration saves poses and review materials. Merged products are generated onl
 
 | Button | Output with the default base name |
 | --- | --- |
-| **Generate 1 cm PLY** | `reference_map_1cm.ply`: voxel-averaged map for matching and distribution |
+| **Generate 1 cm / 3 cm PLY** | `reference_map_1cm.ply` / `reference_map_3cm.ply`: voxel-averaged map at the selected resolution |
 | **Generate raw PLY** | `reference_map_raw.ply`: every original point transformed, with intensity preserved |
-| **Generate share HTML** | `reference_map_1cm_share.html`: complete 1 cm map embedded in an offline 3D viewer |
+| **Generate 1 cm / 3 cm share HTML** | `reference_map_1cm_share.html` / `reference_map_3cm_share.html`: selected map embedded in an offline 3D viewer |
 
 Open the management page through **Review and manage** in BLK Studio to use its
 generation buttons. Opening the HTML directly shows saved files and offline review;
@@ -203,9 +203,18 @@ to verify saved filenames and sizes after moving or deleting files, and
 keep `html_source/` beside it. Colleagues need only the generated **share HTML**
 and a browser—no app, Python, or separate PLY.
 
+Select 1 cm or 3 cm separately for merged PLY and share HTML. Both resolutions
+can coexist in the output folder. Registration refinement remains fixed at 1 cm.
 Generation uses saved poses without re-registering. Share HTML reuses a verified
-1 cm map when available; otherwise its intermediate map is temporary.
+map at the selected resolution when available; otherwise its intermediate map is temporary.
 Retain original PLYs plus `relative_poses.json` for reproducibility.
+
+Voxel export processes scans in parallel within the available CPU and memory budget.
+`BLK_CPU_THREADS` limits CPUs; optional `BLK_MERGE_WORKERS` limits concurrent scans
+(`1` selects serial export). Small exports run serially to avoid process startup overhead.
+Temporary float64 scan voxels are stored beside the output and removed after merging.
+The per-scan and final voxel averaging are unchanged. Progress shows completed scans,
+final reduction, and file writing. Generating a product also refreshes the review page.
 
 <br>
 
@@ -235,7 +244,7 @@ accuracy. Scan-to-map trajectory estimation is not implemented.
 
 - **Missing file:** select a moved PLY again. Generation requires originals at the paths recorded in the poses JSON.
 - **Disconnected groups:** click **View chunks** (or **Build chunk review** for an older job). `chunks_review.html`, `partial_chunks.json`, and `html_source/chunks/` show sampled 3D previews, scan positions, and original row numbers in separate chunk-local frames. These are diagnostic poses before final 1 cm refinement, not a common GT map. Use **Arrange chunks** to provide initial placements; **Resume** reuses caches and searches for chunk connections automatically. No final map/poses are published until all groups connect.
-- **Slow viewer or large output:** lower display density for navigation. The full cloud still occupies memory; raw maps and embedded HTML can be large.
+- **Slow viewer or large output:** choose a 3 cm export for fewer points, or lower display density for navigation. The viewer uploads the complete cloud in 16 MB graphics buffers; total CPU/GPU memory still depends on point count.
 - **Existing output:** move/remove the generated file before regenerating, or choose a different folder for a new registration.
 
 <br>

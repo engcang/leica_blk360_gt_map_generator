@@ -203,7 +203,7 @@ def main():
     mode.add_argument("--setup", type=pathlib.Path)
     mode.add_argument("--export", type=pathlib.Path, help="Export the registered map and one transform JSON")
     mode.add_argument("--generate", type=pathlib.Path, help="Generate an optional product from relative_poses.json")
-    parser.add_argument("--product", choices=["raw", "voxel", "share"])
+    parser.add_argument("--product", choices=["raw", "voxel", "share", "voxel3cm", "share3cm"])
     parser.add_argument("--destination", type=pathlib.Path)
     parser.add_argument("--report", required=True, type=pathlib.Path)
     args = parser.parse_args()

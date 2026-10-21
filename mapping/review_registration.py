@@ -154,14 +154,14 @@ def createReview(_result, _records, _destination=None):
         height = level["scanner_height_m"]
         axes[1, 0].axhline(height, linestyle=":", color="#94a3b8", linewidth=0.8)
         axes[1, 0].text(1, height + 0.1, f"L{level['id']} (inferred)", fontsize=9)
-    axes[1, 0].set(title="Height by acquisition order / dashed path is not a trajectory", xlabel="Station number", ylabel="Relative scanner height (m)")
+    axes[1, 0].set(title="Height by acquisition order", xlabel="Station number", ylabel="Relative scanner height (m)")
     axes[1, 0].set_xticks(numbers[::max(1, len(scans) // 30)])
     axes[1, 0].grid(alpha=0.18)
     for key, label in (("point_to_plane_p50_m", "Per-pair median"), ("point_to_plane_p95_m", "Per-pair 95th percentile")):
         values = [pair[key] * 1000 for pair in quality.get("pairs", []) if pair.get(key) is not None and np.isfinite(pair[key])]
         if values:
             axes[1, 1].hist(values, bins=min(30, max(5, len(values) // 3)), alpha=0.65, label=label)
-    axes[1, 1].set(title="Internal residuals / not independent GT accuracy", xlabel="Absolute point-to-plane residual (mm)", ylabel="Scan pairs")
+    axes[1, 1].set(title="Point-to-plane residuals", xlabel="Absolute point-to-plane residual (mm)", ylabel="Scan pairs")
     if axes[1, 1].has_data():
         axes[1, 1].legend()
     else:

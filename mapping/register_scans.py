@@ -434,38 +434,18 @@ def writePly(_path, _xyz, _intensity):
     pending.unlink()
 
 
-def merge(_result, _output, _voxel, _name=None, _viewer=True):
+def merge(_result, _output, _voxel, _name=None, _viewer=True, _progress=None):
+    from voxel_merge import mergedCloud
+    progress = _progress or (lambda message: print(message, flush=True))
     target = _output / (_name or f"reference_map_{_voxel * 100:g}cm.ply")
     if target.exists():
         raise ValueError(f"Output already exists: {target}")
-    parts = []
-    intensities = []
-    colour_mode = None
-    for record in _result["scans"]:
-        path = pathlib.Path(record["source_path"])
-        if hashFile(path) != record["source_sha256"]:
-            raise ValueError(f"Source changed since registration: {path}")
-        raw = readPly(path)
-        cloud = makeCloud(np.column_stack([raw["x"], raw["y"], raw["z"]]))
-        rgb = "red" in raw.dtype.names
-        if colour_mode is not None and colour_mode != rgb:
-            raise ValueError("Cannot mix RGB and intensity scans in a map")
-        colour_mode = rgb
-        values = colourValues(raw).astype(np.float64) / (255 if rgb else 65535)
-        cloud.colors = o3d.utility.Vector3dVector(values if rgb else np.column_stack([values, values, values]))
-        cloud.transform(np.array(record["transform_map_from_scan"]))
-        reduced = cloud.voxel_down_sample(_voxel)
-        parts.append(np.asarray(reduced.points).copy())
-        intensities.append(np.asarray(reduced.colors).copy())
-        print(f"Merge {record['name']}: {len(raw):,} -> {len(reduced.points):,} transformed voxels", flush=True)
-        del cloud, reduced, raw, values
-    cloud = makeCloud(np.concatenate(parts))
-    cloud.colors = o3d.utility.Vector3dVector(np.concatenate(intensities))
-    del parts, intensities
-    reduced = cloud.voxel_down_sample(_voxel)
+    reduced, colour_mode = mergedCloud(_result["scans"], _voxel, _output, progress)
     xyz = np.asarray(reduced.points)
     intensity = np.asarray(reduced.colors) * 255 if colour_mode else np.asarray(reduced.colors)[:, 0] * 65535
+    progress(f"Writing {len(xyz):,} map points")
     writePly(target, xyz, intensity)
+    progress("Finalizing map")
     metadata = {"file": target.name, "points": len(xyz), "voxel_m": _voxel,
                 "minimum_xyz": xyz.min(axis=0).tolist(), "maximum_xyz": xyz.max(axis=0).tolist(),
                 "sha256": hashFile(target), "independently_validated": False,

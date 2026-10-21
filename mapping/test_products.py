@@ -5,6 +5,7 @@ import pathlib
 import re
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -15,8 +16,8 @@ from result_page import writeProductSnapshot
 
 
 class ProductTests(unittest.TestCase):
-    def makeResult(self, _root):
-        points = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 1]], dtype=float)
+    def makeResult(self, _root, _points=None):
+        points = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 1]] if _points is None else _points, dtype=float)
         values = np.array([0, 100, 32768, 65535])
         rotation = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]])
         pose = np.eye(4)
@@ -99,6 +100,43 @@ class ProductTests(unittest.TestCase):
                 generateProduct(poses, "raw", root / "work", lambda _message: None)
             self.assertFalse((root / "Test map_raw.ply").exists())
             self.assertFalse(list(root.glob(".product-*")))
+
+    def testBothResolutionsCoexistAndShareReusesMatchingMap(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            poses, _, _, _ = self.makeResult(root, [[0, 0, 0], [.012, 0, 0], [.023, 0, 0], [.024, 0, 0]])
+            original_poses = poses.read_bytes()
+            products = {}
+            for kind in ("voxel", "voxel3cm"):
+                products[kind] = generateProduct(poses, kind, root / "work", lambda _: None)
+            self.assertLess(products["voxel3cm"]["points"], products["voxel"]["points"])
+            self.assertEqual(products["voxel3cm"]["voxel_m"], .03)
+            self.assertTrue(products["voxel3cm"]["file"].endswith("_3cm.ply"))
+            for kind, voxel_kind in (("share", "voxel"), ("share3cm", "voxel3cm")):
+                with mock.patch("register_scans.merge", side_effect=AssertionError("Cached map was not reused")):
+                    product = generateProduct(poses, kind, root / "work", lambda _: None)
+                page = pathlib.Path(product["output_path"]).read_text(encoding="utf-8")
+                blocks = re.findall(r'<script id="ply-block-\d+" type="application/octet-stream">([^<]+)</script>', page)
+                embedded = b"".join(gzip.decompress(base64.b64decode(block)) for block in blocks)
+                self.assertEqual(embedded, pathlib.Path(products[voxel_kind]["output_path"]).read_bytes())
+                self.assertEqual(product["voxel_m"], products[voxel_kind]["voxel_m"])
+                self.assertNotIn("ply_path", product)
+                with self.assertRaises(FileExistsError):
+                    generateProduct(poses, kind, root / "work", lambda _: None)
+            saved = json.loads((root / "html_source/products.json").read_text())
+            self.assertEqual(set(saved), {"voxel", "voxel3cm", "share", "share3cm"})
+            self.assertEqual(poses.read_bytes(), original_poses)
+            self.assertFalse(list(root.glob(".product-*")))
+
+    def testStandalone3cmShareDoesNotPublishPly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            poses, _, _, _ = self.makeResult(root)
+            product = generateProduct(poses, "share3cm", root / "work", lambda _: None)
+            self.assertEqual(product["voxel_m"], .03)
+            self.assertTrue(product["file"].endswith("_3cm_share.html"))
+            self.assertFalse((root / "Test map_3cm.ply").exists())
+            self.assertFalse((root / "Test map_1cm.ply").exists())
 
 
 if __name__ == "__main__":

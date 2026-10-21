@@ -10,6 +10,8 @@ td, th { padding:8px 18px; text-align:left; border-bottom:1px solid #dde3e8; }
 .products { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px; }
 article { padding:20px; background:white; border:1px solid #ccd6dc; border-radius:8px; }
 article h3 { margin-top:0; }
+article label { display:block; margin-bottom:14px; }
+article select { font:inherit; padding:5px 8px; margin-left:6px; border:1px solid #b5cbd4; border-radius:4px; }
 article div { margin-top:14px; overflow-wrap:anywhere; }
 button { font:inherit; border:1px solid #08687a; color:white; background:#08687a; border-radius:5px; padding:10px 16px; cursor:pointer; margin-right:8px; }
 button:disabled { opacity:.45; cursor:default; }

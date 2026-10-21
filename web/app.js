@@ -221,6 +221,18 @@ function renderCloud(cloud)
     row.append(identity, detail, actions);
     return row;
 }
+
+function conversionControls()
+{
+    const jobs = (project?.jobs || []).filter(job => conversion_ids.has(job.id));
+    const ready = jobs.some(job => job.status === 'ready');
+    const output = element('output-path').value.trim();
+    element('start').disabled = closed || adding || !element('connection').hidden || !ready || !output;
+    element('start').title = !ready ? 'Select BLK files ready for conversion.' : !output ? 'Choose an output folder.' : '';
+    element('cancel').disabled = closed || !element('connection').hidden || (!project?.running && !jobs.some(job => job.status === 'queued'));
+    element('open-folder').disabled = !output;
+}
+
 async function refresh()
 {
     if (closed) return;
@@ -233,11 +245,9 @@ async function refresh()
         const selectedJobs = project.jobs.filter(job => conversion_ids.has(job.id));
         element('job-count').textContent = selectedJobs.length;
         const count = status => selectedJobs.filter(job => job.status === status).length;
-        element('open-folder').disabled = !element('output-path').value.trim();
         element('summary').textContent = selectedJobs.length ? `${count('completed')} completed · ${count('ready') + count('queued')} waiting · ${count('running')} processing` : '';
         element('summary').hidden = !selectedJobs.length;
-        element('start').disabled = adding || !count('ready') || !element('output-path').value.trim();
-        element('cancel').disabled = !project.running && !count('queued');
+        conversionControls();
         const clouds = (project.point_clouds || []).filter(cloud => viewed_cloud_ids.has(cloud.id));
         element('cloud-count').textContent = clouds.length;
         const cloud_signature = JSON.stringify(clouds);
@@ -276,12 +286,14 @@ async function refresh()
             notice(project.migration_notice);
             sessionStorage.setItem('migration-notice', 'shown');
         }
+        return true;
     }
     catch (error)
     {
         element('connection').hidden = false;
         element('connection').textContent = 'Disconnected · reopen BLK Studio to reconnect';
         element('start').disabled = element('cancel').disabled = true;
+        return false;
     }
 }
 async function addPaths(paths)
@@ -290,6 +302,7 @@ async function addPaths(paths)
     adding = true;
     element('start').disabled = true;
     element('import-status').textContent = 'Checking selected BLK files…';
+    let added_ids = [];
     try
     {
         const result = await api('add',
@@ -297,13 +310,23 @@ async function addPaths(paths)
             paths
         });
         for (const id of result.ids) conversion_ids.add(id);
+        added_ids = result.ids;
         element('import-status').textContent = `${result.added} scans added · ${result.skipped} already selected · ${result.errors.length} errors.`;
         if (result.errors.length) notice(result.errors.map(item => `${item.path}: ${item.error}`).join('\n'), true);
     }
     finally
     {
         adding = false;
-        await refresh();
+        if (await refresh())
+        {
+            // Suggest a destination only after an explicit selection in this tab.
+            if (added_ids.length && !output_dirty && !element('output-path').value.trim())
+            {
+                const scan = project.jobs.find(job => added_ids.includes(job.id));
+                if (scan) element('output-path').value = scan.source_path.replace(/[^/\\]+$/, 'output');
+            }
+            conversionControls();
+        }
     }
 }
 async function saveOutput()
@@ -504,6 +527,7 @@ action('add-paths', () => addPaths(element('source-paths').value.split(/\r?\n/).
 element('output-path').oninput = () =>
 {
     output_dirty = true;
+    conversionControls();
 };
 action('save-output', async () =>
 {

@@ -46,12 +46,6 @@ def createShareViewer(_ply, _output, _poses=None, _embed=True, _map_metadata=Non
     document = document.replace('<link rel="stylesheet" href="viewer.css"><script src="viewer.js" defer></script>',
                                 "<style>" + (assets / "viewer.css").read_text(encoding="utf-8") + "</style>")
     document = document.replace("Full-resolution point cloud</h1>", html.escape(source.name) + "</h1>")
-    document = document.replace("Coordinates are displayed as stored in the PLY. Accuracy against an official export has not been verified.",
-                                "Experimental reference map. Coordinates are stored in metres. Independent ground-truth accuracy has not been established.")
-    description = ("The complete map is embedded without further downsampling. This file opens offline; no application or PLY selection is needed."
-                   if _embed else "Offline viewer: select the accompanying PLY with Open PLY. No application or server is needed.")
-    description += " Full-map loading needs browser and GPU memory beyond the file size."
-    document = document.replace('<div class="load-controls">', "<p>" + description + '</p><div class="load-controls">')
     before, after = document.split("</body>", 1)
     output.parent.mkdir(parents=True, exist_ok=True)
     pending = output.with_suffix(output.suffix + ".pending")

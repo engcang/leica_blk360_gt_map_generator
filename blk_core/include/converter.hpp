@@ -19,6 +19,7 @@
 
 #include "blk_container.hpp"
 #include "jpeg_xr.hpp"
+#include "panorama.hpp"
 #include "platform.hpp"
 #include "color_mode.hpp"
 #include "rgb_colour.hpp"
@@ -103,10 +104,13 @@ namespace blk_core
         nlohmann::json convert(const std::filesystem::path &_input,
                                const std::filesystem::path &_destination,
                                const std::atomic<bool> &_cancel,
-                               const std::function<void(const Progress &)> &_callback) const
+                               const std::function<void(const Progress &)> &_callback,
+                               const ExportOptions &_export = ExportOptions()) const
         {
+            const bool exporting = anyExport(_export);
             const auto _progress = [&](Progress value) {
                 if (rgbEdition && value.fraction_ < .96) value.fraction_ *= .55;
+                if (exporting && value.fraction_ < .96) value.fraction_ *= .5;
                 _callback(value);
             };
             requireLittleEndian();
@@ -118,12 +122,24 @@ namespace blk_core
             {
                 throw std::runtime_error("Output already exists: " + _destination.u8string());
             }
+            for (const auto &path : requestedExportPaths(_destination, _export))
+            {
+                if (std::filesystem::exists(path))
+                {
+                    throw std::runtime_error("Output already exists: " + path.u8string());
+                }
+            }
+            if (_export.panoramas_ && _export.panorama_width_ != 4096 && _export.panorama_width_ != 8192 && _export.panorama_width_ != 16384)
+            {
+                throw std::runtime_error("Panorama width must be 4096, 8192 or 16384");
+            }
             const auto source_size = std::filesystem::file_size(_input);
             const auto source_time = std::filesystem::last_write_time(_input);
             BlkContainer container(_input);
             const auto display_name = _input.filename().u8string();
             auto model = container.parse();
             if (rgbEdition) container.ldrImages();
+            if (exporting) requireExportImages(container);
             const auto work = _destination.parent_path() / (".blk-work-" + newId());
             std::filesystem::create_directories(work);
             try
@@ -233,6 +249,32 @@ namespace blk_core
                 {
                     throw std::runtime_error("Output count/size verification failed");
                 }
+                const auto targets = exportPaths(_destination);
+                nlohmann::json exported = {{"independently_validated", false}};
+                if (exporting)
+                {
+                    const double low = rgbEdition ? .28 : .47;
+                    const double high = rgbEdition ? .55 : .93;
+                    const double middle = _export.panoramas_ && _export.camera_images_ ? (low + high) / 2 : high;
+                    if (_export.panoramas_)
+                    {
+                        exported.update(writePanoramas(container, work / "cloud.ply", count, _export.panorama_width_, work / "panorama.jpg", work / "intensity_panorama.png", _cancel, [&_callback, low, middle](double _fraction)
+                        {
+                            _callback({"Rendering panoramas", low + (middle - low) * _fraction});
+                        }));
+                        exported["colour_path"] = targets.colour_.u8string();
+                        exported["intensity_path"] = targets.intensity_.u8string();
+                    }
+                    if (_export.camera_images_)
+                    {
+                        const double start = _export.panoramas_ ? middle : low;
+                        exported.update(writeCameraImages(container, work / "images", display_name, source_hash, _cancel, [&_callback, start, high](double _fraction)
+                        {
+                            _callback({"Saving camera images", start + (high - start) * _fraction});
+                        }));
+                        exported["images_path"] = targets.images_.u8string();
+                    }
+                }
                 nlohmann::json colour = {{"colour_mode", "intensity"}};
                 if (rgbEdition) {
                     colour = colourPly(container, work / "cloud.ply", work / "rgb.ply", count, _cancel, _callback);
@@ -262,6 +304,10 @@ namespace blk_core
                                          {"transform_map_from_scan", nullptr},
                                          {"registration_status", "not_registered"}};
                 result.update(colour);
+                if (exporting)
+                {
+                    result["panorama"] = exported;
+                }
                 for (const auto &name : names)
                 {
                     std::filesystem::remove(work / (name + ".raw"));
@@ -269,7 +315,14 @@ namespace blk_core
                 checkCancel(_cancel);
                 // Preserve acquisition/download chronology across BLK and PLY selection.
                 std::filesystem::last_write_time(work / "cloud.ply", source_time);
-                publishFile(work / "cloud.ply", _destination);
+                if (exporting)
+                {
+                    publishConversion(work, _destination, _export);
+                }
+                else
+                {
+                    publishFile(work / "cloud.ply", _destination);
+                }
                 std::filesystem::remove(work);
                 _progress({"Completed", 1});
                 return result;

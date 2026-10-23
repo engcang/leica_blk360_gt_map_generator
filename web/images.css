@@ -1,0 +1,97 @@
+[hidden] {
+    display: none !important
+}
+
+.tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px
+}
+
+.tabs button.active,
+.camera-list button.active {
+    background: #3b5a7d;
+    border-color: #66c6fa
+}
+
+.tabs button:disabled {
+    opacity: .45;
+    cursor: not-allowed
+}
+
+.stage {
+    display: flex;
+    gap: 14px;
+    align-items: flex-start;
+    margin-top: 9px
+}
+
+.view {
+    flex: 1;
+    min-width: 0
+}
+
+#panorama,
+#flat {
+    height: min(70vh, 900px);
+    margin: 0;
+    background: #05090e;
+    border-radius: 4px;
+    touch-action: none;
+    cursor: grab
+}
+
+.camera-list {
+    width: 200px;
+    max-height: min(70vh, 900px);
+    overflow: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 4px
+}
+
+.camera-list h2 {
+    font-size: 12px;
+    font-weight: 600;
+    color: #acbdd0;
+    margin: 10px 0 2px
+}
+
+.camera-list button {
+    text-align: left;
+    padding: 5px 8px;
+    font-size: 12px
+}
+
+.camera-info {
+    width: 250px;
+    margin: 0;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 5px 10px;
+    font-size: 12px
+}
+
+.camera-info dt {
+    color: #acbdd0
+}
+
+.camera-info dd {
+    margin: 0
+}
+
+#error {
+    color: #ff9b9b
+}
+
+@media (max-width: 900px) {
+    .stage {
+        flex-direction: column;
+        align-items: stretch
+    }
+
+    .camera-list,
+    .camera-info {
+        width: 100%
+    }
+}

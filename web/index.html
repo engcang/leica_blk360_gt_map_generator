@@ -27,7 +27,7 @@
         </section>
         <section class="output-bar"><label for="output-path">OUTPUT FOLDER</label><div><input id="output-path" placeholder="Select a folder for the PLY files" aria-label="Output folder"><button id="choose-output" class="secondary">Browse…</button><button id="save-output" class="secondary">Apply</button><button id="open-folder" class="secondary" disabled>Open output folder</button></div></section>
         <section class="queue-panel">
-            <div class="queue-toolbar"><div><h2>Conversion queue <span id="job-count">0</span></h2><p id="summary" hidden></p></div><div class="conversion-actions"><button id="start" class="primary" disabled>Convert scans</button><button id="cancel" class="secondary" disabled>Stop</button></div></div>
+            <div class="queue-toolbar"><div><h2>Conversion queue <span id="job-count">0</span></h2><p id="summary" hidden></p></div><div class="conversion-actions"><label class="export-option"><input type="checkbox" id="export-panoramas" autocomplete="off"> Export panoramas</label><label class="export-option"><input type="checkbox" id="export-camera-images" autocomplete="off"> Export camera images</label><button id="start" class="primary" disabled>Convert scans</button><button id="cancel" class="secondary" disabled>Stop</button></div></div>
 
             <div id="jobs"><div class="empty">No scans selected.</div></div>
         </section>

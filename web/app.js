@@ -129,7 +129,8 @@ function renderJob(job)
     name.textContent = job.name;
     const detail = document.createElement('div');
     detail.className = 'detail';
-    detail.textContent = `${size(job.bytes)}${job.result ? ` · ${number(job.result.valid_points)} points` : ''}`;
+    const exported = job.result?.panorama;
+    detail.textContent = `${size(job.bytes)}${job.result ? ` · ${number(job.result.valid_points)} points` : ''}${exported?.colour_path ? ' · panorama' : ''}${exported?.image_count ? ` · ${exported.image_count} images` : ''}`;
     const source = document.createElement('div');
     source.className = 'detail filepath';
     source.textContent = job.source_path;
@@ -160,11 +161,26 @@ function renderJob(job)
         view.rel = 'noopener';
         view.textContent = 'View 3D ↗';
         view.className = 'view';
+        const images = document.createElement('a');
+        images.textContent = 'View Images ↗';
+        if (exported?.colour_path || exported?.images_path)
+        {
+            images.href = `/images.html?scan=${job.id}#${token}`;
+            images.target = '_blank';
+            images.rel = 'noopener';
+            images.className = 'view';
+        }
+        else
+        {
+            images.className = 'view disabled';
+            images.setAttribute('aria-disabled', 'true');
+            images.title = 'Convert with Export panoramas or Export camera images to view images.';
+        }
         const download = document.createElement('a');
         download.href = `/files/${job.id}.ply?token=${token}`;
         download.download = job.name.replace(/\.blk$/i, '.ply');
         download.textContent = 'PLY ↓';
-        actions.append(view, download);
+        actions.append(view, images, download);
     }
     if (['failed', 'cancelled', 'interrupted'].includes(job.status)) actions.append(button('Retry', async () =>
     {
@@ -537,7 +553,7 @@ action('save-output', async () =>
 action('start', async () =>
 {
     await saveOutput();
-    await api('start', {ids: [...conversion_ids]});
+    await api('start', {ids: [...conversion_ids], panoramas: element('export-panoramas').checked, camera_images: element('export-camera-images').checked});
     await refresh();
 });
 action('cancel', async () =>

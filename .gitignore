@@ -1,11 +1,14 @@
 #Codex: Local instructions, editor settings, and machine-specific configuration.
 /AGENTS.md
+/CLAUDE.md
 /docs/CODING_STYLE.md
+/docs/superpowers/
 /legacy/
 /scripts/package_release.py
 /tests/test_release.py
 /.agents/
 /.codex/
+/.superpowers/
 .vscode/
 .idea/
 .vs/

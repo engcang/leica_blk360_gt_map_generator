@@ -77,6 +77,20 @@ coverage counts appear in conversion metadata. Colour seams and boundary artifac
 are possible; calibration has not been independently validated against Leica exports.
 No new Python/image-codec package is needed for conversion: both use the existing native JPEG XR codec.
 
+**Panoramas and camera images (optional, both editions):** tick **Export panoramas** and/or
+**Export camera images** before **Convert scans**. Beside `Setup26.ply` they write
+`Setup26_panorama.jpg` (colour, from the LDR camera images), `Setup26_intensity_panorama.png`
+(laser intensity, 1–99 % stretch), and `Setup26_images/` (every LDR image as PNG plus
+`cameras.json` with intrinsics, extrinsics, exposure and gains). Panoramas are 8192×4096
+equirectangular in the scanner-local frame without levelling: the image centre faces +x and
+the top is the zenith. The CLI accepts `--panoramas`, `--camera-images` and
+`--panorama-width 4096|8192|16384`. Scans without LDR images fail before conversion when an
+export is ticked. The export is experimental and not validated against Leica panoramas: the
+bottom ~60° is black, seams are not blended, exposure is not equalised, and camera PNGs add
+a few hundred MB per scan. Existing files are never overwritten.
+**View Images ↗** in a completed row opens a separate window with the panoramas (360° look-around
+or Flat) and the camera images with their calibration; items that were not exported are greyed out.
+
 All tabs and registration functions are shared: scan/chunk placement, Additional Register,
 quality reports, raw/1 cm exports, and offline share HTML. RGB channels are preserved in
 raw exports and averaged in voxel maps. Registration and quality metrics use geometry,

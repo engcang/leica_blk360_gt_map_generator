@@ -86,16 +86,17 @@ namespace blk_core
         {
             try
             {
-                if (_argc != 3)
+                if (_argc < 3)
                 {
-                    std::cout << "blk_convert INPUT.blk OUTPUT.ply\n";
+                    std::cout << "blk_convert INPUT.blk OUTPUT.ply [--panoramas] [--camera-images] [--panorama-width 4096|8192|16384]\n";
                     return 2;
                 }
+                const auto options = parseExportOptions(std::vector<std::string>(_argv + 3, _argv + _argc));
                 std::atomic<bool> cancel(false);
                 const auto result = Converter().convert(std::filesystem::u8path(_argv[1]), std::filesystem::u8path(_argv[2]), cancel, [](const Progress &_progress)
                 {
                     std::cerr << static_cast<int>(_progress.fraction_ * 100) << "% " << _progress.stage_ << std::endl;
-                });
+                }, options);
                 std::cout << result.dump(2) << '\n';
                 return 0;
             }

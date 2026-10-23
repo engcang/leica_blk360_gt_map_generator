@@ -91,6 +91,14 @@ namespace blk_core
                 worker_.join();
             }
         }
+        static ExportOptions jobExportOptions(const nlohmann::json &_job)
+        {
+            const auto exported = _job.contains("export") && _job.at("export").is_object() ? _job.at("export") : nlohmann::json::object();
+            ExportOptions options;
+            options.panoramas_ = exported.value("panoramas", false);
+            options.camera_images_ = exported.value("camera_images", false);
+            return options;
+        }
         static bool validId(const std::string &_id)
         {
             return _id.size() == 32 && _id.find_first_not_of("0123456789abcdef") == std::string::npos;
@@ -315,7 +323,8 @@ namespace blk_core
             refreshCloudsLocked();
             saveLocked();
         }
-        void queue(const nlohmann::json &_ids = nullptr)
+        void queue(const nlohmann::json &_ids = nullptr,
+                   const ExportOptions &_options = ExportOptions())
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!_ids.is_null() && !_ids.is_array())
@@ -334,7 +343,12 @@ namespace blk_core
             {
                 if (job["status"] == "running" || job["status"] == "queued")
                 {
-                    reserved.push_back(std::filesystem::u8path(job.at("output_path").get<std::string>()));
+                    const auto path = std::filesystem::u8path(job.at("output_path").get<std::string>());
+                    reserved.push_back(path);
+                    for (const auto &exported : requestedExportPaths(path, jobExportOptions(job)))
+                    {
+                        reserved.push_back(exported);
+                    }
                 }
             }
             std::vector<std::pair<std::string, std::filesystem::path>> pending;
@@ -357,31 +371,44 @@ namespace blk_core
                 {
                     throw std::runtime_error("Output already exists: " + target.u8string() + ". Open it from View saved point clouds without converting again, or choose another output folder.");
                 }
-                for (const auto &other : reserved)
+                auto outputs = requestedExportPaths(target, _options);
+                for (const auto &exported : outputs)
                 {
-                    auto left = target.u8string(), right = other.u8string();
-#ifdef _WIN32
-                    std::transform(left.begin(), left.end(), left.begin(), [](unsigned char _c)
+                    if (std::filesystem::exists(exported))
                     {
-                        return static_cast<char>(std::tolower(_c));
-                    });
-                    std::transform(right.begin(), right.end(), right.begin(), [](unsigned char _c)
-                    {
-                        return static_cast<char>(std::tolower(_c));
-                    });
-#endif
-                    if (left == right)
-                    {
-                        throw std::runtime_error("Two scans would produce " + target.filename().u8string() + ". Convert them into separate folders.");
+                        throw std::runtime_error("Output already exists: " + exported.u8string() + ". Choose another output folder or turn off the export options.");
                     }
                 }
-                reserved.push_back(target);
+                outputs.insert(outputs.begin(), target);
+                for (const auto &candidate : outputs)
+                {
+                    for (const auto &other : reserved)
+                    {
+                        auto left = candidate.u8string(), right = other.u8string();
+#ifdef _WIN32
+                        std::transform(left.begin(), left.end(), left.begin(), [](unsigned char _c)
+                        {
+                            return static_cast<char>(std::tolower(_c));
+                        });
+                        std::transform(right.begin(), right.end(), right.begin(), [](unsigned char _c)
+                        {
+                            return static_cast<char>(std::tolower(_c));
+                        });
+#endif
+                        if (left == right)
+                        {
+                            throw std::runtime_error("Two scans would produce " + candidate.filename().u8string() + ". Convert them into separate folders.");
+                        }
+                    }
+                }
+                reserved.insert(reserved.end(), outputs.begin(), outputs.end());
                 pending.emplace_back(job.at("id").get<std::string>(), target);
             }
             for (const auto &entry : pending)
             {
                 auto &job = findLocked(entry.first);
                 job["output_path"] = entry.second.u8string();
+                job["export"] = {{"panoramas", _options.panoramas_}, {"camera_images", _options.camera_images_}};
                 job["status"] = "queued";
                 job["message"] = "Waiting";
             }
@@ -595,6 +622,7 @@ namespace blk_core
             {
                 std::string id;
                 std::filesystem::path source, output;
+                ExportOptions options;
                 {
                     std::unique_lock<std::mutex> lock(mutex_);
                     condition_.wait(lock, [this]
@@ -625,6 +653,7 @@ namespace blk_core
                         id = job["id"];
                         source = std::filesystem::u8path(job.at("source_path").get<std::string>());
                         output = std::filesystem::u8path(job.at("output_path").get<std::string>());
+                        options = jobExportOptions(job);
                         job["status"] = "running";
                         job["message"] = "Starting";
                         break;
@@ -649,7 +678,7 @@ namespace blk_core
                         auto &job = findLocked(id);
                         job["progress"] = _progress.fraction_;
                         job["message"] = _progress.stage_;
-                    });
+                    }, options);
                     std::lock_guard<std::mutex> lock(mutex_);
                     auto &job = findLocked(id);
                     job["result"] = result;

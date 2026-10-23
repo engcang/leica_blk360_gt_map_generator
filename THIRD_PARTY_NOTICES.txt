@@ -12,6 +12,7 @@ mapping/native/dependencies.json. Full notices are installed with binaries.
 | cpp-httplib | [yhirose/cpp-httplib](https://github.com/yhirose/cpp-httplib/tree/v0.18.7), v0.18.7 | MIT; `third_party/httplib.LICENSE` |
 | JSON for Modern C++ | [nlohmann/json](https://github.com/nlohmann/json/tree/v3.12.0), v3.12.0 | MIT; `third_party/json.LICENSE` |
 | PicoSHA2 | [okdshin/PicoSHA2](https://github.com/okdshin/PicoSHA2/tree/v1.0.1), v1.0.1 | MIT; `third_party/picosha2.LICENSE` |
+| stb_image_write | [nothings/stb](https://github.com/nothings/stb/tree/1ee679ca2ef753a528db5ba6801e1067b40481b8), commit `1ee679ca2ef753a528db5ba6801e1067b40481b8` (v1.16) | MIT or public domain (dual); `third_party/stb.LICENSE` |
 
 Binary packages reproduce these full notices in `licenses/`. The first-party
 `cmake/jxr_compat.h` adapter corrects pointer-width typedefs for Windows LLP64 in

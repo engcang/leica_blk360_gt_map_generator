@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>Panorama and camera images · BLK Studio</title>
+    <link rel="stylesheet" href="viewer.css"><link rel="stylesheet" href="images.css">
+    <script src="images_math.js" defer></script><script src="images.js" defer></script>
+</head>
+<body><main>
+    <h1>Panorama and camera images</h1>
+    <p id="status" role="status">Loading scan…</p>
+    <p id="error" role="alert"></p>
+    <div id="controls" class="controls">
+        <div id="tabs" class="tabs" role="tablist" aria-label="Images"></div>
+        <label id="mode-control">Mode<select id="mode"><option value="sphere">360°</option><option value="flat">Flat</option></select></label>
+        <button id="reset">Reset</button>
+    </div>
+    <div id="stage" class="stage">
+        <nav id="camera-list" class="camera-list" aria-label="Camera images" hidden></nav>
+        <div class="view">
+            <canvas id="panorama" aria-label="360 degree panorama. Drag to look around, wheel to zoom, double-click to reset."></canvas>
+            <canvas id="flat" aria-label="Flat image. Drag to move, wheel to zoom, double-click to fit." hidden></canvas>
+        </div>
+        <dl id="camera-info" class="camera-info" hidden></dl>
+    </div>
+    <p id="readout" class="small"></p>
+    <p id="help">Left drag: look around · Wheel: zoom · Shift+wheel: fine zoom · Double-click: reset</p>
+</main></body></html>

@@ -277,6 +277,14 @@ progress
     color: var(--muted)
 }
 
+.conversion-actions label.export-option
+{
+    flex-direction: row;
+    align-items: center;
+    align-self: center;
+    font-size: 12px
+}
+
 select
 {
     font-size: 12px;
@@ -393,6 +401,12 @@ select
     color: var(--accent);
     background: var(--soft);
     border-color: #cfe1d6
+}
+
+.job-actions a.disabled
+{
+    opacity: .45;
+    cursor: not-allowed
 }
 
 #notice

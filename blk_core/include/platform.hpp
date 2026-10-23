@@ -88,6 +88,23 @@ namespace blk_core
 #endif
     }
 
+    inline void publishDirectory(const std::filesystem::path &_source,
+                                 const std::filesystem::path &_target)
+    {
+        if (!std::filesystem::create_directory(_target))
+        {
+            throw std::runtime_error("Output already exists: " + _target.u8string());
+        }
+        for (const auto &entry : std::filesystem::directory_iterator(_source))
+        {
+            if (entry.is_regular_file())
+            {
+                publishFile(entry.path(), _target / entry.path().filename());
+            }
+        }
+        std::filesystem::remove(_source);
+    }
+
     inline void replaceFile(const std::filesystem::path &_source,
                             const std::filesystem::path &_target)
     {

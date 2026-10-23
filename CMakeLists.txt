@@ -81,6 +81,12 @@ if(BUILD_TESTING)
         target_link_options(rgb_tests PRIVATE -static)
     endif()
     add_test(NAME rgb_tests COMMAND rgb_tests)
+    add_executable(panorama_tests tests/panorama_tests.cpp)
+    target_link_libraries(panorama_tests PRIVATE blk_core)
+    if(MINGW)
+        target_link_options(panorama_tests PRIVATE -static)
+    endif()
+    add_test(NAME panorama_tests COMMAND panorama_tests)
 endif()
 
 ### Install
@@ -92,4 +98,4 @@ install(DIRECTORY mapping DESTINATION . FILES_MATCHING PATTERN "*.py" PATTERN "r
 install(DIRECTORY mapping/bin DESTINATION mapping OPTIONAL)
 install(FILES LICENSE THIRD_PARTY_NOTICES.txt README.md DESTINATION .)
 install(FILES "${BLK_THIRD_PARTY}/jxrlib/LICENSE" DESTINATION licenses RENAME jxrlib.LICENSE)
-install(FILES "${BLK_THIRD_PARTY}/httplib.LICENSE" "${BLK_THIRD_PARTY}/json.LICENSE" "${BLK_THIRD_PARTY}/picosha2.LICENSE" DESTINATION licenses)
+install(FILES "${BLK_THIRD_PARTY}/httplib.LICENSE" "${BLK_THIRD_PARTY}/json.LICENSE" "${BLK_THIRD_PARTY}/picosha2.LICENSE" "${BLK_THIRD_PARTY}/stb.LICENSE" DESTINATION licenses)

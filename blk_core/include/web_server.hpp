@@ -165,17 +165,35 @@ namespace blk_core
             });
         }
 
+        void serveExport(httplib::Response &_response,
+                         const std::string &_id,
+                         const std::string &_item,
+                         const std::string &_type)
+        {
+            std::filesystem::path path;
+            try
+            {
+                path = exportFilePath(project_.scan(_id), _item);
+            }
+            catch (const std::exception &error)
+            {
+                reply(_response, {{"error", error.what()}}, 404);
+                return;
+            }
+            serveFile(_response, path, _type);
+        }
+
         void routes()
         {
             server_.Get("/", [this](const httplib::Request &, httplib::Response &_response)
             {
                 serveFile(_response, web_root_ / "index.html", "text/html; charset=utf-8");
             });
-            server_.Get("/(app\\.js|viewer\\.js|registration\\.js|placement\\.js|additional\\.js)", [this](const httplib::Request &_request, httplib::Response &_response)
+            server_.Get("/(app\\.js|viewer\\.js|registration\\.js|placement\\.js|additional\\.js|images\\.js|images_math\\.js)", [this](const httplib::Request &_request, httplib::Response &_response)
             {
                 serveFile(_response, web_root_ / _request.matches[1].str(), "text/javascript; charset=utf-8");
             });
-            server_.Get("/(app\\.css|viewer\\.css|placement\\.css)", [this](const httplib::Request &_request, httplib::Response &_response)
+            server_.Get("/(app\\.css|viewer\\.css|placement\\.css|images\\.css)", [this](const httplib::Request &_request, httplib::Response &_response)
             {
                 serveFile(_response, web_root_ / _request.matches[1].str(), "text/css; charset=utf-8");
             });
@@ -186,6 +204,10 @@ namespace blk_core
             server_.Get("/placement.html", [this](const httplib::Request &, httplib::Response &_response)
             {
                 serveFile(_response, web_root_ / "placement.html", "text/html; charset=utf-8");
+            });
+            server_.Get("/images.html", [this](const httplib::Request &, httplib::Response &_response)
+            {
+                serveFile(_response, web_root_ / "images.html", "text/html; charset=utf-8");
             });
             server_.Get("/api/placement-sample/([0-9a-f]{32})", [this](const httplib::Request &_request, httplib::Response &_response)
             {
@@ -362,7 +384,10 @@ namespace blk_core
             server_.Post("/api/start", [this](const httplib::Request &_request, httplib::Response &_response)
             {
                 const auto body = nlohmann::json::parse(_request.body);
-                project_.queue(body.value("ids", nlohmann::json()));
+                ExportOptions options;
+                options.panoramas_ = body.value("panoramas", false);
+                options.camera_images_ = body.value("camera_images", false);
+                project_.queue(body.value("ids", nlohmann::json()), options);
                 reply(_response, {{"ok", true}});
             });
             server_.Post("/api/cancel", [this](const httplib::Request &, httplib::Response &_response)
@@ -402,6 +427,16 @@ namespace blk_core
             server_.Get("/files/([0-9a-f]{32})\\.ply", [this](const httplib::Request &_request, httplib::Response &_response)
             {
                 serveFile(_response, project_.outputPath(_request.matches[1]), "application/octet-stream");
+            });
+            server_.Get("/files/panorama/([0-9a-f]{32})/(colour|intensity)", [this](const httplib::Request &_request, httplib::Response &_response)
+            {
+                const auto item = _request.matches[2].str();
+                serveExport(_response, _request.matches[1], item, item == "colour" ? "image/jpeg" : "image/png");
+            });
+            server_.Get("/files/images/([0-9a-f]{32})/(cameras\\.json|LDR_Image_[0-9]+\\.png)", [this](const httplib::Request &_request, httplib::Response &_response)
+            {
+                const auto item = _request.matches[2].str();
+                serveExport(_response, _request.matches[1], item, item == "cameras.json" ? "application/json" : "image/png");
             });
         }
 

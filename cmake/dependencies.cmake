@@ -35,6 +35,10 @@ downloadDependency(picosha2.h "https://raw.githubusercontent.com/okdshin/PicoSHA
     b13c180161ffac8d0adc81e033e493c409457c4d1258ab9781ac80579ba3bdd8)
 downloadDependency(picosha2.LICENSE "https://raw.githubusercontent.com/okdshin/PicoSHA2/v1.0.1/LICENSE"
     6c30eb1f37554ec4199cb82a8c86d9e7a852da78a757832bebb03ac9ddc44ff1)
+downloadDependency(stb_image_write.h "https://raw.githubusercontent.com/nothings/stb/1ee679ca2ef753a528db5ba6801e1067b40481b8/stb_image_write.h"
+    cbd5f0ad7a9cf4468affb36354a1d2338034f2c12473cf1a8e32053cb6914a05)
+downloadDependency(stb.LICENSE "https://raw.githubusercontent.com/nothings/stb/1ee679ca2ef753a528db5ba6801e1067b40481b8/LICENSE"
+    bebfe904b14301657e4e5d655c811d51fd31b97c455b9cc2d8600d6bac6cff63)
 
 ### JPEG XR reference codec
 FetchContent_Declare(blk_jxrlib

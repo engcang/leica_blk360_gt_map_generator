@@ -67,6 +67,16 @@ addEventListener('load', async () => {
         check(conversion?.body.ids.join() === 'scan-0', 'Selected scans not submitted');
         check(requests.indexOf(output) < requests.indexOf(conversion), 'Conversion preceded destination save');
         check(start.disabled, 'Queued scans remained convertible');
+        check(conversion.body.panoramas === false && conversion.body.camera_images === false, 'Export options not off by default');
+
+        const panoramas = document.getElementById('export-panoramas'), images = document.getElementById('export-camera-images');
+        await reset();
+        await addPaths(['/tmp/My scans/Setup5.blk']);
+        panoramas.checked = images.checked = true;
+        start.click(); await settle();
+        const exporting = requests.find(item => item.path === 'start');
+        check(exporting?.body.panoramas === true && exporting?.body.camera_images === true, 'Export options not submitted');
+        panoramas.checked = images.checked = false;
 
         await reset();
         await addPaths(['C:\\Scans\\Setup2.blk']);

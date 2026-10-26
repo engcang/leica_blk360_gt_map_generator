@@ -66,6 +66,20 @@ class SetupTests(unittest.TestCase):
                     runCommand([sys.executable, "-c", "import sys; print('missing test dependency'); sys.exit(7)"], root, log)
             self.assertIn("missing test dependency", (root / "setup.log").read_text())
 
+    def testSubmoduleSourcesAndConfigurationInvalidateBuild(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for relative in (".gitmodules", "third_party/kiss-matcher/cpp/kiss_matcher/core/kiss_matcher/KISSMatcher.cpp",
+                             "third_party/nano_gicp/src/nano_gicp.cc", "third_party/nano_gicp/include/nano_gicp/nano_gicp.hpp"):
+                before = sourceFingerprint(root)
+                source = root / relative
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text("initial source\n")
+                initial = sourceFingerprint(root)
+                self.assertNotEqual(before, initial)
+                source.write_text("updated source\n")
+                self.assertNotEqual(initial, sourceFingerprint(root))
+
     def testCommandArgumentsPreserveSpaces(self):
         with tempfile.TemporaryDirectory(prefix="setup with spaces ") as directory:
             root = pathlib.Path(directory)

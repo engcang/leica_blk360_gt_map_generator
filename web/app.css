@@ -34,7 +34,8 @@ a
     touch-action: manipulation
 }
 
-button
+button,
+a.button
 {
     cursor: pointer;
     border: 0;
@@ -43,6 +44,13 @@ button
     font-size: 13px;
     font-weight: 600;
     white-space: nowrap
+}
+
+a.button
+{
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
 }
 
 button:disabled
@@ -706,7 +714,10 @@ dialog::backdrop
 
 #registration input,
 #registration select,
-#panel-additional input
+#panel-additional input,
+#panel-trajectory input:not([type=checkbox]),
+#panel-trajectory select,
+#panel-trajectory textarea
 {
     border: 1px solid var(--line);
     border-radius: 7px;
@@ -774,7 +785,8 @@ dialog::backdrop
 }
 
 #registration-log,
-#additional-log
+#additional-log,
+#trajectory-log
 {
     max-height: 300px;
     overflow: auto;
@@ -807,3 +819,21 @@ dialog::backdrop
 .worker-log h3 { margin: 0 0 12px; font-size: 13px; }
 
 .chunk-refinement-option { display: flex; align-items: center; gap: 8px; width: 100%; font-size: 12px; }
+
+#panel-trajectory > .queue-panel { margin-top: 0; }
+.trajectory-step { padding: 20px; border-top: 1px solid var(--line); }
+.trajectory-step h3 { margin: 0; }
+.trajectory-step .registration-settings,
+.trajectory-step .map-output { margin: 14px 0 0; }
+.trajectory-help { margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.trajectory-step .queue-toolbar { padding: 0; }
+.trajectory-estimate { margin: 14px 0 0; padding: 16px; background: #f6f9f7; border: 1px solid var(--line); border-radius: 8px; }
+.trajectory-estimate > .map-output { margin-top: 0; }
+.trajectory-estimate details,
+.trajectory-step > details { margin-top: 16px; font-size: 12px; }
+#panel-trajectory summary { cursor: pointer; font-weight: 600; }
+#panel-trajectory textarea { width: 100%; margin-top: 7px; }
+.trajectory-format-options { margin-top: 14px; }
+.trajectory-frame { display: grid; gap: 7px; margin-top: 14px; font-size: 12px; }
+.trajectory-estimate .estimate-invert { display: flex; align-items: center; }
+#trajectory-message:empty { display: none; }

@@ -1,0 +1,38 @@
+# Development history
+
+- **2026-10-26 PALoc comparison retired:** tested default 10 cm scans/map and high-resolution 1 cm scans / 3 cm map; checked results were worse than our registration, especially in Flyzone. Stopped unfinished runs at the user's request.
+  - Flyzone common-scan median plane distance: ours 0.99 cm; PALoc default 2.05 cm; PALoc high 1.84 cm. This measured TLS-map agreement, not independent trajectory ground truth.
+  - Flyzone scan 2195: TLS coverage within 20 cm was 99.7% for ours and 0.3% for PALoc high. The continuous PALoc high trajectory included 1,945/4,087 frames without a direct map factor.
+  - Removed the experiment's viewer layers, adapters, tests, build, results, caches, and dedicated container/image; retained this note and our current registration results.
+- **2026-10-26 cleanup:** removed retired experiments, duplicate outputs, temporary deployments, benchmark payloads, and old batch reports; preserved active inputs, results, and caches.
+  - Removed the unused trajectory Nano-GICP adapter and native specialization; Register still uses Nano-GICP.
+  - Consolidated README licensing and removed stale setup status and packaging references.
+- **Initial trajectory recovery:** reused existing poses and retried selected failures with KISS and 1 cm Nano-GICP.
+  - July 7 example: approximately 51 minutes; 3,244 existing poses, six recovered, one quarantined; 3,249 final poses. This was limited recovery, not complete sequence coverage.
+- **Shared 1 cm refinement:** selected Open3D point-to-plane ICP with Tukey loss for registration, chunk refinement, and trajectory recovery.
+  - Controlled 32-condition trajectory comparison: Open3D 20 accepted, Nano-GICP 18; neither won every sequence.
+  - Retained parallel correspondence search and deterministic solver reduction; unchanged fitting point density.
+- **Coarse-stage comparison:** tested Open3D/Tukey after KISS against Nano-GICP at 30 cm and 8 cm.
+  - All three settings accepted 38/42 conditions; all passed six known-transform checks.
+  - Wide Tukey reduced scan-stage time but increased chunk-stage time by 22%; retained Nano-GICP for coarse registration.
+- **Recovery expansion:** added reverse tracking, 2 s / 6 s submaps, retained-end initial guesses, and regional/full-map KISS at 30 / 50 / 8 cm.
+  - Early recovery reused inconsistent baseline poses; RKM contained up to 6.59 m disagreement over 0.1–0.3 s despite correct scan timestamps.
+  - Recovery v8 uses original 1 cm geometry, chronological motion checks, independent validation scans, competing seeds, and retries of conflicting tracks.
+  - Older v3–v7 experiment implementations and maps were superseded; required baseline pose files remain inputs to v8.
+- **Performance corrections:** exact bounded nearest-neighbor queries, cached original-map normals, and persistent exact ICP request reuse.
+  - 2026-10-26: added conservative cell-cover exclusion bounds and queued parallel query batches; retained the original 1 cm correspondences and all acceptance thresholds. TLS tile eviction now retains recently used tiles.
+  - Real-input comparisons: difficult 15-iteration submap probe 135.47 s → 45.67 s; converged submap including preparation/validation 55.36 s → 42.56 s; individual scan 15.87 s → 15.51 s. Checked poses and decisions matched exactly; 50 targeted tests passed.
+  - Current optimization evidence and worker-resume receipt: `build/trajectory-correction/performance-20261026/`.
+  - Controlled difficult fit: 32.55 s → 16.10 s with the same transform, correspondences, and iteration count.
+  - Exact repeated request: 25.18 s initial computation, 0.005 s with target loaded; 10.19 s after target reconstruction. Transformations matched exactly; these are individual-request timings.
+  - CPU affinity/quotas and available RAM control parallelism; no fixed host CPU count in product code.
+- **Input handling:** unavailable submap anchors previously caused `NoneType.frontend_T`; fixed by skipping unavailable anchors.
+  - Actual failing end scans lay outside the estimated trajectory's time support; all three reproduced inputs passed the corrected handling.
+  - User excluded `2026-06-29-10-15-26`, `2026-06-29-10-29-40`, `2026-10-20-15-09-44`, and `2026-10-20-16-06-58`; no automatic retries.
+- **Viewer and export work:** streamlined controls, parallel merged-map generation, 3 cm export/share options, consistent trajectory-tab controls, and corrected map labels.
+  - Scanned GT map displayed at 10 cm; generated ground-truth trajectory map reconstructed from time-matched scans and full SE(3) poses.
+  - Chunk review uses the registration-manager style, one selected chunk, and height-grouped station top views.
+- **Live status and browser sessions:** saved results previously appeared completed while background recovery continued.
+  - Apps now monitor all eight current jobs through per-output `job_status.json`; retained maps remain viewable during recovery, and stale updates are shown as interrupted.
+  - Full links retain their session fragment for copying between browsers; authentication failures are distinguished from connection failures.
+  - Verified generation/restart, status transitions, prevention of duplicate external workers, and browser rendering.

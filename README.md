@@ -1,264 +1,324 @@
 <h1 align="center">BLK Studio</h1>
 
-+ Convert supported BLK360 G1 scans to full-resolution PLY through a local web app.
-+ Register overlapping scans, review alignment, and generate maps or shareable 3D HTML when needed.
-+ Original files stay in place. C++17 core, no ROS, MIT license.
+- Convert supported BLK360 G1 scans to full-resolution PLY through a local web app.
+- Register overlapping scans, review alignment, and generate maps or standalone 3D HTML.
+- Preserve original files in place; C++17 core, no ROS, MIT license.
 
 <br>
 
 ## Install and run
 
-Download or clone this source repository into a writable folder.
-
-- **Windows 10/11 x64:** double-click **`Start-BLK-Studio.bat`**.
-- **Ubuntu 22.04/24.04 x86_64:** open a terminal in this folder and run **`bash start.sh`**.
-  Ubuntu asks for your sudo password only if required system packages are missing.
-
-The launcher downloads required tools, prepares a local Python environment, builds
-both the app and registration engine, checks the runtime, and opens your browser.
-The first run needs internet access, several GB of free disk space, and time for
-compilation. Later runs reuse the installation; source updates trigger a rebuild.
-No manual CMake commands or Python package installation are needed.
-
-Tools, Python packages, dependencies, and compiled files stay in ignored local
-folders (`.build-tools/`, `.venv/`, `third_party/`, `build/`, and `install/`).
-Windows setup does not require administrator rights or modify the system PATH.
-Keep these folders with the project; Python environments contain absolute paths.
-
-Use the same launcher every time. Processing runs locally at `127.0.0.1`.
-Use **Quit app** to stop the process; closing the browser tab leaves it running.
-If setup fails, the launcher reports the error; build details are in `build/setup.log`.
-To build without opening the app, use `Start-BLK-Studio.bat -NoLaunch` or
-`bash start.sh --no-launch`. The default is two compiler jobs to limit memory use.
-
-No GitHub Actions workflows are included. Cloning, pushing, and starting the app
-do not trigger builds on GitHub.
-
-The Windows launcher has been validated from a fresh source checkout.
-Ubuntu runtime validation is still pending.
+- **Source:** download or clone this repository into a writable folder.
+  - Optional: `git clone --recurse-submodules https://github.com/engcang/leica_blk360_gt_map_generator.git`.
+  - Builds automatically initialize missing submodules at their pinned commits.
+  - Source ZIPs download the same pinned sources automatically.
+- **Launch:**
+  - **Windows 10/11 x64:** double-click `Start-BLK-Studio.bat`.
+  - **Ubuntu 22.04/24.04 x86_64:** run `bash start.sh` from the repository folder.
+    - Sudo required only for missing system packages.
+- **First run:**
+  - Internet access, several GB of free disk space, and compilation time required.
+  - Automatic tool downloads, local Python setup, app/registration builds, and runtime checks.
+  - Browser opens when ready; no manual CMake or Python package installation.
+- **Later runs:** reuse the installation; source changes trigger a rebuild.
+- **Local installation:**
+  - Original submodules: `third_party/kiss-matcher/` and `third_party/nano_gicp/`.
+  - Other registration sources: `third_party/registration/`; build artifacts: `build/`.
+  - Local tools and installation: `.build-tools/`, `.venv/`, and `install/`.
+  - Keep these folders with the project; Python environments contain absolute paths.
+  - Windows setup: no administrator rights or system PATH changes.
+- **Operation:**
+  - Use the same launcher each time; processing runs locally at `127.0.0.1`.
+  - **Quit app** stops the process; closing the browser tab leaves it running.
+  - Setup errors appear in the launcher; details: `build/setup.log`.
+  - Build only: `Start-BLK-Studio.bat -NoLaunch` or `bash start.sh --no-launch`.
+  - Default compilation parallelism: two jobs.
 
 <br>
 
 ## Usage
 
-The main screen has **Convert** (default), **View saved point clouds**, **Register**, and **Additional Register** tabs.
-PLY viewing and registration input selections are not saved or restored; choose
-files or a folder each time. Viewing reads files in place without creating a library cache.
-All scan input tabs select files by modification time, oldest first (path breaks ties).
-New conversions preserve the BLK modification time on the PLY. Existing PLY timestamps
-are unchanged. Modification time reflects scan order only if the source timestamps do.
-Adding registration inputs re-sorts the selection; **Up / Down** allows manual correction.
+- **Tabs:** Convert (default), View saved point clouds, Register, Additional Register, Generate trajectory.
+- **Selections:**
+  - Choose PLY files or a folder each time; viewing/registration selections are not restored.
+  - View files in place without a library cache.
+- **Scan order:**
+  - Modification time, oldest first; path breaks ties.
+  - New PLY conversions preserve BLK timestamps; existing PLY timestamps stay unchanged.
+  - Acquisition order depends on source timestamp accuracy.
+  - Adding registration inputs re-sorts the selection; **Up / Down** adjusts it manually.
 
 ### Convert and view
 
-1. Click **Select files** or **Select folder** to add BLK scans.
-2. The **Output folder** defaults to `output` beside the selected scans. Change it if needed, then click **Convert scans**.
-3. Each scan becomes one full-resolution file: `Setup26.blk → Setup26.ply`.
-4. Click **View 3D**, or open **View saved point clouds** and choose **Open PLY files** / **Open folder**.
-
-Two editions are built together on both platforms:
-
-| Edition | Windows executable | Ubuntu executable | PLY colour |
-|---|---|---|---|
-| Intensity | `install/blk_studio.exe` | `install/blk_studio` | uint16 intensity |
-| RGB | `install/blk_studio_rgb.exe` | `install/blk_studio_rgb` | uint8 red, green, blue (no intensity field) |
-
-To launch RGB, use **`Start-BLK-Studio-RGB.bat`** on Windows or **`bash start.sh --rgb`** on Ubuntu.
-Both launchers build both editions; `--no-launch` / `-NoLaunch` builds without opening either.
-CLI converters are `blk_convert` and `blk_convert_rgb` (with `.exe` on Windows).
-Each app has separate local work records (`projects/default` and `projects/rgb`).
-Use separate output folders for the two editions; existing PLY files are never overwritten.
-
-RGB currently supports **BLK360 G1 LDR images with the decoded pinhole calibration**.
-Scans without LDR images or with unsupported camera models fail explicitly. HDR decoding
-is not yet supported. Camera projection uses the embedded intrinsics and extrinsics,
-a depth visibility check, and the closest optical axis. Uncoloured points are gray;
-coverage counts appear in conversion metadata. Colour seams and boundary artifacts
-are possible; calibration has not been independently validated against Leica exports.
-No new Python/image-codec package is needed for conversion: both use the existing native JPEG XR codec.
-
-All tabs and registration functions are shared: scan/chunk placement, Additional Register,
-quality reports, raw/1 cm exports, and offline share HTML. RGB channels are preserved in
-raw exports and averaged in voxel maps. Registration and quality metrics use geometry,
-not colour. Inputs must match the edition; RGB and intensity scans cannot be mixed.
-Do not run setup or replace installed files while a registration worker is running.
-
-Color is fixed to **Intensity** or **RGB** according to the edition. Display density is **1/10**, **1/5**, **1/2**, or **Full** (default);
-navigation temporarily draws at most 2,000,000 points. Left-drag orbits around
-the surface near the screen center, or looks around in place when no surface is
-found. The pivot updates at drag start without moving the camera, and stays fixed
-during the drag. Right-/middle-drag or Shift-drag pans at a stable speed based on
-the visible surfaces, independently of the orbit pivot; empty views retain the last
-usable pan speed. The wheel moves forward/back;
-Shift+wheel moves more slowly. Rotation is slower for finer control.
-Display settings do not change the PLY. Existing files are never overwritten.
-Completed conversions are shown only during the current app session, not saved as history.
-If an output PLY is removed, its row returns to **Ready** when the source BLK is available;
-click **Convert scans** to recreate it. Pending/interrupted work is retained for recovery.
+- **Convert:**
+  - Add BLK scans with **Select files** or **Select folder**.
+  - **Output folder:** defaults to `output` beside the scans; change if needed.
+  - Click **Convert scans**; each scan produces one full-resolution PLY.
+  - Example: `Setup26.blk → Setup26.ply`.
+- **View:**
+  - Click **View 3D** on a completed scan.
+  - For existing files: **View saved point clouds → Open PLY files / Open folder**.
+- **Editions:** both built together on Windows and Ubuntu.
+  - **Intensity:** uint16 intensity.
+    - Windows: `install/blk_studio.exe`.
+    - Ubuntu: `install/blk_studio`.
+  - **RGB:** uint8 red, green, blue; no intensity field.
+    - Windows: `install/blk_studio_rgb.exe`.
+    - Ubuntu: `install/blk_studio_rgb`.
+  - RGB launcher: `Start-BLK-Studio-RGB.bat` or `bash start.sh --rgb`.
+  - Build only: `-NoLaunch` on Windows; `--no-launch` on Ubuntu.
+  - CLI converters: `blk_convert` and `blk_convert_rgb`; `.exe` suffix on Windows.
+  - Separate work records: `projects/default` and `projects/rgb`.
+  - Use separate output folders; existing PLY files are never overwritten.
+- **RGB support:**
+  - BLK360 G1 LDR images with decoded pinhole calibration; HDR unsupported.
+  - Missing LDR images or unsupported camera models cause conversion errors.
+  - Projection uses embedded intrinsics/extrinsics, depth visibility, and closest optical axis.
+  - Uncoloured points: gray; coverage counts saved in conversion metadata.
+  - Colour seams can occur between cameras.
+  - Existing native JPEG XR codec; no additional Python/image-codec package.
+- **Shared features:**
+  - Scan/chunk placement, Additional Register, quality reports, and offline share HTML.
+  - Raw and 1 cm / 3 cm exports; RGB preserved in raw exports and averaged in voxel maps.
+  - Registration and quality metrics use geometry, not colour.
+  - Inputs must match the edition; RGB and intensity scans cannot be mixed.
+  - Run setup or replace installed files only when registration workers are stopped.
+- **Viewer controls:**
+  - Colour: fixed to the edition's **Intensity** or **RGB**.
+  - Density: **1/10**, **1/5**, **1/2**, or **Full** (default).
+  - Navigation: temporarily draws at most 2,000,000 points.
+  - Left-drag: orbit around the surface near screen centre; look around if no surface is found.
+    - Pivot selected at drag start and held during the drag; camera position preserved.
+  - Right-/middle-drag or Shift-drag: pan using visible-surface depth.
+    - Empty views retain the last usable pan speed; orbit pivot does not affect pan speed.
+  - Wheel: move forward/back; Shift+wheel: slower movement.
+  - Rotation: reduced speed for finer control.
+  - Display settings leave the PLY unchanged.
+- **Conversion state:**
+  - Completed rows: current app session only; no saved conversion history.
+  - Deleted output: returns to **Ready** if the source BLK exists; convert again to recreate.
+  - Pending/interrupted work: retained for recovery.
 
 ### Register scans
 
-1. Add overlapping, individual PLY scans with **Add PLY files**, **Add folder**, or **Add to map**.
-2. Confirm acquisition order with **Up / Down**. The first scan defines the map frame.
-3. Confirm the product base name and output folder (defaults to the first selected PLY folder). Use a separate folder for each registration result.
-4. Check the Python environment under **Registration setup**, then click **Register scans**.
-5. Below the always-open **Latest worker log**, open **Review and manage** to inspect quality metrics, scan positions, and inferred-level images.
-
-**Optional initial placement:** after selecting PLYs, click **Arrange PLY scans** to open the editor directly. Placements save beside the selected PLYs unless you choose another output folder.
-Switch **Move view / Place scan / chunk** to choose the left-drag action (view movement is the default).
-In placement mode, select XY, X, Y, Z, or yaw, or enter numeric values.
-The first item is fixed; **Next** uses the previous item as a reference. Right/middle
-drag always pans the view. **Height cut** hides points above a shared Z height after
-placement transforms; **Show all** restores them without changing registration inputs.
-Only the moving item and reference are loaded, at **1/10** display density with **Axes on** by default in placement editors (scans, chunks, and Additional Register). Other 3D viewers default to Full density with grid and axes off.
-Edits automatically save to `initial_placements.json` in the output folder. No Apply
-button is needed: Register reads the saved poses before starting. Wait for the saved
-status before closing the editor; keep it open if saving fails.
-Removing, adding, or reordering scans preserves the other poses. To recover after
-closing the app, select the PLYs and output folder; saved placements restore automatically.
-Registration uses the saved poses for selected scans and refuses to silently ignore them.
-Scans without saved poses use automatic registration. Placements are scoped to the
-selected output folder; changing folders does not mix arrangements. Registration
-checks the saved poses before starting and stops if they cannot be read or the
-selection changes during that check.
-
-For disconnected results, **Arrange chunks** autosaves `chunk_initial_placements.json`.
-Return to **Register** and click **Register chunks**. Each chunk is one rigid body:
-merged-cloud Nano-GICP, robust 1 cm ICP, then **chunk-level PGO**. The saved chunk
-transform initializes matching; unplaced chunks use KISS-Matcher. Internal scan
-transforms remain fixed, and final scan poses are composed from the chunk pose and
-the saved scan-local pose. There is no consecutive-scan search or scan-level ICP/PGO
-in this mode. Each bridge is checked on at most 12 original scan pairs at fixed
-poses (no scan registration); two distinct passing pairs are required, or one for
-two single-scan chunks. Quality metrics evaluate final fixed poses on 1 cm scans.
-**Refine individual scans afterward** is unchecked by default; enabling it explicitly
-allows the slower scan-level 1 cm ICP/PGO to change internal chunk geometry.
-The editor only autosaves and never launches registration. Changed chunk membership
-or geometry regenerates the placement JSON; previous user placements are preserved
-under `html_source/placement_history/`. An unchanged chunk set keeps its placements.
+- **Inputs:** add overlapping, individual scans with **Add PLY files**, **Add folder**, or **Add to map**.
+- **Order:** confirm with **Up / Down**; the first scan defines the map frame.
+- **Output:** confirm the base name and folder; default is the first selected PLY folder.
+  - Use a separate folder for each registration result.
+- **Start:** check **Registration setup**, then click **Register scans**.
+- **Review:** below **Latest worker log**, open **Review and manage**.
+  - Quality metrics, scan positions, and inferred-level images.
+- **Optional scan placement:**
+  - Open **Arrange PLY scans** after selecting inputs.
+  - Save beside the selected PLYs unless another output folder is chosen.
+  - **Move view / Place scan / chunk:** choose the left-drag action; default is view movement.
+  - Placement axes: XY, X, Y, Z, yaw; numeric entry available.
+  - First item fixed; **Next** uses the previous item as reference.
+  - Right-/middle-drag always pans.
+  - **Height cut:** hide points above a shared Z height after placement transforms.
+  - **Show all:** restore visibility without changing registration inputs.
+  - Load only the moving item and reference.
+  - Placement defaults: **1/10** density, **Axes on** for scans, chunks, and Additional Register.
+  - Other viewers: **Full** density, grid/axes off.
+- **Placement persistence:**
+  - Autosave to `initial_placements.json`; no Apply button.
+  - Wait for saved status before closing; keep the editor open if saving fails.
+  - Adding, removing, or reordering scans preserves other poses.
+  - Reopen by selecting the same PLYs and output folder.
+  - Registration reads saved poses; scans without placements use automatic registration.
+  - Placements belong to their output folder; changing folders does not mix arrangements.
+  - Unreadable placements or selection changes during loading stop registration.
+- **Disconnected chunks:**
+  - **Arrange chunks** autosaves `chunk_initial_placements.json`; the editor never starts registration.
+  - Return to **Register → Register chunks**.
+  - Each chunk is one rigid body: merged-cloud Nano-GICP → robust 1 cm ICP → chunk-level PGO.
+  - Saved chunk poses initialize matching; unplaced chunks use KISS-Matcher.
+  - Internal scan transforms stay fixed; final poses combine chunk and scan-local transforms.
+  - No consecutive-scan search or scan-level ICP/PGO in this mode.
+  - Bridge validation: at most 12 original scan pairs at fixed poses.
+    - Two distinct passing pairs required; one for two single-scan chunks.
+  - Quality metrics: final fixed poses on 1 cm scans.
+  - **Refine individual scans afterward:** off by default.
+    - Enabling it allows slower scan-level 1 cm ICP/PGO to change internal chunk geometry.
+  - Changed membership/geometry regenerates placement JSON.
+    - Previous placements preserved under `html_source/placement_history/`.
+    - Unchanged chunk sets retain their placements.
 
 ### Extend an existing map
 
-1. In **Additional Register**, open the existing `relative_poses.json`. Keep its original PLY files at the paths recorded in the JSON.
-2. Add new PLY files or a folder, and choose a **separate output folder**.
-3. Optionally **Arrange reference and scans**. The reference is one fixed item;
-   new scan poses autosave to `additional_initial_placements.json`, keyed by source
-   path and reference hash. Removing a scan does not erase its saved pose.
-4. Click **Register additional scans**. Watch the log and open the result below it.
+- **Reference:** in **Additional Register**, open `relative_poses.json`.
+  - Keep original PLYs at their recorded paths.
+- **Inputs:** add new PLYs or a folder; choose a separate output folder.
+- **Optional placement:** **Arrange reference and scans**.
+  - Reference remains fixed.
+  - New poses autosave to `additional_initial_placements.json`.
+  - Keys: source path and reference hash; removing a scan preserves its saved pose.
+- **Start:** click **Register additional scans**; watch the log and open the result below it.
+- **Registration:**
+  - Preserve the reference's original transforms and map frame exactly.
+  - Saved guesses or KISS-Matcher → Nano-GICP → robust 1 cm ICP → chunk-level PGO.
+  - Match smaller scans into the larger map.
+  - Validate bridges with fixed original scan pairs: one for a single new scan, otherwise two.
+  - Disconnected groups: **View chunks / Arrange chunks → Register chunks**.
+  - Individual-scan refinement disabled for this workflow.
+- **Result:** new JSON includes old and new scans without copying PLYs or changing original results.
+  - Generate merged PLYs or share HTML when needed.
 
-The reference stays rigid and its original transforms/map frame are preserved exactly.
-New scans use saved guesses or KISS-Matcher, then Nano-GICP, robust 1 cm ICP and
-chunk-level PGO. Small scans are matched into the larger map; fixed original scan
-pairs validate each bridge (one passing pair for a single new scan, otherwise two).
-Disconnected groups remain available through **View chunks / Arrange chunks** and
-**Register chunks**. Individual-scan refinement is disabled for this workflow.
-The new JSON includes all old and new scans without copying their PLYs. Original
-results are unchanged. Generate merged PLYs or share HTML only when needed.
+### Generate a dataset trajectory
 
-After conversion and registration, the output is:
+- **Inputs:** follow the four numbered steps in **Generate trajectory**.
+  - **Scanned GT map:** merged 1 cm PLY from Register, or another registered scanner map.
+  - **Sequence scans:** the dataset's individual LiDAR scans.
+  - **Estimated trajectory:** the sequence's frontend or odometry poses; additional estimates are optional comparisons.
+  - **Save result:** result name and output folder.
+  - Sequences: timestamped PLY/PCD/NPY/NPZ/BIN folder, scan manifest JSON, or TartanStar extracted data.
+  - Trajectories: TUM, CSV with column mapping, or KITTI poses with a timestamp file.
+  - Add frontend, backend, or other available estimates; the first supplies scan motion and deskew.
+  - Choose timestamp units, offsets, pose convention, and sensor-to-body calibration as needed.
+- **Run:** choose a separate output folder → **Check inputs** → **Generate trajectory**.
+  - KISS initialization → 10 cm point-to-plane + Huber localization → bidirectional 1 cm Open3D point-to-plane + Tukey recovery.
+  - Retain accepted baseline poses after temporal checks; apply 1 cm recovery to rejected intervals.
+  - Recovery seeds: trusted poses on both sides, 2 s / 6 s submaps, regional and full-map KISS at 30 / 50 / 8 cm.
+  - Validate recovered poses on the original 1 cm map; check existing and recovered poses against chronological relative motion.
+  - Seed checks withhold the anchor scan and require agreement from at least two other scans.
+  - **Stop / Resume:** retain completed fits; verify input provenance before reusing them.
+  - Optional: supply initial alignment JSON or an existing baseline result to recover.
+- **Viewer:**
+  - **Scanned GT map:** scanner reference map, displayed at 10 cm only; the original 1 cm input remains available for registration.
+  - Available estimated trajectories and their reconstructed 10 cm maps.
+  - **Generated ground-truth trajectory** and **Generated ground-truth trajectory map** at 10 cm; missing poses remain disconnected.
+  - Shared TLS coordinate frame; map selection, color palettes, transparency, point styles, and start/end markers.
+  - Bounded GPU uploads for large maps; screenshot export retained.
+- **Files:** `recovery/candidate_trajectory.tum`, `recovery/quality.jsonl`, `viewer.json`, and `*_10cm.ply`.
+  - Original TLS map and scans stay in place.
+  - **Open existing result:** select the trajectory result folder.
+  - Each saved result shows its path, **Open output folder**, and **Open trajectory viewer**.
+  - Repeated results for the same scans and reference map show the latest available result.
+- **Formats and configuration:** [Trajectory inputs and recovery](docs/trajectory.md).
 
-```text
-output/
-    Setup26.ply
-    Setup27.ply
-    ...
-    relative_poses.json
-    result_review_and_manage.html
-    html_source/
-```
+### Outputs and recovery
 
-Original PLYs remain where selected; they are not copied if stored elsewhere.
-`relative_poses.json` preserves source paths, hashes, and each scan's rigid transform
-into the first scan/map frame: `p_map = T_map_scan @ [x, y, z, 1]`, in metres.
-Keep the originals and preserve their paths relative to the JSON when moving a dataset.
+- **Typical output layout:**
 
-Tabs start with empty selections and output paths. Only active jobs are shown automatically.
-To reopen a result, choose **Open existing result → relative_poses.json**
-(or **partial_chunks.json** for a previous disconnected job).
-Working caches live under the app's `projects/default/registration_records/`;
-completed result viewing and generation do not require those caches.
-Fine ICP saves completed pairs for **Resume** and reuses their final correspondences
-for graph weights. Changed clouds, initial poses, or ICP settings invalidate a pair
-checkpoint. Point density, robust loss, and convergence criteria stay unchanged.
-Available CPU threads are detected automatically for the native engines, Open3D,
-and quality queries. Fine ICP processes one pair at a time using all available
-threads by default. Optional `BLK_CPU_THREADS` limits the CPU budget;
-`BLK_REGISTRATION_WORKERS` enables memory-bounded concurrent pairs, which can be
-slower when one pair already saturates CPU or memory bandwidth.
+  ```text
+  output/
+      Setup26.ply
+      Setup27.ply
+      ...
+      relative_poses.json
+      result_review_and_manage.html
+      html_source/
+  ```
+
+- **Original PLYs:** remain where selected; files stored elsewhere are not copied.
+- **`relative_poses.json`:**
+  - Source paths, hashes, and rigid transforms into the first scan/map frame.
+  - Convention: `p_map = T_map_scan @ [x, y, z, 1]`; units: metres.
+  - When moving a dataset, retain originals and preserve their paths relative to the JSON.
+- **Reopen results:**
+  - Scan registration tabs start with empty selections/output paths; trajectory settings and jobs are restored.
+  - Choose **Open existing result → relative_poses.json**.
+  - For disconnected jobs, select `partial_chunks.json`.
+- **Working caches:** app-local `projects/default/registration_records/`.
+  - Completed result viewing and product generation do not require these caches.
+- **Fine ICP recovery:**
+  - Completed pairs saved for **Resume**; final correspondences reused for graph weights.
+  - Changed clouds, initial poses, or ICP settings invalidate the corresponding checkpoint.
+  - Point density, robust loss, and convergence criteria preserved.
+- **CPU usage:**
+  - Automatic thread detection for native engines, Open3D, and quality queries.
+  - Generate trajectory: **CPU threads → Auto** uses available logical CPUs; an explicit count sets a limit.
+    - Parallel queries, normals, and map layers; ordered trajectory propagation and serial Open3D solver reductions.
+    - Reuse exact distance bounds to skip points still outside the correspondence gate; unchanged fitting points and thresholds.
+  - CPU affinity/container limits and available RAM detected per machine.
+    - RAM controls concurrent maps and tile/scan cache sizes; point density remains unchanged.
+  - Fine ICP: one pair at a time using available threads by default.
+  - `BLK_CPU_THREADS`: limit the CPU budget.
+  - `BLK_REGISTRATION_WORKERS`: enable memory-bounded concurrent pairs.
+    - May be slower when one pair already saturates CPU or memory bandwidth.
 
 ### Generate maps and share results
 
-Registration saves poses and review materials. Merged products are generated only when requested:
-
-| Button | Output with the default base name |
-| --- | --- |
-| **Generate 1 cm / 3 cm PLY** | `reference_map_1cm.ply` / `reference_map_3cm.ply`: voxel-averaged map at the selected resolution |
-| **Generate raw PLY** | `reference_map_raw.ply`: every original point transformed, with intensity preserved |
-| **Generate 1 cm / 3 cm share HTML** | `reference_map_1cm_share.html` / `reference_map_3cm_share.html`: selected map embedded in an offline 3D viewer |
-
-Open the management page through **Review and manage** in BLK Studio to use its
-generation buttons. Opening the HTML directly shows saved files and offline review;
-generation buttons explain how to connect to the app. Use **Check output folder**
-to verify saved filenames and sizes after moving or deleting files, and
-keep `html_source/` beside it. Colleagues need only the generated **share HTML**
-and a browser—no app, Python, or separate PLY.
-
-Select 1 cm or 3 cm separately for merged PLY and share HTML. Both resolutions
-can coexist in the output folder. Registration refinement remains fixed at 1 cm.
-Generation uses saved poses without re-registering. Share HTML reuses a verified
-map at the selected resolution when available; otherwise its intermediate map is temporary.
-Retain original PLYs plus `relative_poses.json` for reproducibility.
-
-Voxel export processes scans in parallel within the available CPU and memory budget.
-`BLK_CPU_THREADS` limits CPUs; optional `BLK_MERGE_WORKERS` limits concurrent scans
-(`1` selects serial export). Small exports run serially to avoid process startup overhead.
-Temporary float64 scan voxels are stored beside the output and removed after merging.
-The per-scan and final voxel averaging are unchanged. Progress shows completed scans,
-final reduction, and file writing. Generating a product also refreshes the review page.
+- **Registration output:** poses and review materials; merged products generated on request.
+- **Merged PLY:** choose **Generate 1 cm / 3 cm PLY**.
+  - Files: `reference_map_1cm.ply`, `reference_map_3cm.ply`.
+  - Voxel-averaged map at the selected resolution.
+- **Raw PLY:** choose **Generate raw PLY**.
+  - File: `reference_map_raw.ply`.
+  - Every original point transformed; intensity or RGB preserved.
+- **Standalone HTML:** choose **Generate 1 cm / 3 cm share HTML**.
+  - Files: `reference_map_1cm_share.html`, `reference_map_3cm_share.html`.
+  - Complete selected map embedded; recipient needs only the HTML and a browser.
+- **Management:**
+  - Open **Review and manage** in BLK Studio to generate products.
+  - Open the HTML directly for offline review and saved-file information.
+  - **Check output folder:** verify saved filenames and sizes after moving/deleting files.
+  - Keep `html_source/` beside the management HTML.
+- **Resolution and reuse:**
+  - Select 1 cm or 3 cm independently for PLY and share HTML; both can coexist.
+  - Registration refinement stays fixed at 1 cm.
+  - Generation uses saved poses without re-registering.
+  - Share HTML reuses a verified map at the chosen resolution; otherwise uses a temporary map.
+  - Retain original PLYs and `relative_poses.json` for reproducibility.
+- **Parallel voxel export:**
+  - Concurrent scans bounded by available CPU and memory; small exports run serially.
+  - `BLK_CPU_THREADS`: CPU limit; `BLK_MERGE_WORKERS`: concurrent-scan limit (`1` for serial).
+  - Temporary float64 scan voxels stored beside the output and removed after merging.
+  - Per-scan and final voxel averaging unchanged.
+  - Progress: completed scans, final reduction, file writing.
+  - Product generation also refreshes the review page.
 
 <br>
 
 ## Registration and quality
 
-**Pipeline:** KISS-Matcher (30 cm) → Nano-GICP (30 cm, then 8 cm) → pose-graph
-optimization → robust point-to-plane ICP (1 cm clouds, 3 cm gate, 1 cm Tukey scale)
-→ second pose-graph optimization. Disconnected groups trigger automatic searches
-for other overlapping pairs, followed by KISS-Matcher / Nano-GICP on merged chunks.
-A chunk bridge needs at least two consistent original scan-pair verifications
-(within 10 cm / 1 degree), then follows the same 1 cm refinement and pose-graph pipeline.
-Ambiguous or unverified connections are not forced.
-
-**Evaluation:** fixed final poses on **1 cm per-scan clouds**, at **1/2/3/5 cm**
-distance thresholds (3 cm default). Distances at or above the threshold are excluded.
-The review reports bidirectional inlier Chamfer, directional mean/RMSE/p95,
-correspondence ratios/counts, and point-to-plane residuals. Read errors together
-with coverage; these diagnostics do not change registration.
-
-The decoder and maps are experimental: official-export comparison and independent
-GT accuracy validation remain outstanding. Smaller voxels do not imply higher
-accuracy. Scan-to-map trajectory estimation is not implemented.
+- **Scan registration pipeline:**
+  - KISS-Matcher: 30 cm clouds.
+  - Nano-GICP: 30 cm, then 8 cm clouds.
+  - Pose graph optimization.
+  - Shared 1 cm engine in every registration tab: Open3D point-to-plane ICP + Tukey loss.
+    - Scan/chunk refinement: 3 cm correspondence gate, 1 cm Tukey scale.
+    - Trajectory recovery: 80 / 30 / 10 cm gates; Tukey scales 10 / 10 / 3.33 cm for its larger initial errors.
+      - Up to 60 iterations per gate; final-stage convergence and held-out geometry required.
+    - Cached target queries; same Open3D estimator and convergence criteria.
+  - Final pose graph optimization.
+- **Automatic disconnected-group recovery:**
+  - Search other overlapping pairs, then run KISS-Matcher / Nano-GICP on merged chunks.
+  - Require two consistent original scan-pair checks within 10 cm / 1 degree for a chunk bridge.
+  - Continue through 1 cm refinement and pose graph optimization.
+  - Keep ambiguous or unverified connections unresolved.
+- **Evaluation:**
+  - Fixed final poses on 1 cm per-scan clouds.
+  - Distance thresholds: 1 / 2 / 3 / 5 cm; default: 3 cm.
+  - Exclude distances at or above the threshold.
+  - Metrics: bidirectional inlier Chamfer, directional mean/RMSE/p95,
+    correspondence ratios/counts, and point-to-plane residuals.
+  - Interpret errors with coverage; evaluation does not change registration.
 
 <br>
 
 ## Troubleshooting
 
-- **Missing file:** select a moved PLY again. Generation requires originals at the paths recorded in the poses JSON.
-- **Disconnected groups:** click **View chunks** (or **Build chunk review** for an older job). `chunks_review.html`, `partial_chunks.json`, and `html_source/chunks/` show sampled 3D previews, scan positions, and original row numbers in separate chunk-local frames. These are diagnostic poses before final 1 cm refinement, not a common GT map. Use **Arrange chunks** to provide initial placements; **Resume** reuses caches and searches for chunk connections automatically. No final map/poses are published until all groups connect.
-- **Slow viewer or large output:** choose a 3 cm export for fewer points, or lower display density for navigation. The viewer uploads the complete cloud in 16 MB graphics buffers; total CPU/GPU memory still depends on point count.
-- **Existing output:** move/remove the generated file before regenerating, or choose a different folder for a new registration.
-
-<br>
-
-## Acknowledgements
-
-Microsoft JPEG XR / jxrlib, cpp-httplib, nlohmann/json, PicoSHA2, KISS-Matcher,
-Nano-GICP, ROBIN, PCL, Eigen, oneTBB, FLANN, and Open3D.
-See [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt) for versions and licenses.
-Leica and BLK360 are trademarks of their owners. This is an independent project.
+- **Missing file:** reselect the moved PLY; generation requires originals at recorded paths.
+- **Disconnected groups:**
+  - Open **View chunks**, or **Build chunk review** for older jobs.
+    - Select one chunk at a time; previous/next controls and a full-width 3D view.
+    - Height-level filter, scan table, and per-level top views with scan positions and filenames.
+  - Files: `chunks_review.html`, `partial_chunks.json`, `html_source/chunks/`.
+  - Sampled previews, scan positions, and original row numbers in separate chunk-local frames.
+  - Diagnostic poses before final 1 cm refinement; no common final map yet.
+  - **Arrange chunks:** provide initial placements.
+  - **Resume:** reuse caches and search for connections automatically.
+  - Final map/poses published only after all groups connect.
+- **Slow viewer or large output:**
+  - Choose a 3 cm export or lower display density for navigation.
+  - Complete cloud uploaded in 16 MiB graphics buffers; total memory depends on point count.
+- **Existing output:** move/remove the generated file before regenerating,
+  or choose a different folder for a new registration.
 
 <br>
 
 ## License
 
-Original project code uses the [MIT License](LICENSE).
-Third-party components retain their original licenses and attribution.
+- Original project code uses the [MIT License](https://github.com/engcang/leica_blk360_gt_map_generator/blob/main/LICENSE).
+- [KISS-Matcher](https://github.com/mit-spark/kiss-matcher), [Nano-GICP](https://github.com/engcang/nano_gicp), and [Open3D](https://github.com/isl-org/Open3D) use the MIT License.

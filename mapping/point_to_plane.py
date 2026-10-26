@@ -1,0 +1,216 @@
+"""Open3D point-to-plane/Tukey fitting with reusable parallel target queries."""
+import copy
+import threading
+import weakref
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
+
+import numpy as np
+import open3d as o3d
+from scipy.spatial import cKDTree
+
+from parallel_runtime import threadBudget, availableMemory
+
+FINE_ENGINE = 'open3d-point-to-plane-tukey-v3'
+RECOVERY_DISTANCES = (.8, .3, .1)
+RECOVERY_ITERATIONS = 60
+
+_estimator_lock = threading.Lock()
+
+
+class PointToPlaneTarget:
+    def __init__(self, target, workers=None):
+        self.workers = threadBudget(workers)
+        count = len(target.points) if isinstance(target, o3d.geometry.PointCloud) else len(target)
+        existing_normals = isinstance(target, o3d.geometry.PointCloud) and target.has_normals()
+        required = count * (40 if existing_normals else 128)
+        available = availableMemory()
+        if available and required > available * .8:
+            raise MemoryError(f'1 cm target needs approximately {required/1024**3:.2f} GiB of additional memory; '
+                              f'{available/1024**3:.2f} GiB is available. Free memory before retrying.')
+        if isinstance(target, o3d.geometry.PointCloud):
+            self.cloud = target
+        else:
+            self.cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.asarray(target, dtype=float)))
+        if not self.cloud.has_normals():
+            o3d.utility.set_max_threads(self.workers)
+            self.cloud.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=.04, max_nn=40))
+        self.tree = cKDTree(np.asarray(self.cloud.points))
+        self._query_state = threading.local()
+        self._bound_tree = None
+        self._queries = ThreadPoolExecutor(max_workers=self.workers)
+        weakref.finalize(self, self._queries.shutdown, wait=False)
+
+    def _query(self, tree, points, **options):
+        if self.workers == 1 or len(points) < 32_768:
+            return tree.query(points, workers=self.workers, **options)
+        # Spatially ordered scans otherwise give each native thread one large
+        # region. Small queued batches share expensive regions across the budget.
+        def batch(start):
+            return tree.query(points[start:start+8192], workers=1, **options)
+        results = list(self._queries.map(batch, range(0, len(points), 8192)))
+        return tuple(np.concatenate([result[k] for result in results]) for k in (0, 1))
+
+    def _prepare_bounds(self):
+        """Cover every target point with a cell; this index never supplies matches."""
+        if self._bound_tree is not None:
+            return True
+        count = self.tree.n
+        available = availableMemory()
+        # Optional acceleration must fit alongside the unchanged fine target.
+        if count < 50_000 or (available and count*96 > available*.2):
+            return False
+        points = np.asarray(self.cloud.points)
+        cell = .1
+        try:
+            extent = float(np.max(np.abs(points)))
+            if extent/cell >= 2**62:
+                return False  # Keep the original index outside the integer grid range.
+            grid = np.floor(points/cell).astype(np.int64)
+            if grid.min() >= -(1 << 20) and grid.max() < (1 << 20):
+                shifted = grid+(1 << 20)
+                keys = (shifted[:, 0] << 42) | (shifted[:, 1] << 21) | shifted[:, 2]
+                _, chosen = np.unique(keys, return_index=True)
+                centers = (grid[chosen]+.5)*cell
+            else:
+                centers = (np.unique(grid, axis=0)+.5)*cell
+            bound_tree = cKDTree(centers)
+        except MemoryError:
+            return False
+        # Account for rounding when forming cells, including large coordinates.
+        self._bound_radius = np.sqrt(3)*cell/2 + 128*np.finfo(float).eps*(1+extent)
+        self._bound_tree = bound_tree
+        return True
+
+    def _lower_bounds(self, points):
+        # Every fine target point lies within _bound_radius of an indexed center.
+        # Triangle inequality therefore gives a lower bound on its distance.
+        distance = self._query(self._bound_tree, points)[0]
+        return np.maximum(0., distance-self._bound_radius)
+
+    def correspondences(self, source, cap):
+        points = np.asarray(source.points)
+        previous = getattr(self._query_state, 'bounds', None)
+        if previous is None or len(previous[0]) != len(points):
+            reference = points.copy()
+            lower = np.zeros(len(points))
+            selected = np.arange(len(points))
+            if self._bound_tree is None and len(points) >= 32_768 and self.tree.n >= 50_000:
+                sample = points[::max(1, len(points)//256)][:256]
+                distance = self.tree.query(sample, distance_upper_bound=cap, workers=1)[0]
+                if np.mean(~np.isfinite(distance)) >= .1:
+                    self._prepare_bounds()
+        else:
+            reference, lower = previous
+            # Distance to a fixed set is 1-Lipschitz. A point whose previous
+            # exact distance minus its displacement still exceeds the gate
+            # cannot contribute a correspondence. Preserve a numerical margin.
+            bound = lower-np.linalg.norm(points-reference, axis=1)
+            margin = 128*np.finfo(float).eps*(1+cap+np.linalg.norm(points, axis=1)+
+                                              np.linalg.norm(reference, axis=1)+lower)
+            selected = np.flatnonzero(~np.isfinite(bound) | (bound <= cap+margin))
+        distances = np.full(len(points), np.inf)
+        indices = np.full(len(points), self.tree.n, dtype=np.intp)
+        stats = getattr(self._query_state, 'stats', None)
+        if stats is not None:
+            stats['excluded_by_bound'] += len(points)-len(selected)
+        bounded = self._bound_tree is not None
+        if bounded and len(selected):
+            candidate = points[selected]
+            bound = self._lower_bounds(candidate)
+            margin = 128*np.finfo(float).eps*(1+cap+np.linalg.norm(candidate, axis=1)+bound)
+            reference[selected], lower[selected] = candidate, bound
+            uncertain = bound <= cap+margin
+            if stats is not None:
+                stats['coarse_bound_points'] = stats.get('coarse_bound_points', 0)+len(selected)
+                stats['excluded_by_coarse'] = stats.get('excluded_by_coarse', 0)+int(np.count_nonzero(~uncertain))
+            selected = selected[uncertain]
+        if stats is not None:
+            stats['queried_points'] += len(selected)
+        if len(selected):
+            d, ids = self._query(self.tree, points[selected], distance_upper_bound=cap)
+            distances[selected], indices[selected] = d, ids
+            reference[selected] = points[selected]
+            finite = np.isfinite(d)
+            lower[selected[finite]] = d[finite]
+            missing = selected[~finite]
+            if len(missing):
+                if bounded:
+                    lower[missing] = np.maximum(cap, lower[missing])
+                elif len(missing) >= max(4096, len(points)*.1) and self._prepare_bounds():
+                    lower[missing] = np.maximum(cap, self._lower_bounds(points[missing]))
+                else:
+                    # Small/full-overlap fits avoid building an auxiliary index.
+                    lower[missing] = self._query(self.tree, points[missing])[0]
+                    if stats is not None:
+                        stats['unbounded_queries'] += len(missing)
+        self._query_state.bounds = reference, lower
+        valid = distances < cap
+        pairs = np.column_stack((np.flatnonzero(valid), indices[valid])).astype(np.int32)
+        fitness = len(pairs)/len(points) if len(points) else 0.
+        rmse = float(np.sqrt(np.mean(distances[valid]**2))) if len(pairs) else 0.
+        return o3d.utility.Vector2iVector(pairs), fitness, rmse
+
+    def align(self, source, initial, distances=(.03,), tukey_scales=None, iterations=30,
+              relative_fitness=1e-6, relative_rmse=1e-6):
+        if not distances or any(not np.isfinite(c) or c <= 0 for c in distances):
+            raise ValueError('Positive correspondence distances are required')
+        scales = tukey_scales if tukey_scales is not None else [min(.1, cap/3) for cap in distances]
+        if len(scales) != len(distances) or any(not np.isfinite(k) or k <= 0 for k in scales):
+            raise ValueError('One positive Tukey scale is required per distance')
+        original = source if isinstance(source, o3d.geometry.PointCloud) else o3d.geometry.PointCloud(o3d.utility.Vector3dVector(np.asarray(source, dtype=float)))
+        T = np.asarray(initial, dtype=float).copy()
+        self._query_state.bounds = None
+        self._query_state.stats = dict(queried_points=0, excluded_by_bound=0, unbounded_queries=0)
+        used_iterations = 0
+        convergence_reason = 'iteration_limit'
+        robust_support = 0
+        for cap, scale in zip(distances, scales):
+            moved = copy.deepcopy(original)
+            moved.transform(T)
+            pairs, fitness, rmse = self.correspondences(moved, cap)
+            estimator = o3d.pipelines.registration.TransformationEstimationPointToPlane(
+                o3d.pipelines.registration.TukeyLoss(scale))
+            converged = False
+            robust_support = None
+            stable_steps = 0
+            for _ in range(iterations):
+                # Queries/normal estimation are parallel. Stable source order and
+                # a serial Open3D Hessian reduction make CPU budgets reproducible.
+                with _estimator_lock:
+                    o3d.utility.set_max_threads(1)
+                    try:
+                        update = estimator.compute_transformation(moved, self.cloud, pairs)
+                    finally:
+                        o3d.utility.set_max_threads(self.workers)
+                if not np.isfinite(update).all():
+                    raise ValueError('Open3D returned a non-finite point-to-plane update')
+                before = T[:3, 3].copy()
+                T = update @ T
+                step_m = float(np.linalg.norm(T[:3, 3]-before))
+                step_rotation = float(np.linalg.norm(update[:3, :3]-np.eye(3))/np.sqrt(2))
+                moved.transform(update)
+                previous_fitness, previous_rmse = fitness, rmse
+                pairs, fitness, rmse = self.correspondences(moved, cap)
+                used_iterations += 1
+                stable_rmse = abs(previous_rmse-rmse) < relative_rmse
+                stable_steps = stable_steps+1 if step_m < 1e-5 and step_rotation < 1e-6 and stable_rmse else 0
+                metric_convergence = abs(previous_fitness-fitness) < relative_fitness and stable_rmse
+                if metric_convergence or stable_steps >= 3:
+                    matches = np.asarray(pairs)
+                    if len(matches):
+                        normals = np.asarray(self.cloud.normals)[matches[:, 1]]
+                        residual = np.einsum('ij,ij->i', np.asarray(moved.points)[matches[:, 0]]-
+                                             np.asarray(self.cloud.points)[matches[:, 1]], normals)
+                        robust_support = int(np.count_nonzero((abs(residual) < scale) & (np.linalg.norm(normals, axis=1) > .5)))
+                    else:
+                        robust_support = 0
+                    converged = robust_support >= 6
+                    convergence_reason = ('fitness_rmse' if metric_convergence else 'stationary_pose') if converged else 'insufficient_robust_support'
+                    break
+            else:
+                convergence_reason = 'iteration_limit'
+        return SimpleNamespace(transformation=T, fitness=fitness, inlier_rmse=rmse,
+                               correspondence_set=pairs, iterations=used_iterations, converged=converged,
+                               convergence_reason=convergence_reason, robust_support=robust_support,
+                               query_statistics=dict(self._query_state.stats))

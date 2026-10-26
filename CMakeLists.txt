@@ -86,10 +86,11 @@ endif()
 ### Install
 install(TARGETS blk_studio blk_convert blk_studio_rgb blk_convert_rgb RUNTIME DESTINATION . BUNDLE DESTINATION .)
 install(DIRECTORY web DESTINATION .)
+install(FILES docs/trajectory.md DESTINATION docs)
 install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/web_rgb" DESTINATION .)
 install(DIRECTORY mapping DESTINATION . FILES_MATCHING PATTERN "*.py" PATTERN "requirements.txt"
-        PATTERN "__pycache__" EXCLUDE)
+        PATTERN "__pycache__" EXCLUDE PATTERN "test_*.py" EXCLUDE)
 install(DIRECTORY mapping/bin DESTINATION mapping OPTIONAL)
-install(FILES LICENSE THIRD_PARTY_NOTICES.txt README.md DESTINATION .)
+install(FILES LICENSE README.md DESTINATION .)
 install(FILES "${BLK_THIRD_PARTY}/jxrlib/LICENSE" DESTINATION licenses RENAME jxrlib.LICENSE)
 install(FILES "${BLK_THIRD_PARTY}/httplib.LICENSE" "${BLK_THIRD_PARTY}/json.LICENSE" "${BLK_THIRD_PARTY}/picosha2.LICENSE" DESTINATION licenses)

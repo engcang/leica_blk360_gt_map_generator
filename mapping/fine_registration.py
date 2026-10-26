@@ -12,10 +12,11 @@ import numpy as np
 import open3d as o3d
 
 from json_io import saveJson
+from point_to_plane import FINE_ENGINE, PointToPlaneTarget
 
 o3d.utility.set_max_threads(cpuCount())
 
-FINE_SETTINGS = {"version": 1, "distance_m": 0.03, "tukey_m": 0.01,
+FINE_SETTINGS = {"version": 2, "engine": FINE_ENGINE, "distance_m": 0.03, "tukey_m": 0.01,
                  "relative_fitness": 1e-6, "relative_rmse": 1e-6, "iterations": 30}
 
 
@@ -68,14 +69,11 @@ def refinePair(_source, _target, _initial, _cache, _source_key, _target_key):
                 return result, True
         except (OSError, ValueError, KeyError, TypeError):
             pass
-    registration = o3d.pipelines.registration
     start = time.perf_counter()
-    match = registration.registration_icp(
-        _source, _target, FINE_SETTINGS["distance_m"], _initial,
-        registration.TransformationEstimationPointToPlane(registration.TukeyLoss(FINE_SETTINGS["tukey_m"])),
-        registration.ICPConvergenceCriteria(relative_fitness=FINE_SETTINGS["relative_fitness"],
-                                            relative_rmse=FINE_SETTINGS["relative_rmse"],
-                                            max_iteration=FINE_SETTINGS["iterations"]))
+    target = PointToPlaneTarget(_target, cpuCount())
+    match = target.align(_source, _initial, [FINE_SETTINGS["distance_m"]], [FINE_SETTINGS["tukey_m"]],
+                         iterations=FINE_SETTINGS["iterations"], relative_fitness=FINE_SETTINGS["relative_fitness"],
+                         relative_rmse=FINE_SETTINGS["relative_rmse"])
     icp_seconds = time.perf_counter() - start
     # Keep repeated target indices: each correspondence contributes to the graph weight.
     information = informationFromCorrespondences(_target, match.correspondence_set)

@@ -1,0 +1,24 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Trajectory viewer · BLK Studio</title><link rel="stylesheet" href="trajectory-viewer.css"></head><body>
+<header><a href="/">← Results</a><h1>Trajectory viewer · BLK Studio</h1><span id="trajectory-summary"></span><details id="trajectory-quality"><summary>Registration details</summary><div id="trajectory-quality-table"></div></details></header>
+<main><aside>
+<h2>Map display</h2>
+<label>Map<select id="map"></select></label>
+<label>Point style<select id="point-style"><option value="flat-squares">Flat Squares</option><option value="round-points">Round Points</option></select></label>
+<label id="size-m-control">Size (m)<input id="size-m" type="number" min="0.001" max="5" step="0.001" value="0.10"></label>
+<label id="size-px-control" hidden>Point size <output id="size-value">2 px</output><input id="size" type="range" min="1" max="12" step="0.25" value="2"></label>
+<label>Alpha <output id="alpha-value">1.00</output><input id="alpha" type="range" min="0" max="1" step="0.01" value="1"></label>
+<label>Color by<select id="color-by"><option value="z">Height · Z</option><option value="x">Position · X</option><option value="y">Position · Y</option><option value="solid">Single color</option></select></label>
+<label id="palette-label">Color scheme<select id="palette"><option value="turbo">Turbo</option><option value="viridis">Viridis</option><option value="plasma">Plasma</option><option value="rainbow">Rainbow</option><option value="gray">Grayscale</option></select></label>
+<label id="solid-label" hidden>Point color<input id="solid" type="color" value="#caddea"></label>
+<div id="range-controls"><div class="pair"><label>Color min<input id="color-min" type="number" step="0.1"></label><label>Color max<input id="color-max" type="number" step="0.1"></label></div><button id="auto-color">Auto color range</button><div id="colorbar"></div></div>
+<label>Background<input id="background" type="color" value="#0e1722"></label>
+<h2>Trajectories & view</h2>
+<div id="trajectory-paths"></div>
+<label class="check"><input id="grid" type="checkbox" checked> Ground grid / axes</label>
+<div class="pair"><button id="top">Top view</button><button id="perspective">3D view</button></div>
+<div class="pair"><button id="fit">Fit map</button><button id="fit-path">Fit trajectory</button></div>
+<button id="capture">Save screenshot</button>
+<button id="reset-settings">Reset saved settings</button><p id="settings-status" class="help" role="status"></p>
+
+</aside><section id="viewport"><canvas id="canvas" tabindex="0" title="Drag: orbit. Right-drag or Shift-drag: pan. Wheel: move. Shift+wheel: slower."></canvas><div id="status" role="status">Loading saved map…</div><div id="legend"><small id="grid-scale"></small></div><div id="error" hidden></div></section></main>
+<script src="trajectory-viewer.js"></script><script src="trajectory-renderer.js"></script></body></html>

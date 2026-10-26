@@ -679,7 +679,7 @@
         }
         const token = location.hash.slice(1) || sessionStorage.getItem('blk-session') || '';
         if (token) sessionStorage.setItem('blk-session', token);
-        history.replaceState(null, '', location.pathname + location.search);
+        if (token && !location.hash) history.replaceState(null, '', `${location.pathname}${location.search}#${token}`);
         const headers = {
             'X-Session-Token': token
         };

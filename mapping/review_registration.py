@@ -107,13 +107,17 @@ def saveFigure(_figure, _path):
         plt.close(_figure)
 
 
-def createReview(_result, _records, _destination=None):
+def createReview(_result, _records, _destination=None, *, _write_page=True,
+                 _station_numbers=None, _quality=None):
     review = _destination or reviewForRecords(_records)
     destination = review / "html_source"
     destination.mkdir(parents=True, exist_ok=True)
     scans = _result["scans"]
     if not scans:
         raise ValueError("No registered scans to review")
+    numbers = np.asarray(_station_numbers if _station_numbers is not None else range(1, len(scans) + 1))
+    if len(numbers) != len(scans):
+        raise ValueError("One station number is required per scan")
     poses = [np.asarray(scan["transform_map_from_scan"], dtype=float) for scan in scans]
     if any(pose.shape != (4, 4) or not np.isfinite(pose).all() for pose in poses):
         raise ValueError("Invalid scan poses for review")
@@ -130,7 +134,7 @@ def createReview(_result, _records, _destination=None):
         clouds.append(transformed[np.isfinite(transformed).all(axis=1)])
     colors = plt.get_cmap("tab20" if len(scans) <= 20 else "turbo")(np.linspace(0, 1, len(scans)))
     quality_path = _records / "quality.json"
-    quality = json.loads(quality_path.read_text(encoding="utf-8")) if quality_path.exists() else {}
+    quality = _quality if _quality is not None else (json.loads(quality_path.read_text(encoding="utf-8")) if quality_path.exists() else {})
     if quality.get("schema_version") == 2:
         from registration_quality import writeQualityPage
         writeQualityPage(quality, destination)
@@ -141,13 +145,12 @@ def createReview(_result, _records, _destination=None):
         axes[0, 0].scatter(cloud[:, 0], cloud[:, 1], s=0.3, color=colors[index], alpha=0.25, rasterized=True)
         axes[0, 1].scatter(cloud[:, 0], cloud[:, 2], s=0.3, color=colors[index], alpha=0.25, rasterized=True)
     for axis, dimensions in ((axes[0, 0], (0, 1)), (axes[0, 1], (0, 2))):
-        labelStations(axis, positions, range(len(scans)), colors, dimensions)
+        labelStations(axis, positions, range(len(scans)), colors, dimensions, _names=[str(n) for n in numbers])
         axis.plot(positions[:, dimensions[0]], positions[:, dimensions[1]], "--", color="#334155", linewidth=0.8, alpha=0.6)
     axes[0, 0].set_title("Top view / station numbers")
     axes[0, 1].set_title("Side view / station numbers")
     decorateAxis(axes[0, 0], "Plot X (m)", "Plot Y (m)")
     decorateAxis(axes[0, 1], "Plot X (m)", "Relative scanner height (m)")
-    numbers = np.arange(1, len(scans) + 1)
     axes[1, 0].plot(numbers, positions[:, 2], color="#64748b", linewidth=1)
     axes[1, 0].scatter(numbers, positions[:, 2], c=colors, edgecolors="#243746", zorder=3)
     for level in levels:
@@ -157,15 +160,22 @@ def createReview(_result, _records, _destination=None):
     axes[1, 0].set(title="Height by acquisition order", xlabel="Station number", ylabel="Relative scanner height (m)")
     axes[1, 0].set_xticks(numbers[::max(1, len(scans) // 30)])
     axes[1, 0].grid(alpha=0.18)
-    for key, label in (("point_to_plane_p50_m", "Per-pair median"), ("point_to_plane_p95_m", "Per-pair 95th percentile")):
-        values = [pair[key] * 1000 for pair in quality.get("pairs", []) if pair.get(key) is not None and np.isfinite(pair[key])]
-        if values:
-            axes[1, 1].hist(values, bins=min(30, max(5, len(values) // 3)), alpha=0.65, label=label)
-    axes[1, 1].set(title="Point-to-plane residuals", xlabel="Absolute point-to-plane residual (mm)", ylabel="Scan pairs")
-    if axes[1, 1].has_data():
-        axes[1, 1].legend()
+    if not _write_page:
+        for index, cloud in enumerate(clouds):
+            axes[1, 1].scatter(cloud[:, 1], cloud[:, 2], s=0.3, color=colors[index], alpha=0.25, rasterized=True)
+        labelStations(axes[1, 1], positions, range(len(scans)), colors, (1, 2), _names=[str(n) for n in numbers])
+        axes[1, 1].set_title("Side view / Y–Z")
+        decorateAxis(axes[1, 1], "Plot Y (m)", "Relative scanner height (m)")
     else:
-        axes[1, 1].text(0.5, 0.5, "Residual statistics unavailable", ha="center", transform=axes[1, 1].transAxes)
+        for key, label in (("point_to_plane_p50_m", "Per-pair median"), ("point_to_plane_p95_m", "Per-pair 95th percentile")):
+            values = [pair[key] * 1000 for pair in quality.get("pairs", []) if pair.get(key) is not None and np.isfinite(pair[key])]
+            if values:
+                axes[1, 1].hist(values, bins=min(30, max(5, len(values) // 3)), alpha=0.65, label=label)
+        axes[1, 1].set(title="Point-to-plane residuals", xlabel="Absolute point-to-plane residual (mm)", ylabel="Scan pairs")
+        if axes[1, 1].has_data():
+            axes[1, 1].legend()
+        else:
+            axes[1, 1].text(0.5, 0.5, "Residual statistics unavailable", ha="center", transform=axes[1, 1].transAxes)
     saveFigure(figure, destination / "alignment_review.png")
     files = ["alignment_review.png"]
     xy_limits = [positions[:, :2].min(axis=0) - 8, positions[:, :2].max(axis=0) + 8]
@@ -189,7 +199,7 @@ def createReview(_result, _records, _destination=None):
     stations = []
     for index, (scan, pose, point) in enumerate(zip(scans, poses, positions)):
         level_id = next(level["id"] for level in levels if index in level["stations"])
-        stations.append({"station": index + 1, "name": scan["name"], "inferred_level": level_id,
+        stations.append({"station": int(numbers[index]), "name": scan["name"], "inferred_level": level_id,
                          "map_xyz_m": pose[:3, 3].tolist(), "plot_xyz_m": point.tolist(),
                          "color": matplotlib.colors.to_hex(colors[index])})
     summary = {"schema_version": 1, "plot_only_rotation": rotation.tolist(), "plot_origin_map_m": origin.tolist(),
@@ -207,8 +217,9 @@ def createReview(_result, _records, _destination=None):
         writer.writerow(["station", "scan", "inferred_level", "map_x_m", "map_y_m", "map_z_m", "plot_x_m", "plot_y_m", "plot_z_m"])
         for station in stations:
             writer.writerow([station["station"], station["name"], station["inferred_level"], *station["map_xyz_m"], *station["plot_xyz_m"]])
-    from result_page import writeReviewPage
-    writeReviewPage(review)
+    if _write_page:
+        from result_page import writeReviewPage
+        writeReviewPage(review)
     print(f"Created review images for {len(scans)} scans and {len(levels)} inferred height bands: {review}", flush=True)
     return summary
 

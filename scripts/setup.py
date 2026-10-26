@@ -21,11 +21,13 @@ def runCommand(_arguments, _root, _log):
 
 
 def sourceFingerprint(_root):
-    patterns = ["CMakeLists.txt", "cmake/*", "blk_core/**/*.hpp", "blk_core/**/*.cpp",
+    patterns = [".gitmodules", "CMakeLists.txt", "cmake/*", "blk_core/**/*.hpp", "blk_core/**/*.cpp",
                 "mapping/*.py", "mapping/requirements.txt", "mapping/native/**/*.hpp", "mapping/native/**/*.cpp",
                 "mapping/native/*.cmake", "mapping/native/*.json", "mapping/native/CMakeLists.txt",
                 "web/*", "tests/*_tests.cpp", "scripts/setup*", "scripts/windows_tools.json",
-                "LICENSE", "README.md", "THIRD_PARTY_NOTICES.txt"]
+                "third_party/kiss-matcher/cpp/kiss_matcher/core/**/*",
+                "third_party/nano_gicp/include/**/*", "third_party/nano_gicp/src/*",
+                "LICENSE", "README.md", "docs/*.md"]
     result = hashlib.sha256()
     result.update(str(_root).encode())
     for path in sorted({path for pattern in patterns for path in _root.glob(pattern) if path.is_file()}):
@@ -95,6 +97,11 @@ def main():
             print("Installing local build tools and Python packages...", flush=True)
             runCommand([sys.executable, "-m", "pip", "install", "--no-compile", "cmake==3.31.10", "ninja==1.13.0",
                         "-r", root / "mapping" / "requirements.txt"], root, log)
+        runCommand([cmake, "-P", root / "cmake" / "registration_submodules.cmake"], root, log)
+        fingerprint = sourceFingerprint(root)
+        current = current and stamp.read_text() == fingerprint
+        if not current:
+            stamp.unlink(missing_ok=True)
             compiler_options = []
             if os.name == "nt":
                 for variable, setting in (("CC", "CMAKE_C_COMPILER"), ("CXX", "CMAKE_CXX_COMPILER"), ("RC", "CMAKE_RC_COMPILER")):

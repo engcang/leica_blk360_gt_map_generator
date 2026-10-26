@@ -13,6 +13,7 @@ PRELUDE = r"""
 let mockProject = {jobs: [], point_clouds: [], running: false, output_directory: '/old/output'};
 let requests = [], disconnected = false, outputFailure = false;
 async function refreshRegistration() {}
+async function refreshTrajectory() {}
 window.fetch = async (url, options = {}) => {
     const path = String(url).replace('/api/', '');
     const body = options.body ? JSON.parse(options.body) : null;
@@ -105,7 +106,7 @@ def run(chrome):
     document = (web / 'index.html').read_text(encoding='utf-8')
     document = document.replace('<script src="/app.js" defer></script>',
                                 '<script>' + PRELUDE + '</script><script src="/app.js" defer></script>')
-    for script in ('registration', 'additional'):
+    for script in ('registration', 'additional', 'trajectory'):
         document = document.replace(f'<script src="/{script}.js" defer></script>', '')
     document = document.replace('</body>', '<script>' + CHECKS + '</script></body>')
     routes = {'/': document.encode(), '/app.js': (web / 'app.js').read_bytes(),

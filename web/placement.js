@@ -5,7 +5,7 @@
     const token = location.hash.slice(1) || sessionStorage.getItem('blk-session') || '';
     if (token) sessionStorage.setItem('blk-session', token);
     const job = new URLSearchParams(location.search).get('job');
-    history.replaceState(null, '', location.pathname + location.search);
+    if (token && !location.hash) history.replaceState(null, '', `${location.pathname}${location.search}#${token}`);
     const gl = canvas.getContext('webgl', {antialias: true});
     if (!gl) { $('error').textContent = 'WebGL is unavailable.'; return; }
     let items = [], selected = 1, reference = 0, loading = false, generation = 0, controller = null;

@@ -35,7 +35,7 @@ namespace blk_core
         {
             std::error_code error;
             const bool directory = entry.is_directory(error);
-            if (error || (!directory && (!entry.is_regular_file(error) || !hasExtension(entry.path(), _extension))))
+            if (error || (!directory && (!entry.is_regular_file(error) || (_extension != "*" && !hasExtension(entry.path(), _extension)))))
             {
                 continue;
             }

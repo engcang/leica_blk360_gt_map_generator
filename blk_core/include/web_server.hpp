@@ -23,6 +23,7 @@
 #include "platform.hpp"
 #include "project.hpp"
 #include "registration.hpp"
+#include "trajectory.hpp"
 
 namespace blk_core
 {
@@ -31,7 +32,7 @@ namespace blk_core
     public:
         WebServer(std::filesystem::path _project_root,
                   std::filesystem::path _web_root):
-            project_(std::move(_project_root)), web_root_(std::move(_web_root)), registration_(project_, web_root_.parent_path() / "mapping"), token_(newId() + newId())
+            project_(std::move(_project_root)), web_root_(std::move(_web_root)), registration_(project_, web_root_.parent_path() / "mapping"), trajectory_(project_, web_root_.parent_path() / "mapping"), token_(newId() + newId())
         {
             server_.set_payload_max_length(1024 * 1024);
             server_.set_read_timeout(300);
@@ -112,6 +113,7 @@ namespace blk_core
                 {
                     project_.cancelAll();
                     registration_.cancel();
+                    trajectory_.cancel();
                 }
                 catch (...)
                 {
@@ -167,6 +169,69 @@ namespace blk_core
 
         void routes()
         {
+            server_.Get("/trajectory-viewer.html", [this](const httplib::Request &, httplib::Response &response)
+            {
+                serveFile(response, web_root_ / "trajectory-viewer.html", "text/html; charset=utf-8");
+            });
+            server_.Get("/(trajectory\\.js|trajectory-viewer\\.js|trajectory-renderer\\.js)", [this](const httplib::Request &request, httplib::Response &response)
+            {
+                serveFile(response, web_root_ / request.matches[1].str(), "text/javascript; charset=utf-8");
+            });
+            server_.Get("/trajectory-viewer.css", [this](const httplib::Request &, httplib::Response &response)
+            {
+                serveFile(response, web_root_ / "trajectory-viewer.css", "text/css; charset=utf-8");
+            });
+            server_.Get("/api/trajectory", [this](const httplib::Request &, httplib::Response &response)
+            {
+                reply(response, trajectory_.snapshot());
+            });
+            server_.Post("/api/trajectory/draft", [this](const httplib::Request &request, httplib::Response &response)
+            {
+                trajectory_.draft(nlohmann::json::parse(request.body));
+                reply(response, {{"ok", true}});
+            });
+            server_.Post("/api/trajectory/start", [this](const httplib::Request &request, httplib::Response &response)
+            {
+                trajectory_.start(nlohmann::json::parse(request.body), registration_.snapshot().at("python").get<std::string>());
+                reply(response, {{"ok", true}});
+            });
+            server_.Post("/api/trajectory/cancel", [this](const httplib::Request &, httplib::Response &response)
+            {
+                trajectory_.cancel();
+                reply(response, {{"ok", true}});
+            });
+            server_.Post("/api/trajectory/open", [this](const httplib::Request &request, httplib::Response &response)
+            {
+                trajectory_.open(nlohmann::json::parse(request.body).at("path").get<std::string>());
+                reply(response, {{"ok", true}});
+            });
+            server_.Post("/api/trajectory/monitor", [this](const httplib::Request &request, httplib::Response &response)
+            {
+                trajectory_.monitor(nlohmann::json::parse(request.body).at("config"));
+                reply(response, {{"ok", true}});
+            });
+            server_.Get("/api/trajectory/([0-9a-f]{32})/viewer", [this](const httplib::Request &request, httplib::Response &response)
+            {
+                auto scene = trajectory_.viewer(request.matches[1]);
+                for (auto &map : scene["maps"])
+                {
+                    map["url"] = "/files/trajectory/" + request.matches[1].str() + "/" + map.at("key").get<std::string>() + ".ply";
+                    map.erase("path");
+                }
+                reply(response, scene);
+            });
+            server_.Post("/api/trajectory/([0-9a-f]{32})/folder", [this](const httplib::Request &request, httplib::Response &response)
+            {
+                const auto path = trajectory_.outputDirectory(request.matches[1]);
+                if (!std::filesystem::is_directory(std::filesystem::u8path(path)))
+                    throw std::runtime_error("Trajectory output folder does not exist yet");
+                openLocalTarget(path);
+                reply(response, {{"ok", true}});
+            });
+            server_.Get("/files/trajectory/([0-9a-f]{32})/([a-z0-9_]+)\\.ply", [this](const httplib::Request &request, httplib::Response &response)
+            {
+                serveFile(response, trajectory_.map(request.matches[1], request.matches[2]), "application/octet-stream");
+            });
             server_.Get("/", [this](const httplib::Request &, httplib::Response &_response)
             {
                 serveFile(_response, web_root_ / "index.html", "text/html; charset=utf-8");
@@ -314,7 +379,7 @@ namespace blk_core
             server_.Get("/api/browse", [](const httplib::Request &_request, httplib::Response &_response)
             {
                 const auto type = _request.get_param_value("type");
-                reply(_response, browseFiles(_request.get_param_value("path"), type == "ply" ? ".ply" : type == "json" ? ".json"
+                reply(_response, browseFiles(_request.get_param_value("path"), type == "any" ? "*" : type == "ply" ? ".ply" : type == "json" ? ".json"
                                                                                                                        : ".blk"));
             });
             server_.Post("/api/add-clouds", [this](const httplib::Request &_request, httplib::Response &_response)
@@ -408,6 +473,7 @@ namespace blk_core
         Project project_;
         std::filesystem::path web_root_;
         Registration registration_;
+        TrajectoryJobs trajectory_;
         std::string token_;
         int port_ = 0;
         httplib::Server server_;

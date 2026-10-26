@@ -1,9 +1,13 @@
 {
   "kiss": {
+    "submodule": "third_party/kiss-matcher",
+    "commit": "e3440b63340af7414ebd0fdde04e40f02ff4e7d2",
     "url": "https://codeload.github.com/MIT-SPARK/KISS-Matcher/tar.gz/e3440b63340af7414ebd0fdde04e40f02ff4e7d2",
     "sha256": "1a5ade91ded3739857dc2af7000b95eeec605a0af0c04405261442742019e4fc"
   },
   "nano": {
+    "submodule": "third_party/nano_gicp",
+    "commit": "b21e79edcceb7c6e86ec0dfec90f451b796b683a",
     "url": "https://codeload.github.com/engcang/nano_gicp/tar.gz/b21e79edcceb7c6e86ec0dfec90f451b796b683a",
     "sha256": "e37682003a527f90090c965e56c51a4d1e3ebd14bb957b3982e116d0e4c6f734"
   },

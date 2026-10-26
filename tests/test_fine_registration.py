@@ -67,7 +67,7 @@ class FineRegistrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory) / "pairs" / "pair.json"
             original, _ = refinePair(self.source, self.target, np.eye(4), path, "source", "target")
-            with mock.patch("fine_registration.o3d.pipelines.registration.registration_icp", side_effect=AssertionError("unexpected ICP")):
+            with mock.patch("fine_registration.PointToPlaneTarget.align", side_effect=AssertionError("unexpected ICP")):
                 reused, hit = refinePair(self.source, self.target, np.eye(4), path, "source", "target")
             self.assertTrue(hit)
             self.assertEqual(original, reused)
@@ -103,7 +103,7 @@ class FineRegistrationTests(unittest.TestCase):
                        "scans": scans, "constraints": [{"source": 0, "target": 1, "retained": True, "tree_edge": True}]}
             first = refineGraph(copy.deepcopy(initial), root)
             quality = json.loads((root / "quality.json").read_text())
-            with mock.patch("fine_registration.o3d.pipelines.registration.registration_icp", side_effect=AssertionError("unexpected ICP")):
+            with mock.patch("fine_registration.PointToPlaneTarget.align", side_effect=AssertionError("unexpected ICP")):
                 resumed = refineGraph(copy.deepcopy(initial), root)
             self.assertEqual(first, resumed)
             self.assertEqual(quality, json.loads((root / "quality.json").read_text()))

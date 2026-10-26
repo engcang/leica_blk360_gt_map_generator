@@ -83,13 +83,7 @@ def createChunkReview(records, edges, output, report, progress, pose_method=None
                 writePly(ply, xyz, intensity)
                 createShareViewer(ply, destination / "view.html")
             document = (destination / "view.html").read_text(encoding="utf-8")
-            document = document.replace("Experimental reference map. Coordinates are stored in metres. Independent ground-truth accuracy has not been established.",
-                "PARTIAL CHUNK: sampled preview in its own scanner frame. Group placement is unresolved; poses are not final 1 cm registration.")
-            document = document.replace("Full PLY loaded", "Sampled chunk preview loaded")
-            document = document.replace('<option value="10" selected>', '<option value="10">').replace('<option value="1">Full</option>', '<option value="1" selected>Full</option>')
-            document = document.replace("The complete map is embedded without further downsampling.", "Only a bounded sample of this chunk is embedded; original scans are unchanged.")
             document = document.replace("the saved PLY retains every point", "the original scan files retain every point")
-            document = document.replace("Full-map loading", "Preview loading")
             writeText(destination / "view.html", document)
             figure, axes = plt.subplots(1, 2, figsize=(13, 5), layout="constrained")
             for local, index in enumerate(indices):
@@ -109,7 +103,7 @@ def createChunkReview(records, edges, output, report, progress, pose_method=None
             figure.savefig(destination / "stations.png", dpi=140)
             plt.close(figure)
             saveJson(metadata, chunk)
-        # Keep the full viewer in a separate tab, but prioritize the canvas in side-by-side embeds.
+        # Prioritize the canvas when opened inside the chunk review.
         view_path = destination / "view.html"
         document = view_path.read_text(encoding="utf-8")
         if 'id="chunk-embed-layout"' not in document:
@@ -133,8 +127,7 @@ def createChunkReview(records, edges, output, report, progress, pose_method=None
                 "groups": groups, "chunks": chunks}
     refreshChunkPlacements(output, chunks)
     saveJson(output / "partial_chunks.json", manifest)
-    template = pathlib.Path(__file__).resolve().parents[1] / "web" / "chunks_review.html"
-    payload = json.dumps(manifest, allow_nan=False).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
-    writeText(output / "chunks_review.html", template.read_text(encoding="utf-8").replace("__CHUNKS_JSON__", payload))
+    from chunk_review import writeChunkReview
+    writeChunkReview(output, report, progress)
     return {"groups": groups, "chunk_count": len(groups), "chunks_review_path": str(output / "chunks_review.html"),
             "chunks_manifest_path": str(output / "partial_chunks.json")}

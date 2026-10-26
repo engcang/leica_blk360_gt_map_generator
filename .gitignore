@@ -1,9 +1,5 @@
-#Codex: Local instructions, editor settings, and machine-specific configuration.
+# Local instructions, editor settings, and machine-specific configuration.
 /AGENTS.md
-/docs/CODING_STYLE.md
-/legacy/
-/scripts/package_release.py
-/tests/test_release.py
 /.agents/
 /.codex/
 .vscode/
@@ -20,7 +16,7 @@
 !.env.*.example
 CMakeUserPresets.json
 
-#Codex: Build trees, fetched dependencies, installed apps, and local toolchains.
+# Build trees, fetched dependencies, installed apps, and local toolchains.
 build/
 build-*/
 build_*/
@@ -48,9 +44,11 @@ rules.ninja
 /Makefile
 /mapping/native/Makefile
 /mapping/bin/
-/third_party/
+/third_party/*
+!/third_party/kiss-matcher
+!/third_party/nano_gicp
 
-#Codex: Executables and compiler products on Windows, Linux, and macOS.
+# Executables and compiler products on Windows, Linux, and macOS.
 blk_studio
 blk_convert
 blk_registration
@@ -74,7 +72,7 @@ blk_registration
 *.tlog/
 *.dSYM/
 
-#Codex: Local packaging artifacts are excluded from the source repository.
+# Local packaging artifacts are excluded from the source repository.
 *.zip
 *.7z
 *.tar
@@ -90,7 +88,7 @@ blk_registration
 RELEASE_MANIFEST.json
 SHA256SUMS.txt
 
-#Codex: Python environments, package caches, and test output.
+# Python environments, package caches, and test output.
 .venv/
 .venv-*/
 venv/
@@ -114,7 +112,7 @@ coverage.xml
 playwright-report/
 test-results/
 
-#Codex: App sessions and registration runtimes may contain local paths or tokens.
+# App sessions and registration runtimes may contain local paths or tokens.
 projects/
 runtime/
 mapping-runtime/
@@ -125,10 +123,12 @@ project.json
 project-v1.json
 project.lock
 registration_jobs.json
+trajectory_jobs.json
+trajectory_reports/
 session.json
 viewer_session.json
 
-#Codex: Scan data, maps, review reports, and intermediate registration products.
+# Scan data, maps, review reports, and intermediate registration products.
 output/
 outputs/
 /sqh/
@@ -188,7 +188,7 @@ station_positions.csv
 /pairs/
 /loops/
 
-#Codex: Logs, incomplete writes, backups, and operating-system metadata.
+# Logs, incomplete writes, backups, and operating-system metadata.
 *.log
 *.log.*
 *.pending

@@ -1,0 +1,6 @@
+[submodule "kiss-matcher"]
+	path = third_party/kiss-matcher
+	url = https://github.com/mit-spark/kiss-matcher.git
+[submodule "nano_gicp"]
+	path = third_party/nano_gicp
+	url = https://github.com/engcang/nano_gicp.git

@@ -12,7 +12,7 @@ if [[ "$ID" != ubuntu || ! "$VERSION_ID" =~ ^(22\.04|24\.04)$ || "$(uname -m)" !
     exit 1
 fi
 
-packages=(build-essential python3 python3-venv python3-dev libgl1 libgomp1 xdg-utils ca-certificates)
+packages=(build-essential git python3 python3-venv python3-dev libgl1 libgomp1 xdg-utils ca-certificates)
 missing=()
 for package in "${packages[@]}"; do
     if [[ "$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true)" != 'install ok installed' ]]; then

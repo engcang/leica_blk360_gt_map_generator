@@ -8,6 +8,7 @@
     <script src="/app.js" defer></script>
     <script src="/registration.js" defer></script>
     <script src="/additional.js" defer></script>
+    <script src="/trajectory.js" defer></script>
 </head>
 <body>
     <header><a class="brand" href="/">▦ <strong>BLK Studio</strong></a><div class="header-actions"><button id="quit" class="quiet">Quit app</button></div></header>
@@ -17,6 +18,7 @@
             <button id="tab-clouds" role="tab" aria-controls="panel-clouds" aria-selected="false" tabindex="-1">View saved point clouds</button>
             <button id="tab-register" role="tab" aria-controls="panel-register" aria-selected="false" tabindex="-1">Register</button>
             <button id="tab-additional" role="tab" aria-controls="panel-additional" aria-selected="false" tabindex="-1">Additional Register</button>
+            <button id="tab-trajectory" role="tab" aria-controls="panel-trajectory" aria-selected="false" tabindex="-1">Generate trajectory</button>
         </nav>
         <div id="panel-convert" role="tabpanel" aria-labelledby="tab-convert">
         <section id="dropzone" aria-label="Select original scans">
@@ -71,6 +73,47 @@
             <section class="registration-advanced worker-log" aria-label="Additional worker log"><h3>Latest worker log</h3><pre id="additional-log" tabindex="0">No active registration.</pre></section>
             <div class="registration-actions"><button id="additional-result" class="secondary">Open existing result</button></div>
             <div id="additional-jobs"></div>
+        </section>
+        </div>
+        <div id="panel-trajectory" role="tabpanel" aria-labelledby="tab-trajectory" hidden>
+        <section class="queue-panel" aria-label="Generate trajectory">
+            <div class="queue-toolbar"><h2>Generate trajectory</h2><button id="trajectory-open" class="secondary">Open existing result</button></div>
+            <section class="trajectory-step" aria-labelledby="trajectory-map-heading">
+                <h3 id="trajectory-map-heading">1. Scanned GT map</h3>
+                <p class="trajectory-help" id="trajectory-map-help">Choose the merged 1 cm PLY from Register, or your own registered scanner map. The viewer displays it at 10 cm.</p>
+                <div class="map-output"><input id="trajectory-tls" aria-label="Scanned GT map PLY" aria-describedby="trajectory-map-help" placeholder="reference_map_1cm.ply"><button data-trajectory-browse="trajectory-tls" class="secondary">Browse…</button></div>
+            </section>
+            <section class="trajectory-step" aria-labelledby="trajectory-scans-heading">
+                <h3 id="trajectory-scans-heading">2. Sequence scans</h3>
+                <p class="trajectory-help" id="trajectory-scan-help">Choose the dataset’s individual LiDAR scans. For a scan folder, filenames must be timestamps, such as 1720000000.100.ply.</p>
+                <div class="registration-settings"><label>Sequence format<select id="trajectory-scan-format"><option value="directory">Scan folder · PLY / PCD / NPY / NPZ / BIN</option><option value="manifest">Scan manifest · JSON file</option><option value="tartanstar">TartanStar · extracted sequence folder</option></select></label></div>
+                <div class="map-output"><input id="trajectory-scans" aria-label="Sequence scans" aria-describedby="trajectory-scan-help" placeholder="Folder containing timestamped scan files"><button id="trajectory-scan-browse" class="secondary">Browse…</button></div>
+                <div class="registration-settings"><label>Scan coordinate frame<select id="trajectory-calibration-mode"><option value="identity">Same frame as the estimated trajectory</option><option value="tartanstar">TartanStar OS-DOME → base_link</option><option value="file">Different frame · select calibration</option></select></label></div>
+                <div id="trajectory-calibration-row" class="map-output" hidden><input id="trajectory-calibration" aria-label="Sensor-to-body calibration" placeholder="Sensor-to-body calibration JSON or URDF"><button data-trajectory-browse="trajectory-calibration" class="secondary">Browse…</button></div>
+                <details><summary>Scan timing</summary><div class="registration-settings"><label>Scan timestamp units<select id="trajectory-scan-time"><option value="1">Seconds</option><option value="0.001">Milliseconds</option><option value="0.000001">Microseconds</option><option value="0.000000001">Nanoseconds</option></select></label><label>Scan selection interval (s)<input id="trajectory-period" type="number" min="0.01" step="0.01" value="0.1"></label></div></details>
+            </section>
+            <section class="trajectory-step" aria-labelledby="trajectory-estimates-heading">
+                <div class="queue-toolbar"><h3 id="trajectory-estimates-heading">3. Estimated trajectory</h3><button id="trajectory-add-estimate" class="secondary">Add comparison trajectory</button></div>
+                <p class="trajectory-help">Choose the sequence’s SLAM frontend or odometry poses as the first trajectory. Add backend or other estimates only to compare them.</p>
+                <div id="trajectory-estimates"></div>
+            </section>
+            <section class="trajectory-step" aria-labelledby="trajectory-output-heading">
+                <h3 id="trajectory-output-heading">4. Save result</h3>
+                <div class="registration-settings"><label>Result name<input id="trajectory-name" value="tls_trajectory"></label></div>
+                <div class="map-output"><input id="trajectory-output" aria-label="Trajectory result output folder" placeholder="Choose a folder for the generated trajectory and maps"><button data-trajectory-folder="trajectory-output" class="secondary">Browse…</button></div>
+            </section>
+            <details class="registration-advanced"><summary>Advanced settings</summary>
+                <div class="registration-settings"><label>CPU threads<input id="trajectory-workers" type="number" min="1" placeholder="Auto"></label></div>
+                <label>Initial map-from-estimate transform (optional)</label><div class="map-output"><input id="trajectory-initial" placeholder="4 × 4 transform JSON"><button data-trajectory-browse="trajectory-initial" class="secondary">Browse…</button></div>
+                <label>Existing baseline to recover (optional)</label><div class="map-output"><input id="trajectory-baseline" placeholder="Folder containing candidate_trajectory.tum and quality.jsonl"><button data-trajectory-folder="trajectory-baseline" class="secondary">Browse…</button></div>
+                <label>Reusable scanned map cache (optional)</label><div class="map-output"><input id="trajectory-cache" placeholder="Defaults to map_cache inside the result folder"><button data-trajectory-folder="trajectory-cache" class="secondary">Browse…</button></div>
+                <label>Additional settings JSON<textarea id="trajectory-options" rows="5" spellcheck="false" placeholder='{"max_pose_gap_s":0.5,"scans":{"min_range_m":1,"max_range_m":60,"point_times_relative":false}}'></textarea></label>
+            </details>
+            <div class="registration-actions"><button id="trajectory-check" class="secondary">Check inputs</button><button id="trajectory-start" class="primary">Generate trajectory</button><button id="trajectory-stop" class="secondary" disabled>Stop</button></div>
+            <p id="trajectory-message" class="hint" role="status"></p>
+            <section class="registration-advanced worker-log"><h3>Latest worker log</h3><pre id="trajectory-log" tabindex="0">No active trajectory generation.</pre></section>
+            <div class="queue-toolbar"><h2>Saved results</h2></div>
+            <div id="trajectory-jobs"></div>
         </section>
         </div>
         <p id="connection" role="status" hidden></p>

@@ -79,22 +79,33 @@
 ## Registration and recovery
 
 - **Initialization:** KISS at 30/50 cm, with complete scans withheld for validation.
+  - Select up to 24 scans evenly across the sequence; combine alternating scans in the SLAM frame for matching, and reserve the other scans for validation.
+  - Match the combined sparse cloud to the TLS map; select the candidate supported by the most validation scans. No averaging of per-scan transforms.
+  - Refine initialization candidates against the 10 cm index with point-to-plane ICP and a 5 cm Huber scale: 80 / 40 / 20 cm gates, up to 15 iterations per stage.
   - Optional JSON: `{"T_map_from_frontend": [[...], ...]}`.
   - The merged TLS map is already transformed; scanner poses are never applied again.
-- **Localization:** point-to-plane ICP with a 5 cm Huber scale against the fixed 10 cm TLS normal index.
-  - Correspondence gates: 80 / 40 / 20 cm; up to 15 iterations per stage.
-  - Retain accepted baseline poses after temporal checks; 1 cm recovery processes rejected intervals.
+- **Localization:** shared Open3D point-to-plane ICP + Tukey on 1 cm source points and original TLS tiles for every scan.
+  - Predict from the previous accepted pose and SLAM relative motion; refine and validate before adopting the next pose.
+  - Imported baseline poses provide initial guesses and also undergo 1 cm refinement; coarse-only poses cannot become final output poses.
+  - New forward-pass poses already verified at 1 cm are reused during recovery, followed by temporal checks.
   - Independent held-out scan points for quality checks.
-  - Eligibility: at least 80 planar correspondences, 20 cm coverage ≥ 65%, plane RMS < 8 cm, all six directions observable.
+  - Geometric support: at least 80 planar correspondences, plane RMS < 8 cm, at least six occupied 50 cm support cells, and at least 50 cm span along two principal directions.
+  - Coverage below 65% requests additional context; it is not an overlap rejection threshold. No minimum coverage fraction is imposed on independently supported poses.
+  - Partial views with six observable directions require two distinct neighboring scans within 1 s, each with its own converged full-rank map fit and consistent pairwise relative motion. Reuse existing fits rather than running extra ICP.
+  - A weak single-scan direction remains provisional until an actual shared submap fit and independent withheld geometry jointly constrain all six directions. SLAM relative motion contributes no geometric information to the rank test.
+  - These support and information thresholds are engineering defaults, not sensor-noise-calibrated accuracy bounds.
   - Rotation/translation information scaled with a 5 m lever arm; weak eigenvectors retained in `quality.jsonl`.
 - **Recovery:** shared Open3D point-to-plane ICP + Tukey engine on 1 cm source points and original TLS point tiles.
   - Same engine as Register, chunk merging, and Additional registration.
   - Correspondence gates: 80 / 30 / 10 cm; Tukey scales: 10 / 10 / 3.33 cm.
-  - Iteration limits per stage: 60 for individual scans, 180 for submap seeds; stop early on convergence.
+  - Initial fitting: up to 60 iterations per correspondence gate; stop early on convergence.
+  - Recovery: a geometrically supported individual fit that hits the iteration limit can continue from its last pose, up to 180 iterations per gate. Require the same convergence, held-out geometry, and temporal checks.
+  - Submap seeds: up to 180 iterations per gate.
   - Convergence: stable fitness/RMSE, or three stable pose updates below 10 µm / 1 µrad with stable RMSE; require positive Tukey support.
   - Target normals: 4 cm radius, up to 40 neighbors; cached on original tiles with neighbors across tile boundaries.
-  - Held-out validation: original 1 cm target, 20-neighbor planar support; the same coverage, residual, and six-direction thresholds.
-  - Bidirectional propagation from retained anchors.
+  - Held-out validation: original 1 cm target, 20-neighbor planar support within 30 cm; the same residual, distribution, and contextual checks.
+  - After the 1 cm forward pass, finish reverse tracking across all rejected intervals before attempting submap relocalization for remaining failures.
+  - Propagate both ways from a newly verified submap anchor. Imported baselines also receive forward gap recovery because their gaps may never have had a 1 cm attempt.
   - Relative-motion gate: starts at 15 cm / 3°, with bounded distance/time allowance up to 50 cm / 10°.
   - Audit existing and recovered poses in both time directions; remove inconsistent runs before fitting and map export.
   - Exact scan-index/timestamp checks before accepting or exporting poses.
@@ -103,35 +114,56 @@
   - Try direct fine fitting and both local window sizes first; visit all local recovery intervals before global search.
   - Compare direct and coarse-initialized candidates on the same withheld scans, including unmatched points in the cost; reject unresolved alternatives.
   - Withhold the anchor and entire validation scans from submap fitting; require agreement from at least two other scans.
+  - Require six constrained directions in the actual final Tukey-weighted submap fit, distributed training geometry, and independently withheld geometry. Validation surfaces that received zero fitting weight cannot establish training observability.
+  - Rebase withheld information matrices to the shared anchor before testing joint observability. A final anchor fit must remain within 15 cm / 3° of the independently checked shared transform, with at most 1 cm departure along its individually weak directions (using the 5 m rotation scale).
+  - Record raw single-scan rank separately from joint rank, witness scan indices, and the geometric acceptance scope.
   - Partial geometric fits still receive independent seed attempts; low residual alone does not suppress relocalization.
   - Retry conflicting forward/reverse tracks with an independently validated submap; reject unresolved conflicts between seeds.
   - Parallel normal estimation and correspondence queries; serial Open3D optimizer/reductions; normals/search index reused for nearby scans.
-  - Reuse exact distance bounds between iterations; skip a query only when the point must remain outside the gate.
-  - For difficult overlaps, an auxiliary cell-cover index supplies conservative distance bounds; all retained correspondences still query the original 1 cm target exactly.
-  - Large nearest-neighbor searches use queued 8,192-point batches within the CPU budget, retaining original correspondence and solver reduction order.
-  - Seed progress includes the scan, submap duration, and search scope; fit logs record preparation/fitting timings.
+  - Reuse nearest correspondences between iterations only when the second-neighbor distance and point movement prove they remain exact; ties are queried again.
+  - Cache exact scan partitions and submap windows within a memory budget; reuse identical fits across recovery stages. Different initial poses still receive separate fits.
+  - Previously completed fit requests may be read from an older recovery directory only when every hashed fit input and solver setting matches; validation runs again and the older result stays unchanged.
+  - Reuse tile search plans with a conservative movement margin; include every tile that can contain a closer point, including tile boundaries.
+  - C++/OpenMP searches use persistent nanoflann tile indices, exact correspondence certificates, and reusable Open3D point/normal buffers.
+  - Native search runs automatically when the bundled library is available; `BLK_CORRESPONDENCE_BACKEND=python` selects the reference implementation.
+  - Low-memory or broad diagnostic searches stream through the reference path; point density and distance gates stay unchanged.
+
+## Staged campaigns
+
+- **Initial fitting only:** `trajectory_worker.py --config CONFIG --report REPORT --baseline-only`.
+  - Saves a completed, hashed `baseline/status.json`; reports `baseline_ready`, with recovery pending.
+- **Continue recovery:** same config with `--recovery-only --recovery-name recovery_v12`.
+  - Verifies the baseline receipt and reuses its completed poses; preserves older `recovery/` results.
+  - Writes the new recovery under `recovery_v12/`; publishes the viewer after recovery and map export finish.
+- **Batch scheduling:** `scripts/run_trajectory_campaign.py --batch BATCH_DIRECTORY`.
+  - Reads the campaign's `plan.json`; finishes every initial fitting job before starting recovery.
+  - Recovery release requires `recovery_ready.json` with `validated: true` and matching `source_sha256` file hashes.
+  - Failed initial fitting or changed release files hold recovery; queued work is not marked completed.
+  - Exact distance ties retain the reference neighbor choice; original correspondence and solver reduction order are preserved.
+  - Seed progress includes the scan, submap duration, and search scope; individual fit logs separate partitioning, target preparation, fitting, and validation times.
 - **CPU threads:** Auto uses the available logical CPUs, respecting process affinity and `BLK_CPU_THREADS`.
   - Leave the UI field blank; configuration `workers: 0` or omitted selects Auto.
   - An explicit count limits parallel work; the effective count is recorded in `execution.jsonl`.
+  - Execution records include the correspondence backend and native library SHA-256.
   - CPU affinity and Linux container quotas are respected; no machine-specific CPU count.
   - Independent queries, normal estimation, and map layers run in parallel; sequential pose propagation and optimizer reductions keep their order.
 - **Memory:** live Windows/Linux available RAM and Linux cgroup limits determine cache budgets and map concurrency.
-  - TLS tile cache: up to 10% of available RAM; scan cache: up to 3%, at most 32 scans.
-  - Evict the least recently used TLS tiles individually; optional search indexes fall back to the original exact search when memory is limited.
+  - Persistent map search indices: up to 20% of available RAM; TLS point tiles: up to 10%; scan cache: up to 3%, at most 32 scans.
+  - Evict the least recently used TLS tiles and indices individually; rebuilding an evicted index changes runtime only.
   - Lower RAM reduces cache retention or concurrent map layers, without sampling fitting points.
   - A single target that cannot fit reports the memory requirement before allocating its search index.
   - Dense KISS searches share a process lock; their native descriptor allocations are released after each request.
 - **Resume:** input/map hashes, source file statistics, saved fitting requests, and atomic trajectory checkpoints.
   - Interrupted trailing log records are discarded; completed fits remain reusable.
-  - Reuse identical submap ICP requests across candidate checks and restarts; hash source points, initial pose, target points/normals, solver settings, and library versions.
+  - Reuse identical submap ICP requests across candidate checks and restarts; bind source points, initial pose, original map hash, normal/index version, solver settings, and library versions.
   - Recompute held-out geometry and temporal checks for each candidate; cached fitting results do not bypass acceptance checks.
   - Changed inputs/settings require a new output folder.
   - Earlier Nano-GICP recovery journals remain viewable; use a new output folder for the unified engine.
-  - Recovery v8 records fine-map validation, temporal chain selection, competing seeds, and cached original-map normals; use a new output folder for older protocols.
+  - Trajectory v3 / recovery v11 bind validation protocol v2 and the fine-engine version; older results remain viewable, but new computation requires a new output folder.
   - CLI `--local-only`: save local recovery first; resume the same command without this flag for global search.
   - Existing handoff baselines can be imported without changing their files.
 - **Validity:** accepted poses only in the TUM trajectory; rejected poses remain in quality records.
-  - Weak directions remain unresolved; no invented poses or interpolation across missing GT.
+  - Directions still weak after independent joint validation remain unresolved; no invented poses or interpolation across missing GT.
   - Residuals and agreement with SLAM are internal diagnostics, not independent absolute accuracy measurements.
 
 ## Outputs and viewer

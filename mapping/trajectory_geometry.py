@@ -4,6 +4,8 @@ import numpy as np
 from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation
 from trajectory_io import digest, save_json, transform
+from trajectory_validation import (observability, LOW_OVERLAP_CONTEXT, MIN_SUPPORT_POINTS,
+    MIN_SUPPORT_CELLS, SUPPORT_CELL_M, MIN_PRINCIPAL_SPAN_M, VALIDATION_PROTOCOL)
 
 def voxel(points: np.ndarray, size: float) -> np.ndarray:
     """Keep actual points in deterministic voxel order."""
@@ -113,22 +115,34 @@ class Matcher:
 
 
 def correspondence_quality(p, n, r, dist, T):
-    if len(r) < 80:
-        return dict(accepted=False, reason='insufficient_support', points=len(r))
+    if len(r) < MIN_SUPPORT_POINTS:
+        return dict(accepted=False, geometry_supported=False, reason='insufficient_support', points=len(r))
     J = np.column_stack([np.cross((p-T[:3, 3])/5., n), n])
     information = J.T @ J / len(J)
-    eig, vectors = np.linalg.eigh(information)
-    rank = int(np.count_nonzero(eig > max(eig[-1]*1e-3, 1e-5)))
+    eig, weak, rank = observability(information)
     coverage = float(np.mean(dist < .20))
     rms = float(np.sqrt(np.mean(r*r)))
-    accepted = coverage >= .65 and rms < .08 and rank == 6
-    reason = 'geometry_pass' if accepted else ('insufficient_overlap' if coverage < .65 else 'surface_residual' if rms >= .08 else 'weak_directions')
+    # An isolated patch cannot validate a trajectory even when numerical noise
+    # creates six positive eigenvalues. Require distributed actual map support.
+    cells = len(np.unique(np.floor(p/SUPPORT_CELL_M).astype(np.int64), axis=0))
+    _, basis = np.linalg.eigh(np.cov(p, rowvar=False))
+    span = np.sort(np.ptp((p-p.mean(axis=0)) @ basis, axis=0))
+    distributed = cells >= MIN_SUPPORT_CELLS and span[-2] >= MIN_PRINCIPAL_SPAN_M
+    supported = rms < .08 and distributed
+    needs_context = rank < 6 or coverage < LOW_OVERLAP_CONTEXT
+    accepted = supported and not needs_context
+    reason = ('surface_residual' if rms >= .08 else 'concentrated_support' if not distributed
+              else 'weak_directions' if rank < 6 else 'partial_view_needs_context'
+              if needs_context else 'geometry_pass')
     supported_distances = dist[np.isfinite(dist)]
-    weak = vectors[:, eig <= max(eig[-1]*1e-3, 1e-5)]
-    return dict(accepted=bool(accepted), reason=reason,
+    return dict(accepted=bool(accepted), geometry_supported=bool(supported),
+                needs_context=bool(supported and needs_context), reason=reason,
+                acceptance_scope='single-scan' if accepted else 'provisional' if supported else 'rejected',
+                validation_protocol=VALIDATION_PROTOCOL,
                 points=len(r), coverage_20cm=coverage, plane_rms_m=rms,
                 inlier_distance_mse_m2=float(np.mean(supported_distances**2)),
                 inlier_distance_p90_m=float(np.quantile(supported_distances, .9)),
                 observable_directions=rank, scaled_information_eigenvalues=eig.tolist(),
                 scaled_information_matrix=information.tolist(), weak_directions=weak.T.tolist(),
-                support_extent_m=np.ptp(p, axis=0).tolist())
+                support_extent_m=np.ptp(p, axis=0).tolist(), support_cells_50cm=cells,
+                support_principal_span_m=span.tolist())

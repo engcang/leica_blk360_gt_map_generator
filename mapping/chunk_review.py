@@ -8,6 +8,7 @@ import re
 import shutil
 
 from review_registration import createReview
+from portable_paths import resolvePath
 
 
 def writeChunkReview(output, records, progress=print):
@@ -38,7 +39,7 @@ def writeChunkReview(output, records, progress=print):
         summary_path = destination / "html_source" / "review_summary.json"
         summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else None
         if summary is None or any(not (summary_path.parent / name).is_file() for name in summary["images"]):
-            scans = [{"index": scan["row"] - 1, "name": scan["name"], "source_path": scan["source_path"],
+            scans = [{"index": scan["row"] - 1, "name": scan["name"], "source_path": str(resolvePath(scan["source_path"], output)),
                       "transform_map_from_scan": scan["transform_chunk_from_scan"]} for scan in chunk["scans"]]
             summary = createReview({"scans": scans}, records, destination, _write_page=False,
                                    _station_numbers=[scan["row"] for scan in chunk["scans"]], _quality={})

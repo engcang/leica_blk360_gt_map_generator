@@ -48,7 +48,7 @@ class SubmoduleTests(unittest.TestCase):
         (parent / "cmake").mkdir()
         shutil.copy2(ROOT / "cmake/registration_submodules.cmake", parent / "cmake")
         manifest = {}
-        for name, path in (("kiss", "third_party/kiss-matcher"), ("nano", "third_party/nano_gicp")):
+        for name, path in (("kiss", "third_party/kiss-matcher"), ("nano", "third_party/nano_gicp"), ("nanoflann", "third_party/nanoflann")):
             self.git(parent, "submodule", "add", str(upstream), path)
             self.git(parent / path, "checkout", "--detach", pinned)
             manifest[name] = {"submodule": path, "commit": pinned}
@@ -73,7 +73,7 @@ class SubmoduleTests(unittest.TestCase):
         checkout, upstream, pinned, _ = self.checkout()
         self.assertFalse((checkout / "third_party/kiss-matcher/source.cpp").exists())
         self.initialize(checkout)
-        for path in ("third_party/kiss-matcher", "third_party/nano_gicp"):
+        for path in ("third_party/kiss-matcher", "third_party/nano_gicp", "third_party/nanoflann"):
             self.assertEqual(self.git(checkout / path, "rev-parse", "HEAD"), pinned)
         upstream.rename(upstream.with_name("offline-upstream"))
         result = self.initialize(checkout)
@@ -82,7 +82,7 @@ class SubmoduleTests(unittest.TestCase):
     def testWrongCheckoutReturnsToPinnedRevisionWithoutResettingLocalEdits(self):
         checkout, _, pinned, newer = self.checkout()
         self.initialize(checkout)
-        source = checkout / "third_party/kiss-matcher"
+        source = checkout / "third_party/nanoflann"
         self.git(source, "checkout", "--detach", newer)
         self.initialize(checkout)
         self.assertEqual(self.git(source, "rev-parse", "HEAD"), pinned)
@@ -94,7 +94,7 @@ class SubmoduleTests(unittest.TestCase):
         checkout, _, _, newer = self.checkout()
         manifest_path = checkout / "mapping/native/dependencies.json"
         manifest = json.loads(manifest_path.read_text())
-        manifest["kiss"]["commit"] = newer
+        manifest["nanoflann"]["commit"] = newer
         manifest_path.write_text(json.dumps(manifest))
         result = self.initialize(checkout, succeeds=False)
         self.assertIn("gitlink and dependencies.json", " ".join(result.stderr.split()))
@@ -109,7 +109,7 @@ class SubmoduleTests(unittest.TestCase):
         shutil.copy2(ROOT / "mapping/native/dependencies.cmake", native)
         manifest = {}
         for name, path in (("kiss", "third_party/kiss-matcher"), ("nano", "third_party/nano_gicp"),
-                           ("other", None)):
+                           ("nanoflann", "third_party/nanoflann"), ("other", None)):
             payload = self.root / (name + "-source")
             payload.mkdir()
             (payload / "source.cpp").write_text(name)
@@ -130,7 +130,7 @@ include(dependencies.cmake)
         result = subprocess.run([CMAKE, "-S", str(native), "-B", str(self.root / "build")],
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        for name, path in (("kiss", "kiss-matcher"), ("nano", "nano_gicp"), ("other", "registration/other")):
+        for name, path in (("kiss", "kiss-matcher"), ("nano", "nano_gicp"), ("nanoflann", "nanoflann"), ("other", "registration/other")):
             self.assertEqual((source / "third_party" / path / "source.cpp").read_text(), name)
 
 

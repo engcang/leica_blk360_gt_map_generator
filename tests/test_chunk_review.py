@@ -21,7 +21,7 @@ def fixture(root):
         path = root / f'Scan{row}.ply'
         writePly(path, points, np.full(len(points), 100))
         pose = np.eye(4); pose[:3, 3] = [row*.5, 0, height]
-        scans.append(dict(row=row, name=path.name, source_path=str(path), transform_chunk_from_scan=pose.tolist()))
+        scans.append(dict(row=row, name=path.name, source_path=path.name, transform_chunk_from_scan=pose.tolist()))
     chunks = [dict(number=1, key='test-frame', rows=[3, 8, 12], scans=scans, points=4800,
                    viewer='preview.html', anchor_row=3),
               dict(number=2, key='single-frame', rows=[12], scans=scans[-1:], points=1600,

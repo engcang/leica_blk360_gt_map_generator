@@ -289,6 +289,10 @@ namespace blk_core
                 registration_.start(nlohmann::json::parse(_request.body));
                 reply(_response, {{"ok", true}});
             });
+            server_.Post("/api/registration/finalize-chunk", [this](const httplib::Request &_request, httplib::Response &_response)
+            {
+                reply(_response, {{"id", registration_.finalizeChunk(nlohmann::json::parse(_request.body))}});
+            });
             server_.Post("/api/registration/draft", [this](const httplib::Request &_request, httplib::Response &_response)
             {
                 registration_.saveDraft(nlohmann::json::parse(_request.body));

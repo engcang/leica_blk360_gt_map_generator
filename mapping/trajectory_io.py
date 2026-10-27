@@ -196,6 +196,7 @@ class ScanSource:
         self.timestamps = self.timestamps * float(config.get('time_scale', 1)) + float(config.get('time_offset_s', 0))
         if np.any(np.diff(self.timestamps) <= 0):
             raise ValueError('Scan timestamp scale must be positive')
+        self._anchor_timestamps = {}
         self.initial_stats = self.stats()
         self.provenance = {'format': self.kind, 'path': str(self.path), 'config': config,
                            'frontend_config': trajectory.config, 'frontend_sha256': digest(trajectory.files[0]),
@@ -243,6 +244,29 @@ class ScanSource:
             raise ValueError(f'Invalid {name} byte count at scan {index}; lossless uint32 ranges are required')
         return np.frombuffer(data, dtype=dtype).reshape(shape)
 
+    def _column_times(self, index):
+        columns = self._decode('tcol', index, '<f8', (self.width,))
+        valid = np.isfinite(columns) & (columns > 0)
+        if not valid.any():
+            raise PoseGap('No valid LiDAR column timestamps')
+        columns = columns*float(self.config.get('time_scale', 1))+float(self.config.get('time_offset_s', 0))
+        if np.ptp(columns[valid]) > .5:
+            raise ValueError('LiDAR column clock span exceeds 0.5 seconds')
+        return columns, valid, float(columns[valid].max())
+
+    def anchor_timestamp(self, index):
+        """Exact deskew/pose anchor, distinct from TartanStar selection stamps.
+
+        Normal scan loading populates this cache. Resume validation reads only
+        the small column-clock record when the scan has not been loaded yet.
+        """
+        index = int(index)
+        if self.kind != 'tartanstar':
+            return float(self.timestamps[index])
+        if index not in self._anchor_timestamps:
+            self._anchor_timestamps[index] = self._column_times(index)[2]
+        return self._anchor_timestamps[index]
+
     def stats(self):
         return [[str(p), p.stat().st_size, p.stat().st_mtime_ns] for p in self.files]
 
@@ -266,14 +290,8 @@ class ScanSource:
         times = None
         if self.kind == 'tartanstar':
             ranges = self._decode('rng', index, '<u4', (self.height, self.width))
-            columns = self._decode('tcol', index, '<f8', (self.width,))
-            valid_columns = np.isfinite(columns) & (columns > 0)
-            if not valid_columns.any():
-                raise PoseGap('No valid LiDAR column timestamps')
-            columns = columns*float(self.config.get('time_scale', 1))+float(self.config.get('time_offset_s', 0))
-            stamp = float(columns[valid_columns].max())
-            if np.ptp(columns[valid_columns]) > .5:
-                raise ValueError('LiDAR column clock span exceeds 0.5 seconds')
+            columns, valid_columns, stamp = self._column_times(index)
+            self._anchor_timestamps[index] = stamp
             xyz = ((ranges.astype(np.float32)-self.beam_r)[..., None]*self.direction+self.offset)*.001
             valid = (ranges > 0) & valid_columns[None, :]
             points = xyz[valid]

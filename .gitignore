@@ -47,6 +47,7 @@ rules.ninja
 /third_party/*
 !/third_party/kiss-matcher
 !/third_party/nano_gicp
+!/third_party/nanoflann
 
 # Executables and compiler products on Windows, Linux, and macOS.
 blk_studio

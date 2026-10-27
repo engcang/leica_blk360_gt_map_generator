@@ -11,6 +11,12 @@
     "url": "https://codeload.github.com/engcang/nano_gicp/tar.gz/b21e79edcceb7c6e86ec0dfec90f451b796b683a",
     "sha256": "e37682003a527f90090c965e56c51a4d1e3ebd14bb957b3982e116d0e4c6f734"
   },
+  "nanoflann": {
+    "submodule": "third_party/nanoflann",
+    "commit": "b0f109a5c726f1e565e624ee448136bf30e2e7b4",
+    "url": "https://codeload.github.com/jlblancoc/nanoflann/tar.gz/b0f109a5c726f1e565e624ee448136bf30e2e7b4",
+    "sha256": "5ed527c4de5e0169da67a33dd7977207e569fe1656e56376330f2443d4d44ee1"
+  },
   "robin": {
     "url": "https://codeload.github.com/MIT-SPARK/ROBIN/tar.gz/5623f02f62c63711052bbb8d6096a410ddca0ee4",
     "sha256": "b687532ff4af30c87b5fc96bb413cbb01f47590eb168c5c26e101250c5888d95"

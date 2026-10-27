@@ -68,7 +68,8 @@ window.blkTrajectoryScene = async function()
     {
         // Older results still reference the original 1 cm registration input.
         if (item.key === 'tls_1cm') continue;
-        const label = {tls_10cm:'Scanned GT map · 10 cm', tls_gt:'Generated ground-truth trajectory map · 10 cm'}[item.key] || item.label;
+        const label = ({tls_10cm:'Scanned GT map · 10 cm', tls_gt:'Generated ground-truth trajectory map · 10 cm'}[item.key] || item.label)
+            + (item.key === 'tls_gt' && item.snapshot === true ? ' · Saved snapshot' : '');
         cfg.maps[item.key] = {count:item.points, bounds:item.bounds, color_bounds:item.bounds, url:item.url};
         cfg.styles[item.key] = {label, mapLabel:label, color:item.color};
         mapSelect.add(new Option(label, item.key));

@@ -1,6 +1,7 @@
 """Test Arrange entry, folder selection and saved poses in an isolated headless browser."""
 import argparse
 import json
+import math
 from pathlib import Path
 import shutil
 import struct
@@ -26,12 +27,16 @@ def main():
         app.mkdir()
         exe = app / Path(args.executable).name
         shutil.copy2(args.executable, exe)
-        shutil.copytree(Path(args.executable).resolve().parent / ('web_rgb' if args.rgb else 'web'), app / ('web_rgb' if args.rgb else 'web'))
+        if args.rgb:
+            subprocess.run([str(Path(sys.executable).parent/'cmake'), f'-DSOURCE={repo / "web"}',
+                f'-DDEST={app / "web_rgb"}', '-P', str(repo/'cmake/rgb_web.cmake')], check=True)
+        else:
+            shutil.copytree(repo/'web', app/'web')
         (app / 'mapping').mkdir()
         project = root / 'project'
         output = root
         paths = []
-        for scan in range(3):
+        for scan in range(4):
             path = root / f'Setup{scan}.ply'
             header = ('ply\nformat binary_little_endian 1.0\nelement vertex 1000\n'
                       'property float x\nproperty float y\nproperty float z\n'
@@ -40,7 +45,7 @@ def main():
                 ((i // 10) % 10) * .1, (i // 100) * .1, *([255, 16, i % 256] if args.rgb else [i * 50])) for i in range(1000)))
             paths.append(str(path))
         # A stub worker tests launch/config plumbing without running real ICP.
-        for name in ('chunk_placements.py', 'json_io.py'):
+        for name in ('chunk_placements.py', 'json_io.py', 'portable_paths.py'):
             shutil.copy2(repo / 'mapping' / name, app / 'mapping' / name)
         (app / 'mapping/studio_worker.py').write_text(
             'import json,sys,pathlib,time\nfrom chunk_placements import refreshChunkPlacements\n'
@@ -61,9 +66,9 @@ def main():
         report = project / 'registration_records' / ('a' * 32)
         report.mkdir(parents=True)
         identity = [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
-        chunks = [{'key':f'chunk-{i}', 'number':i+1, 'rows':[i+1],
-                   'scans':[{'row':i+1,'name':Path(paths[i]).name,'transform_chunk_from_scan':identity}]}
-                  for i in range(2)]
+        chunks = [{'key':f'chunk-{i}', 'number':i+1, 'rows':[j+1 for j in indices],
+                   'scans':[{'row':j+1,'name':Path(paths[j]).name,'transform_chunk_from_scan':identity} for j in indices]}
+                  for i, indices in enumerate(([0], [1,2], [3]))]
         (chunk_output / 'partial_chunks.json').write_text(json.dumps({'chunks':chunks}),encoding='utf-8')
         (chunk_output / 'chunks_review.html').write_text('<html>Fixture</html>',encoding='utf-8')
         config = {'name':'test_chunks','paths':paths,'voxel_m':.01,'additional_pairs':'',
@@ -104,7 +109,7 @@ def main():
                 page.wait_for_function('!document.querySelector("#browser-go").disabled')
                 assert Path(page.evaluate('browser_state.path')).samefile(root)
                 page.locator('#use-folder').click()
-                page.wait_for_function('registration_ids.length === 3')
+                page.wait_for_function('registration_ids.length === 4')
                 assert Path(page.locator('#map-output').input_value()).samefile(root)
                 assert page.locator('#placement-open').is_enabled()
                 # Emptying the optional output field must still not request another folder.
@@ -114,7 +119,7 @@ def main():
                 assert not page.locator('#browser').is_visible()
                 editor = popup.value
                 editor.on('pageerror', lambda error: errors.append(str(error)))
-                editor.wait_for_function('window.blkPlacement?.items().length === 3 && document.body.dataset.loaded === "true"')
+                editor.wait_for_function('window.blkPlacement?.items().length === 4 && document.body.dataset.loaded === "true"')
                 assert editor.locator('#density').input_value() == '10'
                 assert editor.locator('#axes-visible').is_checked()
                 editor.locator('#x').fill('1.25')
@@ -125,13 +130,106 @@ def main():
                 assert editor.locator('#apply').count() == 0
                 page.wait_for_function('registrationDraft().initial_guesses[1]?.[0] === 1.25')
                 assert page.evaluate('registrationDraft().initial_guesses[1][0]') == 1.25
+                def exercise_controls(view, count, expected_all_points):
+                    assert view.locator('#trim-step').input_value() == '0.5'
+                    view.locator('#roll-plus').click()
+                    view.locator('#pitch-minus').click()
+                    view.wait_for_function('document.querySelector("#save-status").textContent.startsWith("Saved on disk:")')
+                    pose = view.evaluate('blkPlacement.items()[1].pose')
+                    assert len(pose)==6
+                    assert math.isclose(pose[4], math.radians(.5), abs_tol=1e-12)
+                    assert math.isclose(pose[5], math.radians(-.5), abs_tol=1e-12)
+                    before = view.evaluate('blkPlacement.items().map(i=>i.pose)')
+                    placements_before = view.evaluate('blkPlacement.items().map(i=>[i.enabled,i.comparisonReference])')
+                    # Orbit, pan and zoom as in manual alignment, then keep the
+                    # entire camera unchanged through cloud loads and selections.
+                    box = view.locator('#scene').bounding_box()
+                    x,y = box['x']+box['width']/2,box['y']+box['height']/2
+                    view.mouse.move(x,y);view.mouse.down()
+                    view.mouse.move(x+40,y+30,steps=3);view.mouse.up()
+                    view.mouse.down(button='right')
+                    view.mouse.move(x+70,y+50,steps=3);view.mouse.up(button='right')
+                    view.mouse.wheel(0,-200)
+                    view.wait_for_timeout(100)
+                    camera_before = view.evaluate('JSON.stringify(blkPlacement.camera)')
+
+                    def visible(indices):
+                        view.wait_for_function('document.body.dataset.loaded === "true"')
+                        assert sorted(view.evaluate('blkPlacement.visible()')) == indices
+                        # Chunk 1 contains two scans; all others contain one.
+                        expected = 100*sum(2 if count==3 and i==1 else 1 for i in indices)
+                        assert int(view.locator('body').get_attribute('data-shown')) == expected
+                        assert view.evaluate('JSON.stringify(blkPlacement.camera)') == camera_before
+
+                    assert view.locator('#visualizing-items input').count() == count
+                    for old in ('show-previous','show-next','show-all','previous-count','next-count'):
+                        assert view.locator('#'+old).count() == 0
+                    visible([1])
+                    assert view.locator('#visualize-1').is_checked()
+                    assert view.locator('#visualize-1').is_disabled()
+                    # Choose nonconsecutive scans without adding the items between them.
+                    view.locator(f'#visualize-{count-1}').check();visible([1,count-1])
+                    view.locator('#visualize-0').check();visible([0,1,count-1])
+                    view.locator(f'#visualize-{count-1}').uncheck();visible([0,1])
+                    view.locator('#visualize-0').uncheck();visible([1])
+                    assert view.locator('#reference').input_value() == '0'
+                    # The moving scan follows selection; explicitly checked items persist.
+                    view.locator('#moving').select_option(str(count-1));visible([count-1])
+                    assert view.locator(f'#visualize-{count-1}').is_disabled()
+                    view.locator('#visualize-1').check();visible([1,count-1])
+                    view.locator('#moving').select_option('1');visible([1])
+                    view.locator('#moving').select_option('0');visible([0,1])
+                    view.locator('#visualize-1').uncheck();visible([0])
+                    assert view.locator('#roll-plus').is_disabled() and view.locator('#pitch-minus').is_disabled()
+                    view.locator('#moving').select_option('1');visible([1])
+                    for i in range(count):
+                        if i != 1: view.locator(f'#visualize-{i}').check()
+                    visible(list(range(count)))
+                    assert int(view.locator('body').get_attribute('data-shown')) == expected_all_points
+                    view.locator('#clear-visualizing').click();visible([1])
+                    assert view.locator('#visualize-1').is_checked() and view.locator('#visualize-1').is_disabled()
+                    # Shift-click works on row text too, in both directions, and
+                    # keeps the current item visible while clearing a whole range.
+                    view.locator('#visualize-0').check()
+                    view.locator('#visualizing-items label').nth(count-1).locator('.item-name').click(modifiers=['Shift'])
+                    visible(list(range(count)))
+                    view.locator('#visualizing-items label').nth(0).locator('.item-name').click(modifiers=['Shift'])
+                    visible([1])
+                    assert view.locator('#visualize-1').is_checked() and view.locator('#visualize-1').is_disabled()
+                    view.locator('#visualize-0').check()
+                    view.locator(f'#visualize-{count-1}').click(modifiers=['Shift'])
+                    visible(list(range(count)))
+                    view.locator('#visualize-0').click(modifiers=['Shift'])
+                    visible([1])
+                    assert view.evaluate('blkPlacement.items().map(i=>i.pose)') == before
+                    assert view.evaluate('blkPlacement.items().map(i=>[i.enabled,i.comparisonReference])') == placements_before
+                    # Each Next starts with exactly the current/previous pair,
+                    # without accumulating old selections or changing the camera.
+                    view.locator('#moving').select_option('0');visible([0])
+                    view.locator(f'#visualize-{count-1}').check();visible([0,count-1])
+                    view.locator('#next').click();visible([0,1])
+                    view.locator('#next').click();visible([1,2])
+                    poses_before_clear = view.evaluate('blkPlacement.items().map(i=>i.pose)')
+                    view.locator('#clear-visualizing').click();visible([2])
+                    assert view.evaluate('blkPlacement.items().map(i=>i.pose)') == poses_before_clear
+                    assert view.evaluate('blkPlacement.items().map(i=>[i.enabled,i.comparisonReference])') == placements_before
+                    view.locator('#previous').click();visible([1])
+                    view.locator('#density').select_option('5')
+                    view.wait_for_function('document.body.dataset.loaded === "true"')
+                    assert view.evaluate('JSON.stringify(blkPlacement.camera)') == camera_before
+                    view.locator('#density').select_option('10');visible([1])
+                    view.locator('#fit').click()
+                    assert view.evaluate('JSON.stringify(blkPlacement.camera)') != camera_before
+                    return pose
+                scan_pose = exercise_controls(editor, 4, 400)
+                assert scan_pose[:4]==[1.25,0,0,0]
                 editor.close()
                 with page.expect_popup() as popup:
                     page.locator('#placement-open').click()
                 reopened = popup.value
                 reopened.on('pageerror', lambda error: errors.append(str(error)))
-                reopened.wait_for_function('window.blkPlacement?.items().length === 3 && document.body.dataset.loaded === "true"')
-                assert reopened.evaluate('blkPlacement.items()[1].pose[0]') == 1.25
+                reopened.wait_for_function('window.blkPlacement?.items().length === 4 && document.body.dataset.loaded === "true"')
+                assert reopened.evaluate('blkPlacement.items()[1].pose') == scan_pose
                 reopened.close()
                 assert page.locator('.registration-results').count() == 0
                 assert page.locator('#registration-log').evaluate('(el) => el.closest("details") === null')
@@ -148,7 +246,7 @@ def main():
                     page.get_by_role('button',name='Arrange chunks',exact=True).click()
                 chunk_editor = popup.value
                 chunk_editor.on('pageerror', lambda error: errors.append(str(error)))
-                chunk_editor.wait_for_function('window.blkPlacement?.items().length === 2 && document.body.dataset.loaded === "true"')
+                chunk_editor.wait_for_function('window.blkPlacement?.items().length === 3 && document.body.dataset.loaded === "true"')
                 assert chunk_editor.locator('#apply').count() == 0
                 chunk_editor.locator('#x').fill('3.5')
                 chunk_editor.locator('#x').press('Tab')
@@ -156,13 +254,22 @@ def main():
                 page.wait_for_function('chunk_pending.size === 0')
                 chunk_file = chunk_output / 'chunk_initial_placements.json'
                 assert json.loads(chunk_file.read_text())['poses']['chunk-1'][0] == 3.5
+                chunk_pose = exercise_controls(chunk_editor, 3, 400)
+                assert chunk_pose[:4]==[3.5,0,0,0]
+                assert json.loads(chunk_file.read_text())['poses']['chunk-1']==chunk_pose
+                image = repo/'build/placement-fix'/('rotation-visibility-rgb.png' if args.rgb else 'rotation-visibility.png')
+                image.parent.mkdir(parents=True,exist_ok=True)
+                chunk_editor.locator('#visualize-0').check()
+                chunk_editor.locator('#visualize-2').check()
+                chunk_editor.wait_for_function('document.body.dataset.loaded === "true"')
+                chunk_editor.screenshot(path=str(image),full_page=True)
                 # The editor saves only; registration starts exclusively from the main tab.
                 assert not (report / 'progress.json').exists()
                 assert not page.locator('.chunk-refinement-option input').is_checked()
                 page.get_by_role('button',name='Register chunks',exact=True).click()
                 page.wait_for_function('!registration_starting && registration_state.jobs[0].stage === "Test worker finished"')
                 launched = json.loads((report / 'config.json').read_text())
-                assert launched['chunk_initial_guesses']['chunk-1'] == [3.5,0,0,0]
+                assert launched['chunk_initial_guesses']['chunk-1'] == chunk_pose
                 assert launched['manual_chunks'] == chunks
                 assert not launched.get('refine_individual_scans', False)
                 assert chunk_editor.locator('#x').is_disabled()
@@ -173,7 +280,7 @@ def main():
                 page.locator('#tab-register').click()
                 assert page.locator('#registration-log').evaluate('(el)=>Math.abs(el.scrollHeight-el.clientHeight-el.scrollTop)<2')
                 updated = json.loads(chunk_file.read_text())
-                assert updated['poses'] == {'updated-chunk-0':None,'updated-chunk-1':None}
+                assert updated['poses'] == {'updated-chunk-0':None,'updated-chunk-1':None,'updated-chunk-2':None}
                 archived = list((chunk_output / 'html_source/placement_history').glob('*.json'))
                 assert len(archived) == 1
                 assert json.loads(archived[0].read_text())['poses']['chunk-1'][0] == 3.5
@@ -181,7 +288,7 @@ def main():
                     page.get_by_role('button',name='Arrange chunks',exact=True).click()
                 fresh = popup.value
                 fresh.on('pageerror', lambda error: errors.append(str(error)))
-                fresh.wait_for_function('window.blkPlacement?.items().length === 2 && document.body.dataset.loaded === "true"')
+                fresh.wait_for_function('window.blkPlacement?.items().length === 3 && document.body.dataset.loaded === "true"')
                 assert fresh.evaluate('blkPlacement.items()[1].id') == 'updated-chunk-1'
                 assert fresh.evaluate('blkPlacement.items()[1].enabled') is False
                 assert not errors, errors

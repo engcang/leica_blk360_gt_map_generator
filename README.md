@@ -10,7 +10,7 @@
 
 - **Source:** download or clone this repository into a writable folder.
   - Optional: `git clone --recurse-submodules https://github.com/engcang/leica_blk360_gt_map_generator.git`.
-  - Builds automatically initialize missing submodules at their pinned commits.
+  - Builds automatically initialize missing KISS-Matcher, Nano-GICP, and nanoflann submodules at their pinned commits.
   - Source ZIPs download the same pinned sources automatically.
 - **Launch:**
   - **Windows 10/11 x64:** double-click `Start-BLK-Studio.bat`.
@@ -22,7 +22,7 @@
   - Browser opens when ready; no manual CMake or Python package installation.
 - **Later runs:** reuse the installation; source changes trigger a rebuild.
 - **Local installation:**
-  - Original submodules: `third_party/kiss-matcher/` and `third_party/nano_gicp/`.
+  - Original submodules: `third_party/kiss-matcher/`, `third_party/nano_gicp/`, and `third_party/nanoflann/`.
   - Other registration sources: `third_party/registration/`; build artifacts: `build/`.
   - Local tools and installation: `.build-tools/`, `.venv/`, and `install/`.
   - Keep these folders with the project; Python environments contain absolute paths.
@@ -112,16 +112,32 @@
   - Open **Arrange PLY scans** after selecting inputs.
   - Save beside the selected PLYs unless another output folder is chosen.
   - **Move view / Place scan / chunk:** choose the left-drag action; default is view movement.
-  - Placement axes: XY, X, Y, Z, yaw; numeric entry available.
-  - First item fixed; **Next** uses the previous item as reference.
+  - Placement axes: XY, X, Y, Z, roll, pitch, yaw; numeric entry and rotation drag tools.
+  - Rotation trim: **− / +** buttons; **0.5°** default, selectable **0.01°–1°** step; **Shift** for finer adjustments.
+  - First item fixed; each item's comparison scan is saved and restored.
+  - **Next** restores the destination item's saved comparison; if none is saved, it uses the scan/chunk just left.
+  - Poses use one shared frame; changing the comparison never moves the scans.
+  - Rotations pivot around the selected scan/chunk origin.
   - Right-/middle-drag always pans.
   - **Height cut:** hide points above a shared Z height after placement transforms.
   - **Show all:** restore visibility without changing registration inputs.
-  - Load only the moving item and reference.
+  - **Visualizing scans:** check individual scans or chunks to display together.
+    - **Shift-click:** select or deselect the range from the last clicked item.
+    - Current moving item always visible; additional selections remain checked when switching items.
+    - Select the comparison scan in this list to display it; selected chunks show all member scans.
+    - Uses the selected display density; visibility choices do not change saved poses or comparison references.
+  - Viewpoint stays fixed when changing visible scans, moving items, comparison scans, or display density; **Fit visible** recenters the view.
   - Placement defaults: **1/10** density, **Axes on** for scans, chunks, and Additional Register.
   - Other viewers: **Full** density, grid/axes off.
 - **Placement persistence:**
-  - Autosave to `initial_placements.json`; no Apply button.
+  - Autosave to `initial_placements.json`; **Save now** retries immediately.
+  - **Recovery copy:** download the current poses and comparison choices without closing the editor.
+  - Unsaved changes retain a browser copy; **Restore browser copy** appears after reopening on the same app address.
+  - Save errors appear beside the save buttons; requests time out after 15 seconds.
+  - After an app update, restart the app before editing; preserve unsaved work with **Recovery copy** first.
+  - Comparison choices use relative scan paths; older files retain poses but have no saved comparison choices.
+  - Pose arrays: legacy `[x, y, z, yaw]`; roll/pitch edits use `[x, y, z, yaw, roll, pitch]`.
+    - Translation in metres, angles in radians; rotation `Rz(yaw) × Ry(pitch) × Rx(roll)`.
   - Wait for saved status before closing; keep the editor open if saving fails.
   - Adding, removing, or reordering scans preserves other poses.
   - Reopen by selecting the same PLYs and output folder.
@@ -146,11 +162,14 @@
 
 ### Extend an existing map
 
-- **Reference:** in **Additional Register**, open `relative_poses.json`.
+- **Reference:** in **Additional Register**, open `relative_poses.json` or `partial_chunks.json`.
   - Keep original PLYs at their recorded paths.
+  - From a disconnected result, click **Add scans to chunks**.
 - **Inputs:** add new PLYs or a folder; choose a separate output folder.
 - **Optional placement:** **Arrange reference and scans**.
   - Reference remains fixed.
+  - With disconnected chunks, the first chunk anchors the frame; other chunks move rigidly to connect through new scans.
+  - Internal scan transforms stay fixed in every existing chunk.
   - New poses autosave to `additional_initial_placements.json`.
   - Keys: source path and reference hash; removing a scan preserves its saved pose.
 - **Start:** click **Register additional scans**; watch the log and open the result below it.
@@ -176,12 +195,17 @@
   - Add frontend, backend, or other available estimates; the first supplies scan motion and deskew.
   - Choose timestamp units, offsets, pose convention, and sensor-to-body calibration as needed.
 - **Run:** choose a separate output folder → **Check inputs** → **Generate trajectory**.
-  - KISS initialization → 10 cm point-to-plane + Huber localization → bidirectional 1 cm Open3D point-to-plane + Tukey recovery.
-  - Retain accepted baseline poses after temporal checks; apply 1 cm recovery to rejected intervals.
+  - KISS initialization → 1 cm Open3D point-to-plane + Tukey localization → recovery of rejected intervals.
+  - Every accepted pose passes 1 cm fitting and held-out validation; imported baseline poses are initial guesses for the same refinement.
+  - Recovery: finish reverse tracking on all failed intervals → submap/KISS for unresolved intervals; propagate from newly verified anchors.
+  - Continue supported fits that hit the iteration limit before trying expensive submaps; keep the same geometric and temporal checks.
+  - Partial views use independent neighboring scans; weak single-scan directions require a jointly fitted submap and independent validation.
   - Recovery seeds: trusted poses on both sides, 2 s / 6 s submaps, regional and full-map KISS at 30 / 50 / 8 cm.
   - Validate recovered poses on the original 1 cm map; check existing and recovered poses against chronological relative motion.
   - Seed checks withhold the anchor scan and require agreement from at least two other scans.
+  - Reuse original 1 cm map search indices across scans; CPU and cache budgets adapt to available resources.
   - **Stop / Resume:** retain completed fits; verify input provenance before reusing them.
+  - [Staged campaigns](docs/trajectory.md#staged-campaigns): finish initial 1 cm fitting across sequences, then continue recovery from saved baselines.
   - Optional: supply initial alignment JSON or an existing baseline result to recover.
 - **Viewer:**
   - **Scanned GT map:** scanner reference map, displayed at 10 cm only; the original 1 cm input remains available for registration.
@@ -211,6 +235,10 @@
   ```
 
 - **Original PLYs:** remain where selected; files stored elsewhere are not copied.
+- **JSON paths:** relative to the containing JSON file, with `/` separators.
+  - Applies to initial placements, additional placements, scan poses, and chunk records.
+  - Register loads `initial_placements.json` from the selected output folder.
+  - Keep the relative folder structure when moving scans and results together.
 - **`relative_poses.json`:**
   - Source paths, hashes, and rigid transforms into the first scan/map frame.
   - Convention: `p_map = T_map_scan @ [x, y, z, 1]`; units: metres.
@@ -309,7 +337,11 @@
   - Diagnostic poses before final 1 cm refinement; no common final map yet.
   - **Arrange chunks:** provide initial placements.
   - **Resume:** reuse caches and search for connections automatically.
-  - Final map/poses published only after all groups connect.
+  - **Finalize selected chunk:** choose a chunk; the largest is selected by default.
+    - Publish its current poses and Review and manage viewer in `final_chunk_N/`.
+    - Preserve the original disconnected result and excluded scans.
+    - Keep current internal poses; no new scan ICP. Generate 1 cm / 3 cm maps from the finalized result.
+  - **Add scans to chunks:** extend the disconnected result in a separate folder; new scans can bridge existing chunks.
 - **Slow viewer or large output:**
   - Choose a 3 cm export or lower display density for navigation.
   - Complete cloud uploaded in 16 MiB graphics buffers; total memory depends on point count.
@@ -322,3 +354,4 @@
 
 - Original project code uses the [MIT License](https://github.com/engcang/leica_blk360_gt_map_generator/blob/main/LICENSE).
 - [KISS-Matcher](https://github.com/mit-spark/kiss-matcher), [Nano-GICP](https://github.com/engcang/nano_gicp), and [Open3D](https://github.com/isl-org/Open3D) use the MIT License.
+- [nanoflann](https://github.com/jlblancoc/nanoflann/tree/v1.3.2) uses the [BSD License](https://github.com/jlblancoc/nanoflann/blob/v1.3.2/COPYING).

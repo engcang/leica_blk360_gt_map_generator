@@ -9,11 +9,16 @@ import tempfile
 import numpy as np
 
 from share_map import createShareViewer, inspectPly
+from portable_paths import resolvePath
 
 
 def loadRegistration(_poses):
     from register_scans import hashFile
     manifest = json.loads(_poses.read_text(encoding="utf-8"))
+    return registrationFromManifest(manifest, _poses), hashFile(_poses)
+
+
+def registrationFromManifest(manifest, _poses):
     if manifest.get("units") != "metres" or not manifest.get("scans"):
         raise ValueError("Expected a BLK Studio relative poses manifest in metres")
     name = manifest.get("result_name", "reference_map")
@@ -28,14 +33,14 @@ def loadRegistration(_poses):
                 or not np.allclose(pose[:3, :3].T @ pose[:3, :3], np.eye(3), atol=1e-6, rtol=0)
                 or not np.isclose(np.linalg.det(pose[:3, :3]), 1, atol=1e-6, rtol=0)):
             raise ValueError(f"Invalid rigid transform: {scan.get('name')}")
-        path = (_poses.parent / scan["file"]).resolve()
+        path = resolvePath(scan["file"], _poses.parent)
         if path in sources or not isinstance(scan["points"], int) or scan["points"] <= 0:
             raise ValueError("Duplicate source or invalid point count in poses manifest")
         if not re.fullmatch(r"[0-9a-f]{64}", scan["sha256"]):
             raise ValueError("Missing source SHA-256 in poses manifest")
         sources.add(path)
         scans.append({**scan, "source_path": str(path), "source_sha256": scan["sha256"], "original_points": scan["points"]})
-    return {**manifest, "result_name": name, "scans": scans}, hashFile(_poses)
+    return {**manifest, "result_name": name, "scans": scans}
 
 
 def verifySources(_registration, _progress):

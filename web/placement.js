@@ -1,6 +1,7 @@
 (() =>
 {
     'use strict';
+    if(window.blkPlacement){showPlacementRecovery();return;}
     const $ = id => document.getElementById(id), canvas = $('scene'), overlay = $('overlay');
     const token = location.hash.slice(1) || sessionStorage.getItem('blk-session') || '';
     if (token) sessionStorage.setItem('blk-session', token);
@@ -10,8 +11,13 @@
     if (!gl) { $('error').textContent = 'WebGL is unavailable.'; return; }
     let items = [], selected = 1, reference = 0, loading = false, generation = 0, controller = null;
     let drag = null, frame = 0, extent = 10, locked = false;
+    let initialFitView = null;
     let interactionMode = 'view', heightCut = null;
-    let saveContext = null, saveTimer = null, saveQueue = Promise.resolve(), dirty = false;
+    const visualized = new Set();
+    let visibilityAnchor = null;
+    const poseFields = ['x','y','z','yaw','roll','pitch'];
+    let saveContext = null, saveTimer = null, saveQueue = Promise.resolve(), saveInFlight = null, dirty = false;
+    let browserDraft = null, browserCopySaved = false;
     const cache = new Map(), undo = [];
     const camera = {target: [0, 0, 0], distance: 20, azimuth: -Math.PI / 2, elevation: Math.PI / 2 - .001};
     const tanHalf = Math.tan(25 * Math.PI / 180);
@@ -27,8 +33,11 @@
     const fromRows = rows => rows[0].map((_,c) => rows.map(row => row[c])).flat();
     function poseMatrix(pose)
     {
-        const [x,y,z,yaw] = pose, c = Math.cos(yaw), s = Math.sin(yaw);
-        return [c,s,0,0,-s,c,0,0,0,0,1,0,x,y,z,1];
+        const [x,y,z,yaw,roll=0,pitch=0] = pose;
+        const cy=Math.cos(yaw),sy=Math.sin(yaw),cr=Math.cos(roll),sr=Math.sin(roll),cp=Math.cos(pitch),sp=Math.sin(pitch);
+        // Column-major Rz(yaw) * Ry(pitch) * Rx(roll), matching placementMatrix in Python.
+        return [cy*cp,sy*cp,-sp,0,cy*sp*sr-sy*cr,sy*sp*sr+cy*cr,cp*sr,0,
+            cy*sp*cr+sy*sr,sy*sp*cr-cy*sr,cp*cr,0,x,y,z,1];
     }
     const point = (m,p) => [0,1,2].map(i => m[i]*p[0]+m[4+i]*p[1]+m[8+i]*p[2]+m[12+i]);
     function basis()
@@ -68,15 +77,31 @@
         if(q[3]<=0)return null;
         return [(q[0]/q[3]+1)*canvas.clientWidth/2,(1-q[1]/q[3])*canvas.clientHeight/2];
     }
-    function visible(){return [...new Set([reference,selected])];}
+    function visible()
+    {
+        if(!items.length)return [];
+        return [...new Set([selected,...visualized])];
+    }
+    function syncVisibility()
+    {
+        [...$('visualizing-items').children].forEach((row,i)=>
+        {
+            const input=row.querySelector('input');
+            input.checked=i===selected||visualized.has(i);input.disabled=i===selected;
+            row.classList.toggle('selected',i===selected);
+            row.querySelector('.item-role').textContent=i===selected?'Current':i===reference?'Reference':'';
+        });
+    }
     function draw()
     {
         frame=0;
         const dpr=Math.min(devicePixelRatio||1,2),w=Math.round(canvas.clientWidth*dpr),h=Math.round(canvas.clientHeight*dpr);
         if(canvas.width!==w||canvas.height!==h){canvas.width=overlay.width=w;canvas.height=overlay.height=h;}
         gl.viewport(0,0,w,h);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.useProgram(program);gl.enableVertexAttribArray(attr);
-        const b=view();let shown=0;
-        for(const index of visible())
+        const b=view(),indices=visible();let shown=0;
+        const totalPoints=indices.reduce((n,i)=>n+(cache.get(items[i].id)?.points||0),0);
+        const stride=drag?Math.min(15,Math.max(1,Math.ceil(totalPoints/2000000))):1;
+        for(const index of indices)
         {
             const item=items[index], entry=item&&cache.get(item.id);
             if(!entry)continue;
@@ -85,15 +110,14 @@
                 gl.bindBuffer(gl.ARRAY_BUFFER,scan.buffer);gl.vertexAttribPointer(attr,4,gl.FLOAT,false,16,0);
                 const model=multiply(poseMatrix(item.pose),scan.base);
                 gl.uniformMatrix4fv(uniforms.mvp,false,multiply(b.mvp,model));
-                // Clip both clouds in their shared, edited coordinate frame, including chunk-local poses.
+                // Clip all visible clouds after their full placement and chunk-local transforms.
                 gl.uniform4f(uniforms.heightRow,model[2],model[6],model[10],model[14]);
                 gl.uniform1f(uniforms.clipZ,heightCut===null?0:heightCut);
                 gl.uniform1f(uniforms.clipEnabled,heightCut===null?0:1);
                 gl.uniform1f(uniforms.size,1.5*dpr);gl.uniform2f(uniforms.range,entry.low,entry.high);
                 // Use a strided GPU view while dragging so the subset still covers each complete scan.
-                const stride=drag?Math.min(15,Math.max(1,Math.ceil(entry.points/2000000))):1;
                 gl.vertexAttribPointer(attr,4,gl.FLOAT,false,16*stride,0);
-                const count=Math.min(Math.ceil(scan.loaded/stride),drag?Math.ceil(2000000*scan.count/entry.points):Infinity);gl.drawArrays(gl.POINTS,0,count);shown+=count;
+                const count=Math.ceil(scan.loaded/stride);gl.drawArrays(gl.POINTS,0,count);shown+=count;
             }
         }
         const ctx=overlay.getContext('2d');ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,canvas.clientWidth,canvas.clientHeight);
@@ -184,12 +208,19 @@
     }
     async function api(path,body)
     {
-        const response=await fetch('/api/'+path,{method:body===undefined?'GET':'POST',headers:{'X-Session-Token':token,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
-        const data=await response.json();if(!response.ok)throw Error(data.error||'Request failed');return data;
+        const abort=new AbortController(),timer=setTimeout(()=>abort.abort(),15000);
+        try
+        {
+            const response=await fetch('/api/'+path,{method:body===undefined?'GET':'POST',signal:abort.signal,headers:{'X-Session-Token':token,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
+            const data=await response.json();if(!response.ok)throw Error(data.error||'Request failed');return data;
+        }
+        catch(error){if(abort.signal.aborted)throw Error('Save server did not respond within 15 seconds. Retry with Save now.');throw error;}
+        finally{clearTimeout(timer);}
     }
     function dispose(entry){for(const scan of entry.scans)gl.deleteBuffer(scan.buffer);}
-    async function loadVisible(refit=false)
+    async function loadVisible()
     {
+        if(!items.length)return;
         const version=++generation;controller?.abort();controller=new AbortController();const signal=controller.signal;
         loading=true;document.body.dataset.loaded='false';$('error').textContent='';$('progress').hidden=false;
         const keep=new Set(visible().map(i=>items[i].id)),stride=Number($('density').value);
@@ -227,9 +258,14 @@
                 let total=0;for(let i=0;i<histogram.length;i++){total+=histogram[i];if(total<entry.points*.01)entry.low=i;if(total>=entry.points*.99){entry.high=i;break;}}
                 entry.complete=true;
             }
-            $('load').textContent=`${visible().reduce((n,i)=>n+(cache.get(items[i].id)?.points||0),0).toLocaleString()} points loaded at ${stride===1?'full density':'1/'+stride}. Display sampling does not change registration inputs.`;
+            $('load').textContent=`${visible().length} / ${items.length} items · ${visible().reduce((n,i)=>n+(cache.get(items[i].id)?.points||0),0).toLocaleString()} points at ${stride===1?'full density':'1/'+stride}`;
             updateHeightControls();
-            if(refit)fit();
+            if(initialFitView!==null)
+            {
+                const unchanged=initialFitView===JSON.stringify([camera,$('projection').value]);
+                initialFitView=null;
+                if(unchanged)fit();
+            }
         }
         catch(error){if(error.name!=='AbortError'&&version===generation)$('error').textContent=error.message;}
         finally{if(version===generation){loading=false;$('progress').hidden=true;requestDraw();}}
@@ -238,53 +274,116 @@
     {
         if(!items.length)return;
         const item=items[selected];$('moving').value=selected;$('reference').value=reference;
+        $('reference').disabled=locked;
         for(const option of $('reference').options)option.disabled=Number(option.value)===selected;
-        ['x','y','z','yaw'].forEach((id,i)=>{$(id).value=(item.pose[i]*(i===3?180/Math.PI:1)).toFixed(i===3?2:3);$(id).disabled=selected===0||locked;});
+        poseFields.forEach((id,i)=>{$(id).value=((item.pose[i]??0)*(i>=3?180/Math.PI:1)).toFixed(3);$(id).disabled=selected===0||locked;});
+        for(const axis of ['roll','pitch','yaw'])for(const sign of ['minus','plus'])$(axis+'-'+sign).disabled=selected===0||locked;
         $('use').checked=item.enabled;$('use').disabled=selected===0||locked;
         $('previous').disabled=selected===0;$('next').disabled=selected===items.length-1;
+        $('save-now').disabled=locked;$('recovery-copy').disabled=false;
         $('zero').disabled=selected===0||locked;$('undo').disabled=!undo.length||locked;
         $('pose-note').textContent=selected===0?'First item is the fixed coordinate anchor.':`${item.name}: drag to move, or enter numerical offsets. Yellow axes mark its scanner/chunk origin.`;
+        $('reference-note').textContent=item.comparisonReference===null?'No saved comparison in this selection.':'';
         updateHeightControls();
         [...$('items').children].forEach((button,i)=>{button.classList.toggle('selected',i===selected);button.textContent=(items[i].enabled?'[Placed] ':'')+items[i].name;});
+        syncVisibility();
         requestDraw();
     }
     function remember(){undo.push({index:selected,pose:items[selected].pose.slice(),enabled:items[selected].enabled});if(undo.length>100)undo.shift();}
-    function changed(){items[selected].enabled=true;backupChanged();sync();}
-    function choose(index,advance=false,inherit=true)
+    function changed(){items[selected].enabled=true;items[selected].comparisonReference=reference;backupChanged();sync();}
+    function choose(index,inherit=true,fallbackReference=reference)
     {
-        if(advance)reference=selected;
         selected=index;
-        if(reference===selected)reference=selected?selected-1:Math.min(1,items.length-1);
+        reference=items[selected].comparisonReference??fallbackReference;
+        if(reference===selected)reference=selected===0?1:0;
         if(inherit&&!items[selected].enabled&&selected!==0)items[selected].pose=items[reference].pose.slice();
-        sync();loadVisible(true);
+        sync();loadVisible();
     }
-    function initialize(input)
+    function initialize(input,references)
     {
         if(items.length||!Array.isArray(input)||input.length<2)return;
-        items=input.map(item=>({...item,enabled:item.pose!==null,pose:item.pose?item.pose.slice():[0,0,0,0]}));
+        if(!Array.isArray(references)||references.length!==input.length)
+        {
+            $('save-status').dataset.state='error';
+            $('save-status').textContent='This running app is outdated. Restart the updated app before editing. Export recovery copies from any existing unsaved editors first.';
+            return;
+        }
+        items=input.map((item,i)=>({...item,enabled:item.pose!==null,pose:item.pose?item.pose.slice():[0,0,0,0],
+            comparisonReference:Number.isInteger(references[i])&&references[i]>=0&&references[i]<input.length&&references[i]!==i?references[i]:null}));
         if (!items[0].enabled) { items[0].pose=[0,0,0,0];items[0].enabled=true; }
         for(const [i,item] of items.entries())
         {
             for(const id of ['moving','reference']){const option=document.createElement('option');option.value=i;option.textContent=item.name;$(id).append(option);}
             const button=document.createElement('button');button.textContent=item.name;button.onclick=()=>choose(i);$('items').append(button);
+            const row=document.createElement('label'),checkbox=document.createElement('input'),name=document.createElement('span'),role=document.createElement('span');
+            checkbox.type='checkbox';checkbox.id='visualize-'+i;checkbox.setAttribute('aria-label',item.name);
+            name.textContent=item.name;name.className='item-name';role.className='item-role';
+            checkbox.onclick=e=>
+            {
+                const anchor=visibilityAnchor??selected;
+                const first=e.shiftKey?Math.min(anchor,i):i,last=e.shiftKey?Math.max(anchor,i):i;
+                for(let index=first;index<=last;index++)
+                    if(checkbox.checked)visualized.add(index);else visualized.delete(index);
+                visibilityAnchor=i;
+                syncVisibility();loadVisible();
+            };
+            row.append(checkbox,name,role);$('visualizing-items').append(row);
         }
-        sync();loadVisible(true);
+        initialFitView=JSON.stringify([camera,$('projection').value]);
+        choose(selected,false);
+        try
+        {
+            const draft=JSON.parse(localStorage.getItem(draftKey())||'null');
+            if(draft&&JSON.stringify(draft.ids)===JSON.stringify(items.map(item=>item.id))&&
+                draft.values?.length===items.length&&draft.references?.length===items.length&&
+                draft.values.every(p=>p===null||(Array.isArray(p)&&[4,6].includes(p.length)&&p.every(v=>Number.isFinite(v)&&Math.abs(v)<=1e6)))&&
+                draft.references.every((r,i)=>r===null||(Number.isInteger(r)&&r>=0&&r<items.length&&r!==i)))
+            {
+                browserDraft=draft;$('restore-draft').hidden=false;
+                $('save-status').textContent='Unsaved browser copy found. Restore it or export it before editing.';
+            }
+        }
+        catch(_) { /* The recovery download remains available if browser storage is blocked. */ }
     }
-    $('moving').onchange=e=>choose(Number(e.target.value));$('reference').onchange=e=>{reference=Number(e.target.value);sync();loadVisible(true);};
-    $('previous').onclick=()=>choose(Math.max(0,selected-1));$('next').onclick=()=>choose(Math.min(items.length-1,selected+1),true);
-    $('use').onchange=()=>{remember();items[selected].enabled=$('use').checked;backupChanged();sync();};
-    for(const [i,id] of ['x','y','z','yaw'].entries())$(id).onchange=()=>
+    $('moving').onchange=e=>choose(Number(e.target.value));$('reference').onchange=e=>
     {
-        const value=Number($(id).value)*(i===3?Math.PI/180:1);
-        if(!Number.isFinite(value)||Math.abs(value)>1e6){$('error').textContent='Enter a finite placement value within supported bounds.';sync();return;}
-        remember();items[selected].pose[i]=value;changed();
+        reference=Number(e.target.value);items[selected].comparisonReference=reference;
+        backupChanged();sync();loadVisible();
     };
-    $('undo').onclick=()=>{const step=undo.pop();if(!step)return;items[step.index].pose=step.pose;items[step.index].enabled=step.enabled;choose(step.index,false,false);backupChanged();};
+    $('previous').onclick=()=>choose(Math.max(0,selected-1));
+    $('next').onclick=()=>
+    {
+        if(selected>=items.length-1)return;
+        visualized.clear();visualized.add(selected);visibilityAnchor=selected;
+        choose(selected+1,true,selected);
+    };
+    $('clear-visualizing').onclick=()=>
+    {
+        visualized.clear();visibilityAnchor=null;
+        syncVisibility();loadVisible();
+    };
+    $('use').onchange=()=>{remember();items[selected].enabled=$('use').checked;backupChanged();sync();};
+    function setPoseValue(index,value)
+    {
+        if(!items.length||selected===0||locked)return;
+        if(!Number.isFinite(value)||Math.abs(value)>1e6){$('error').textContent='Enter a finite placement value within supported bounds.';sync();return;}
+        remember();
+        if(index>=4&&items[selected].pose.length===4)items[selected].pose.push(0,0);
+        items[selected].pose[index]=value;changed();
+    }
+    for(const [i,id] of poseFields.entries())$(id).onchange=()=>setPoseValue(i,Number($(id).value)*(i>=3?Math.PI/180:1));
+    for(const axis of ['roll','pitch','yaw'])for(const [sign,direction] of [['minus',-1],['plus',1]])$(axis+'-'+sign).onclick=e=>
+    {
+        if(!items.length)return;
+        const index=poseFields.indexOf(axis),step=Number($('trim-step').value)*Math.PI/180*(e.shiftKey ? .1 : 1);
+        setPoseValue(index,(items[selected].pose[index]??0)+direction*step);
+    };
+    $('undo').onclick=()=>{const step=undo.pop();if(!step)return;items[step.index].pose=step.pose;items[step.index].enabled=step.enabled;choose(step.index,false);backupChanged();};
     $('zero').onclick=()=>{remember();items[selected].pose=[0,0,0,0];items[selected].enabled=false;backupChanged();sync();};
     $('top').onclick=()=>{camera.azimuth=-Math.PI/2;camera.elevation=Math.PI/2-.001;requestDraw();};
     $('oblique').onclick=()=>{camera.azimuth=-Math.PI/4;camera.elevation=Math.PI/5;requestDraw();};
     $('axes-visible').onchange=requestDraw;
-    $('fit').onclick=fit;$('projection').onchange=requestDraw;$('density').onchange=()=>loadVisible(false);
+    $('fit').onclick=fit;$('projection').onchange=requestDraw;$('density').onchange=()=>loadVisible();
     const units=()=>2*camera.distance*tanHalf/canvas.clientHeight;
     function xyAt(x,y,z)
     {
@@ -315,7 +414,11 @@
         else
         {
             const pose=items[selected].pose;
-            if(drag.mode==='yaw')pose[3]+=dx*.005*k;
+            if(['roll','pitch','yaw'].includes(drag.mode))
+            {
+                if(drag.mode!=='yaw'&&pose.length===4)pose.push(0,0);
+                pose[poseFields.indexOf(drag.mode)]+=dx*.005*k;
+            }
             else if(drag.mode==='z')pose[2]-=dy*units()*k;
             else
             {
@@ -339,38 +442,88 @@
     function backupChanged()
     {
         dirty = true;
+        preserveBrowserCopy();
         window.opener?.postMessage({type:'placement-saving', job}, location.origin);
+        $('save-status').dataset.state='saving';
         $('save-status').textContent = 'Saving placement changes...';
         clearTimeout(saveTimer);
-        if (saveContext) saveTimer = setTimeout(() => saveBackup().catch(error => $('error').textContent = error.message), 300);
+        saveTimer = setTimeout(() => saveBackup().catch(() => {}), 300);
+    }
+    function draftKey()
+    {
+        return 'blk-placement-draft:'+JSON.stringify({output:saveContext?.output_directory,
+            reference:saveContext?.reference_poses,job,ids:items.map(item=>item.id)});
+    }
+    function preserveBrowserCopy()
+    {
+        const draft={ids:items.map(item=>item.id),values:items.map(item=>item.enabled?item.pose.slice():null),
+            references:items.map(item=>item.comparisonReference),context:saveContext,updated_at:new Date().toISOString()};
+        try
+        {
+            const text=JSON.stringify(draft);localStorage.setItem(draftKey(),text);
+            browserCopySaved=localStorage.getItem(draftKey())===text;
+        }
+        catch(_){browserCopySaved=false;}
     }
     function saveBackup()
     {
         clearTimeout(saveTimer);
-        const values = items.map(item => item.enabled ? item.pose.slice() : null);
-        saveQueue = saveQueue.catch(() => {}).then(async () =>
+        if(saveInFlight)return saveInFlight;
+        $('save-status').dataset.state='saving';$('save-status').textContent='Saving placement changes...';
+        saveInFlight = (async () =>
         {
             if (!saveContext) throw Error('Placement save context is unavailable. Keep this editor open.');
-            if (job)
+            let result;
+            do
             {
-                const current = await api('registration/placement/' + encodeURIComponent(job));
-                if (current.busy || JSON.stringify(current.items.map(item => item.id)) !== JSON.stringify(saveContext.chunk_keys))
+                const values = items.map(item => item.enabled ? item.pose.slice() : null);
+                const references = items.map(item => item.comparisonReference);
+                if (job)
                 {
-                    locked = true; sync();
-                    throw Error('Registration is running or chunks changed. Keep this tab open to preserve unsaved edits; reopen Arrange chunks after registration.');
+                    const current = await api('registration/placement/' + encodeURIComponent(job));
+                    if (current.busy || JSON.stringify(current.items.map(item => item.id)) !== JSON.stringify(saveContext.chunk_keys))
+                    {
+                        locked = true; sync();
+                        throw Error('Registration is running or chunks changed. Export a recovery copy before reopening this editor.');
+                    }
+                }
+                result = await api('registration/placements/save', {...saveContext, initial_guesses:values, comparison_references:references});
+                if (!Array.isArray(result.comparison_references)||result.comparison_references.length!==items.length) throw Error('The running app cannot save comparison choices. Export a recovery copy before restarting the updated app.');
+                if(JSON.stringify(result.initial_guesses)!==JSON.stringify(values)||
+                    references.some((ref,i)=>ref!==null&&result.comparison_references[i]!==ref))
+                    throw Error('The server did not confirm all pose and reference values. Export a recovery copy and retry.');
+                if (JSON.stringify(values) === JSON.stringify(items.map(item => item.enabled ? item.pose : null)) &&
+                    JSON.stringify(references) === JSON.stringify(items.map(item => item.comparisonReference)))
+                {
+                    dirty = false;
+                    try{localStorage.removeItem(draftKey());}catch(_){}
+                    browserDraft=null;$('restore-draft').hidden=true;
+                    $('save-status').dataset.state='saved';
+                    $('save-status').textContent = `Saved on disk: ${result.path}`;
+                    window.opener?.postMessage({type:'placement-autosaved', job}, location.origin);
                 }
             }
-            const result = await api('registration/placements/save', {...saveContext, initial_guesses:values});
-            if (JSON.stringify(values) === JSON.stringify(items.map(item => item.enabled ? item.pose : null)))
-            {
-                dirty = false;
-                $('save-status').textContent = `Saved on disk: ${result.path}`;
-                window.opener?.postMessage({type:'placement-autosaved', job}, location.origin);
-            }
+            while(dirty);
             return result;
-        });
-        return saveQueue;
+        })().catch(error=>
+        {
+            dirty=true;$('save-status').dataset.state='error';
+            $('save-status').textContent=`Not saved to disk: ${error.message} ${browserCopySaved?'Browser recovery copy retained.':'Use Recovery copy to preserve your edits.'}`;
+            throw error;
+        }).finally(()=>{saveInFlight=null;});
+        saveQueue=saveInFlight;
+        return saveInFlight;
     }
+    $('save-now').onclick=()=>saveBackup().catch(()=>{});
+    $('recovery-copy').onclick=()=>showPlacementRecovery();
+    $('restore-draft').onclick=()=>
+    {
+        if(!browserDraft||locked)return;
+        undo.length=0;
+        items.forEach((item,i)=>{item.enabled=browserDraft.values[i]!==null;item.pose=browserDraft.values[i]?.slice()||[0,0,0,0];item.comparisonReference=browserDraft.references[i];});
+        browserDraft=null;$('restore-draft').hidden=true;
+        choose(selected,false);backupChanged();
+    };
     window.addEventListener('beforeunload', event =>
     {
         if (dirty) { event.preventDefault(); event.returnValue = ''; }
@@ -393,12 +546,12 @@
             }
             if (e.data.type === 'placement-started') $('save-status').textContent = `Registration started. Follow the worker log in the ${saveContext?.reference_poses ? 'Additional Register' : 'Register'} tab. Reopen the editor for the new result.`;
         }
-        if(e.data?.type==='placement-input'){saveContext=e.data.context||null;initialize(e.data.items);}
+        if(e.data?.type==='placement-input'){saveContext=e.data.context||null;initialize(e.data.items,e.data.comparison_references);}
         if(e.data?.type==='placement-error')$('error').textContent=e.data.error;
     });
-    canvas.addEventListener('webglcontextlost',e=>{e.preventDefault();controller?.abort();$('error').textContent='Graphics context lost. Reload the placement editor.';});
+    canvas.addEventListener('webglcontextlost',e=>{e.preventDefault();controller?.abort();$('error').textContent=dirty?'Graphics context lost. Export a Recovery copy before reloading.':'Graphics context lost. Reload the placement editor.';});
     new ResizeObserver(requestDraw).observe(canvas);
-    window.blkPlacement={items:()=>items,poseMatrix,multiply,fromRows,choose,fit,camera};
+    window.blkPlacement={items:()=>items,context:()=>saveContext,visible,poseMatrix,multiply,fromRows,choose,fit,camera};
     if(job)api('registration/placement/'+encodeURIComponent(job)).then(async result=>
     {
         if(result.busy)throw Error('Wait for the current registration to finish before arranging chunks.');
@@ -406,8 +559,65 @@
         const saved=await api('registration/placements/load',saveContext);
         if (saved.initial_guesses.length !== result.items.length) throw Error('Chunks changed. Reopen Arrange chunks.');
         saved.initial_guesses.forEach((pose,i)=>{result.items[i].pose=pose || null;});
-        initialize(result.items);
+        initialize(result.items,saved.comparison_references);
     }).catch(error=>$('error').textContent=error.message);
     else if(window.opener)window.opener.postMessage({type:'placement-ready'},location.origin);
     else $('error').textContent='Open this editor from the Register tab.';
+// Capture an already-open editor without reloading it or replacing saved placements.
+function capturePlacementRecovery()
+{
+    const items=window.blkPlacement?.items();
+    if(!Array.isArray(items)||!items.length)throw Error('Open this from the placement editor tab.');
+    const query=new URLSearchParams(location.search),job=query.get('job');
+    let context=window.blkPlacement.context?.()||(job?{resume_id:job,chunk_keys:items.map(item=>item.id)}:null);
+    if(!context&&window.opener&&!window.opener.closed)
+    {
+        for(const name of ['placement_context','additional_context'])
+        {
+            try
+            {
+                const candidate=window.opener.eval(`typeof ${name} === 'undefined' ? null : ${name}`);
+                const ids=candidate?.cloud_ids;
+                const actual=items.filter(item=>item.id!=='reference').map(item=>item.id);
+                if(Array.isArray(ids)&&JSON.stringify(ids)===JSON.stringify(actual))
+                {context=JSON.parse(JSON.stringify(candidate));break;}
+            }
+            catch(_) { /* The complete item snapshot remains recoverable without its opener. */ }
+        }
+    }
+    const snapshot=JSON.parse(JSON.stringify({schema_version:1,kind:'placement_recovery',
+        captured_at:new Date().toISOString(),context,items,
+        selected:document.getElementById('moving')?.value,
+        reference:document.getElementById('reference')?.value,
+        save_status:document.getElementById('save-status')?.textContent,
+        error:document.getElementById('error')?.textContent}));
+    const text=JSON.stringify(snapshot,null,2);
+    const name='placement-recovery-'+snapshot.captured_at.replace(/[:.]/g,'-')+'.json';
+    let stored=false;
+    try
+    {
+        localStorage.setItem('blk-placement-recovery:'+name,text);
+        stored=localStorage.getItem('blk-placement-recovery:'+name)===text;
+    }
+    catch(_) { /* Download also works when browser storage is unavailable. */ }
+    const link=document.createElement('a'),url=URL.createObjectURL(new Blob([text],{type:'application/json'}));
+    link.href=url;link.download=name;link.click();setTimeout(()=>URL.revokeObjectURL(url),60000);
+    const result={file:name,items:items.length,browser_copy:stored,output_file_changed:false};
+    console.info('Placement recovery snapshot',result);
+    return result;
+}
+
+function showPlacementRecovery()
+{
+const recovery=capturePlacementRecovery();
+const notice=document.createElement('div');
+notice.id='placement-recovery-notice';
+notice.style.cssText='padding:12px 22px;background:#164f40;color:white;position:relative;z-index:10';
+notice.textContent=`Recovery copy requested: ${recovery.file}. Check Downloads. Keep this editor open. `;
+const button=document.createElement('button');button.textContent='Save another recovery copy';
+button.onclick=()=>{const copy=capturePlacementRecovery();notice.firstChild.textContent=`Recovery copy requested: ${copy.file}. Check Downloads. Keep this editor open. `;};
+notice.append(button);document.body.prepend(notice);
+
+}
+
 })();

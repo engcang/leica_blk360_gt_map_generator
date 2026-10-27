@@ -2,6 +2,7 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -83,6 +84,7 @@ def main():
                 editor.locator('#x').fill('1.25'); editor.locator('#x').press('Tab')
                 editor.wait_for_function('document.querySelector("#save-status").textContent.startsWith("Saved on disk:")')
                 editor.locator('#next').click(); editor.locator('#x').fill('2.5'); editor.locator('#x').press('Tab')
+                editor.locator('#pitch-plus').click()
                 editor.wait_for_function('document.querySelector("#save-status").textContent.startsWith("Saved on disk:")')
                 page.wait_for_function('additional_poses[2]?.[0] === 2.5')
                 editor.close()
@@ -107,7 +109,7 @@ def main():
                 page.evaluate('startAdditional()')
                 page.wait_for_function('registration_state.jobs.length === 1 && !registration_state.busy')
                 config=json.loads(next((project/'registration_records').glob('*/config.json')).read_text())
-                assert config['additional_initial_guesses']==[[0,0,0,0],[3.75,0,0,0]]
+                assert config['additional_initial_guesses']==[[0,0,0,0],[3.75,0,0,0,0,math.radians(.5)]]
                 assert [Path(p).resolve() for p in config['paths']]==[paths[0],paths[1],paths[3]]
                 assert config['reference_sha256']==hashlib.sha256(before).hexdigest()
                 assert 'initial_guesses' not in config

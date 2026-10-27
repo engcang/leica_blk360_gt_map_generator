@@ -11,8 +11,9 @@ namespace blk_core
     {
         if (_pose.is_null())
             return;
-        if (!_pose.is_array() || _pose.size() != 4)
-            throw std::runtime_error("Placement needs X, Y, Z and yaw");
+        // Keep legacy XYZ/yaw poses; full poses append roll and pitch (radians).
+        if (!_pose.is_array() || (_pose.size() != 4 && _pose.size() != 6))
+            throw std::runtime_error("Placement needs X, Y, Z, yaw, with optional roll and pitch");
         for (const auto &value : _pose)
         {
             if (!value.is_number() || !std::isfinite(value.get<double>()) || std::abs(value.get<double>()) > 1e6)

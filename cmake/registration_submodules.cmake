@@ -9,7 +9,7 @@ endif()
 find_package(Git REQUIRED)
 file(READ "${BLK_PROJECT_ROOT}/mapping/native/dependencies.json" submodule_manifest)
 set(registration_submodules)
-foreach(name kiss nano)
+foreach(name kiss nano nanoflann)
     string(JSON path GET "${submodule_manifest}" ${name} submodule)
     string(JSON commit GET "${submodule_manifest}" ${name} commit)
     execute_process(COMMAND "${GIT_EXECUTABLE}" ls-files --stage -- "${path}"
@@ -38,7 +38,7 @@ if(submodule_state MATCHES "(^|\n)[-+]")
     endif()
 endif()
 
-foreach(name kiss nano)
+foreach(name kiss nano nanoflann)
     string(JSON path GET "${submodule_manifest}" ${name} submodule)
     string(JSON commit GET "${submodule_manifest}" ${name} commit)
     execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${BLK_PROJECT_ROOT}/${path}" rev-parse HEAD

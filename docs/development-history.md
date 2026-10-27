@@ -1,5 +1,61 @@
 # Development history
 
+- **2026-10-27 baseline-first campaign and recovery v12:** stopped the three old recovery workers; retained their checkpoints and the three completed initial 1 cm baselines. Started the five remaining initial passes, three at a time; recovery waits for all eight and a validated source-hash release.
+  - Found repeated submap fitting followed by iteration-limited individual fits: RKM had 577 submap fits totaling about 5.4 hours of solver time, while 81/83 final anchor fits hit the individual iteration limit.
+  - Recovery now completes all reverse gaps before submaps. Supported iteration-limited individual fits can continue from their last pose for up to 180 iterations per gate, retaining the same convergence, geometry, ambiguity, and temporal checks.
+  - Reuse exact scan partitions, submap windows, and identical fits across stages. New `recovery_v12/` can read matching old solver requests without modifying old results; candidate validation runs again.
+  - RKM reverse-only check: 68/70 missing poses recovered in 494.7 s with two query workers alongside the initial-fitting campaign; 2,670 baseline poses unchanged. All 68 additions converged with six observable directions and passed temporal screening; median/max held-out plane RMS 3.56/6.15 cm. Previous saved recovery had added seven poses. No whole-campaign speed ratio or independent accuracy improvement established.
+  - Twelve sampled iteration-limit continuations across RKM, Flyzone, and indoor all converged; remaining weak geometry still requires context. Full regression: 72 passed; five staged tests passed after adding the legacy-baseline hash guard. Records: `build/trajectory-correction/recovery-v12-validation/`.
+- **2026-10-27 Next reference correction:** the first persistence fix incorrectly kept the current comparison when the destination had none, leaving navigation on the first scan. Corrected precedence: restore the destination's saved comparison (including index zero); otherwise use the scan/chunk just left. Existing poses remain unchanged.
+  - Browser regression covers explicit first-scan and nonconsecutive references, reload, consecutive legacy-file navigation, and unchanged pose values.
+  - Deployed the tested JavaScript to build/install intensity and RGB assets; both running default app servers serve the corrected script. No app restart or user JSON edits; reopen the placement editor after saving to load the fix.
+- **2026-10-27 full placement rotation and surrounding scans:** shared PLY/chunk/Additional Register editor now provides roll/pitch/yaw numeric controls, rotation drag tools and ± trim buttons (0.01°–1°, Shift for finer steps).
+  - Backward-compatible pose encoding: `[x,y,z,yaw]` remains valid; roll/pitch edits append two radians. Browser, API validation and Python registration agree on `Rz(yaw) × Ry(pitch) × Rx(roll)` and preserve chunk-local transforms.
+  - Previous/next/all toggles include items in input order, including all member scans of each chunk. Selected item and comparison remain visible; display density is retained, loaded clouds reused and hidden GPU buffers released.
+  - Verified mixed legacy/full-pose save/reload, reorder/relocation, registration config handoff, fixed-map preservation, rotation math, drag/undo and actual rendered point counts. PLY/chunk browser checks passed in intensity and RGB editions; Additional Register, existing placement/reference regressions, six geometry tests and both C++ test targets passed.
+  - Rebuilt both app editions; live services/assets and user placement files remain untouched during active editing. Relaunch through `start.sh` after saving and quitting the app to install matching frontend/backend files.
+- **2026-10-26 placement comparison references:** the original editor did not save its comparison dropdown and `Next` always selected the preceding scan. Poses already used a shared frame; the dropdown was never a transform parent.
+  - Persist each scan's comparison choice by relative path (chunk key for chunks), including Additional Register; restore across restart, reorder, subsets and relocation. `Next` no longer overwrites it with the previous scan.
+  - Original Morrison backups also contained no comparison fields. Preserved all 83 current entries and the user's subsequent pose edits; copied a read-only source snapshot into `build/placement-fix/morrison-reference-audit/` without modifying the live file.
+  - API persistence and real-browser reference/navigation/reload tests verify unchanged pose values. Source and app binary updated; active editors/services kept running on their existing assets until the user finishes editing and relaunches through `start.sh`.
+- **2026-10-26 C++ campaign switch and Morrison correction:** switched the three active full-v11 workers and five queued jobs to the pinned native correspondence library; resumed completed journals and retained all eight earlier comparison results.
+  - Viewer entries marked completed belonged to four earlier comparison runs; full-v11 had no completed sequence at the switch. Recovery/backend transition records preserve the prior provenance; other resume guards remain strict.
+  - Verified all existing forward/recovery journal prefixes after restart. The backend-switch integration test forbids refitting completed checkpoints; 36 trajectory tests passed.
+  - Morrison's old network mount was still accessible, so the first conversion retained relative paths to the remote copies. Corrected all 83 entries to adjacent local PLY filenames after matching full SHA-256 hashes; preserved pose values and subsequent user edits.
+  - Corrected the migration utility to prefer matching local environment copies even when old mounted copies still exist; added regression coverage for absolute and already-converted remote paths.
+- **2026-10-26 portable registration JSON:** initial/additional placements and chunk records now use paths relative to their containing JSON; pose manifests already used relative scan paths.
+  - Register reads placements only from the selected output folder. Relative directories distinguish scans with identical basenames; legacy absolute documents remain readable.
+  - Backed up all 31 environment output JSON files, then converted 415 path entries in 12 files under `blk360_maps`. Kept 22 already-missing historical scan references within their original environment.
+  - Verified relocation, unchanged placement values, nested chunk paths, restart persistence, and Additional Register reference loading.
+- **2026-10-26 native correspondence optimization:** C++/OpenMP nanoflann tile searches, correspondence certificates, and point/normal gathering; reusable Open3D buffers; unchanged 1 cm/Tukey solver and acceptance rules.
+  - Indoor, Flyzone and RKM: 21 paired comparisons, including failed regions, warm index reuse and +20 cm/+3° initial perturbations. Poses, complete validation results and iteration counts matched exactly.
+  - Two query threads alongside the active campaign: total fitting/validation 97.07 → 42.32 s (2.29×); warm cases 19.77 → 9.08 s (2.18×). Detailed measurements: `build/trajectory-redesign/native-comparison/summary.json`.
+  - Native library packaged for new app jobs. Active full-v11 workers and queued source-tree jobs retain the existing implementation; no campaign restart or result replacement.
+  - Boundary/tie/parallelism/low-memory checks: 15 passed. Trajectory suite: 64 passed with each backend. These probes do not establish whole-campaign timing or independent GT accuracy.
+- **2026-10-26 fresh eight-sequence campaign started:** explicit user request; new results under `build/trajectory-correction/full-v11/`, existing comparison outputs preserved.
+  - Refit every pose at 1 cm; reuse only the saved initial coordinate transform. Three concurrent workers, nine query threads each on the available 28-CPU host.
+  - Private cache locks/native sessions; share original fine-map tiles and atomically written normals. Queued jobs start automatically as workers finish.
+  - New-output validation accepts a valid scheduler heartbeat without permitting unrelated files; 18 input tests passed.
+- **2026-10-26 trajectory redesign implemented:** forward 1 cm fitting → reverse on failures → submap/KISS on unresolved intervals; propagate from independently verified new anchors.
+  - Replaced the 65% overlap veto with distributed map support and independent neighboring fits. Weak directions require a fitted submap, actual Tukey-weighted training information, and withheld geometry that each constrain all six directions.
+  - Retained exact original-map correspondences with persistent tiled search indices, parallel bounded queries, and provably reusable nearest neighbors. CPU/RAM budgets remain machine-dependent; no fitting-point reduction.
+  - Controlled 12-scan warm comparison using eight query workers: 46.44 s → 20.17 s total (2.30×); Indoor 2.87×, RKM 2.10×, Flyzone approximately unchanged. All 24 unperturbed cold/warm poses and iteration counts matched exactly.
+  - The requested 20× speedup is not achieved. These probes exclude full-campaign initialization, recovery search, and export; they are not a full-run time estimate.
+  - Validation v2 / trajectory v3 / recovery v11 isolate new calculations from frozen results. New forward journals preserve completed fits before the first quality checkpoint.
+  - Validation uses TartanStar's decoded end-of-scan timestamp; metadata selection times cannot substitute for the deskew anchor. Rejected checkpoint poses cannot be restored through pose-list membership.
+  - Six of nine sampled rejected real poses pass the new independent-neighbor and frozen-trajectory motion checks; the three inconsistent Flyzone candidates remain unresolved. Regression suite: 116 passed, one Windows-only test skipped.
+  - Preserve the eight comparison results; no full campaign restarted. Detailed real-data probes and verification: `build/trajectory-redesign/`.
+- **2026-10-26 campaign stopped for redesign:** stopped the trajectory scheduler and its workers at the user's request; no automatic restart or replacement campaign.
+  - Keep the latest eight accepted-pose checkpoints, quality records, configurations, viewer assets, and hashes in `build/trajectory-correction/comparison-baseline.json`; see `all-v8/results.md` for counts.
+  - Two generated maps predate the latest trajectory checkpoint and remain explicitly marked saved snapshots. Unfinished fit candidates are not promoted to accepted poses.
+  - Retire old campaign scripts, intermediate baselines, regenerable caches, and obsolete native source downloads. Preserve original scans/maps, required SLAM inputs, current source/environment, and separate Register/chunk results.
+  - Runtime target: 5% of the previous cost, not yet demonstrated. Recent individual fits averaged 8.10 s of target preparation and 2.26 s of fitting; removing preparation alone cannot meet that target.
+- **2026-10-26 baseline correction:** the initial implementation retained 10 cm localized poses and applied 1 cm fitting only to recovery, contrary to the requested coarse-to-fine trajectory design.
+  - Forward localization now requires the shared 1 cm Open3D/Tukey fit and held-out validation. Imported accepted poses are refitted from their saved initial guesses.
+  - Trajectory v2 / recovery v9 separate these results from previous journals; existing outputs remain readable.
+  - Fresh forward failures enter reverse recovery directly; submap search is reserved for unresolved scans, with bidirectional propagation from new anchors.
+  - Added separate partitioning and validation timings. The earlier 41-hour extrapolation mixed costly target preparation with ICP and sampled failed regions; it was not a measured full-sequence runtime.
+  - Three sequential real scans with a previously accepted first pose and SLAM relative-motion predictions: 173–187k source points, 10.6–11.2M target points; target preparation 10.85–13.55 s, fitting 2.42–5.21 s, validation 0.10–0.15 s using four query workers alongside the active campaign. All three passed; this is a bottleneck measurement, not a full-run estimate.
 - **2026-10-26 PALoc comparison retired:** tested default 10 cm scans/map and high-resolution 1 cm scans / 3 cm map; checked results were worse than our registration, especially in Flyzone. Stopped unfinished runs at the user's request.
   - Flyzone common-scan median plane distance: ours 0.99 cm; PALoc default 2.05 cm; PALoc high 1.84 cm. This measured TLS-map agreement, not independent trajectory ground truth.
   - Flyzone scan 2195: TLS coverage within 20 cm was 99.7% for ours and 0.3% for PALoc high. The continuous PALoc high trajectory included 1,945/4,087 frames without a direct map factor.
@@ -18,7 +74,7 @@
 - **Recovery expansion:** added reverse tracking, 2 s / 6 s submaps, retained-end initial guesses, and regional/full-map KISS at 30 / 50 / 8 cm.
   - Early recovery reused inconsistent baseline poses; RKM contained up to 6.59 m disagreement over 0.1–0.3 s despite correct scan timestamps.
   - Recovery v8 uses original 1 cm geometry, chronological motion checks, independent validation scans, competing seeds, and retries of conflicting tracks.
-  - Older v3–v7 experiment implementations and maps were superseded; required baseline pose files remain inputs to v8.
+  - Older v3–v7 experiment implementations, maps, and intermediate baseline pose files were retired; the latest v8 results remain the comparison baseline.
 - **Performance corrections:** exact bounded nearest-neighbor queries, cached original-map normals, and persistent exact ICP request reuse.
   - 2026-10-26: added conservative cell-cover exclusion bounds and queued parallel query batches; retained the original 1 cm correspondences and all acceptance thresholds. TLS tile eviction now retains recently used tiles.
   - Real-input comparisons: difficult 15-iteration submap probe 135.47 s → 45.67 s; converged submap including preparation/validation 55.36 s → 42.56 s; individual scan 15.87 s → 15.51 s. Checked poses and decisions matched exactly; 50 targeted tests passed.
@@ -36,3 +92,7 @@
   - Apps now monitor all eight current jobs through per-output `job_status.json`; retained maps remain viewable during recovery, and stale updates are shown as interrupted.
   - Full links retain their session fragment for copying between browsers; authentication failures are distinguished from connection failures.
   - Verified generation/restart, status transitions, prevention of duplicate external workers, and browser rendering.
+- **Placement save recovery (2026-10-27):** updated editor assets were served by an older running app that rejected six-value poses; a failed save incorrectly left the status at `Saving placement changes...`.
+  - Recovered Morrison's open browser state: 83 poses, including 20 unsaved pose changes, two poses with roll/pitch, and 29 comparison choices; backed up the previous JSON before replacement.
+  - Reject incompatible app responses before editing; show persistent save failures, add manual retry/recovery download, retain browser drafts, and bound API waits to 15 seconds.
+  - Validate the running executable and API response after updates; replacing an executable on disk does not update its existing process.

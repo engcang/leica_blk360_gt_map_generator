@@ -424,7 +424,7 @@ async function openBrowser(mode)
     browser_mode = mode;
     const ply_mode = ['ply', 'ply-folder', 'registration-ply', 'registration-folder', 'additional-ply', 'additional-folder'].includes(mode);
     const output_mode = ['trajectory-folder', 'output', 'map-output', 'additional-output'].includes(mode);
-    element('browser-title').textContent = mode === 'trajectory-file' ? 'Select input file' : mode === 'trajectory-folder' ? 'Select folder' : mode === 'additional-reference' ? 'Open reference relative_poses.json' : ['registration-result', 'additional-result'].includes(mode) ? 'Open relative_poses.json or partial_chunks.json' : ply_mode ? 'Open existing PLY files' : output_mode ? 'Choose output folder' : mode === 'folder' ? 'Select a scan folder' : 'Select BLK files';
+    element('browser-title').textContent = mode === 'trajectory-file' ? 'Select input file' : mode === 'trajectory-folder' ? 'Select folder' : mode === 'additional-reference' ? 'Open relative_poses.json or partial_chunks.json' : ['registration-result', 'additional-result'].includes(mode) ? 'Open relative_poses.json or partial_chunks.json' : ply_mode ? 'Open existing PLY files' : output_mode ? 'Choose output folder' : mode === 'folder' ? 'Select a scan folder' : 'Select BLK files';
     element('use-files').hidden = !['trajectory-file', 'files', 'ply', 'registration-ply', 'registration-result', 'additional-ply', 'additional-reference', 'additional-result'].includes(mode);
     element('select-all').parentElement.hidden = !['files', 'ply', 'registration-ply', 'additional-ply'].includes(mode);
     element('select-all-label').textContent = ply_mode ? 'Select all PLY files' : 'Select all BLK files';

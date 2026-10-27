@@ -14,6 +14,7 @@ import numpy as np
 from automatic_connections import componentPoses
 from json_io import saveJson
 from chunk_placements import refreshChunkPlacements
+from portable_paths import rebaseChunks
 from register_scans import readPly, writePly
 from ply_io import colourValues
 from share_map import createShareViewer
@@ -47,7 +48,7 @@ def createChunkReview(records, edges, output, report, progress, pose_method=None
         metadata = destination / "chunk.json"
         progress(f"Preparing chunk review {number}/{len(groups)} ({len(rows)} scans)")
         if metadata.is_file() and (destination / "view.html").is_file() and (destination / "stations.png").is_file():
-            chunk = json.loads(metadata.read_text(encoding="utf-8"))
+            chunk = rebaseChunks([json.loads(metadata.read_text(encoding="utf-8"))], destination, output)[0]
         else:
             limit = min(250000, max(1, 2000000 // len(rows)))
             points, intensities, plotted = [], [], []
@@ -102,7 +103,7 @@ def createChunkReview(records, edges, output, report, progress, pose_method=None
             axes[1].set(xlabel="Chunk X (m)", ylabel="Chunk Z (m)", title="Side view / not a shared building frame")
             figure.savefig(destination / "stations.png", dpi=140)
             plt.close(figure)
-            saveJson(metadata, chunk)
+            saveJson(metadata, rebaseChunks([chunk], output, destination)[0])
         # Prioritize the canvas when opened inside the chunk review.
         view_path = destination / "view.html"
         document = view_path.read_text(encoding="utf-8")
@@ -119,6 +120,7 @@ def createChunkReview(records, edges, output, report, progress, pose_method=None
             writeText(view_path, document.replace("</body>", layout + "</body>"))
         if pose_method is not None:
             chunk["pose_method"] = pose_method
+        chunk = rebaseChunks([chunk], output, output)[0]
         chunks.append({**chunk, "number": number, "viewer": f"html_source/chunks/{key}/view.html",
                        "image": f"html_source/chunks/{key}/stations.png"})
     manifest = {"schema_version": 1, "status": "disconnected_partial_result", "generated_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),

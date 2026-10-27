@@ -40,6 +40,12 @@ def connectedGroups(_edges, _count):
 
 
 def runRegistration(_config, _report):
+    if _config.get("chunk_source"):
+        from chunk_result import finalizeChunk
+        result = finalizeChunk(_config, _report, lambda stage: saveJson(
+            _report / "progress.json", {"status": "running", "stage": stage}))
+        saveJson(_report / "progress.json", result)
+        return
     import register_scans as registration
 
     paths = [pathlib.Path(value).resolve(strict=True) for value in _config["paths"]]

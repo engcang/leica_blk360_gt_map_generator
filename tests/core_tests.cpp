@@ -253,6 +253,15 @@ int main()
                 blk_core::writeText(path, ply);
             blk_core::validatePlacement(nullptr);
             blk_core::validatePlacement(nlohmann::json::array({1, 2, 3, 0.5}));
+            blk_core::validatePlacement(nlohmann::json::array({1, 2, 3, 0.5, -0.02, 0.03}));
+            expectError([]
+            {
+                blk_core::validatePlacement(nlohmann::json::array({1, 2, 3, 0.5, 0.1}));
+            });
+            expectError([]
+            {
+                blk_core::validatePlacement(nlohmann::json::array({1, 2, 3, 0.5, "roll", 0.1}));
+            });
             expectError([]
             {
                 blk_core::validatePlacement(nlohmann::json::array({1, 2}));

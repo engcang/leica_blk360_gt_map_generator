@@ -1,4 +1,4 @@
-"""Validated user XYZ/yaw placements used as local registration priors, never final poses."""
+"""Validated user rigid placements used as local registration priors, never final poses."""
 import hashlib
 import json
 import numpy as np
@@ -10,11 +10,17 @@ from register_scans import registerPair
 
 def placementMatrix(value):
     pose = np.asarray(value, dtype=float)
-    if pose.shape != (4,) or not np.isfinite(pose).all() or np.any(np.abs(pose) > 1e6):
-        raise ValueError("Initial placement must contain finite X, Y, Z metres and yaw radians")
-    x, y, z, yaw = pose
-    c, s = np.cos(yaw), np.sin(yaw)
-    return np.array([[c, -s, 0, x], [s, c, 0, y], [0, 0, 1, z], [0, 0, 0, 1]])
+    if pose.shape not in ((4,), (6,)) or not np.isfinite(pose).all() or np.any(np.abs(pose) > 1e6):
+        raise ValueError("Initial placement needs finite X, Y, Z, yaw, with optional roll and pitch")
+    x, y, z, yaw = pose[:4]
+    roll, pitch = pose[4:] if len(pose) == 6 else (0., 0.)
+    cy, sy = np.cos(yaw), np.sin(yaw)
+    cr, sr = np.cos(roll), np.sin(roll)
+    cp, sp = np.cos(pitch), np.sin(pitch)
+    # Column vectors: Rz(yaw) @ Ry(pitch) @ Rx(roll), about the item origin.
+    return np.array([[cy*cp, cy*sp*sr-sy*cr, cy*sp*cr+sy*sr, x],
+                     [sy*cp, sy*sp*sr+cy*cr, sy*sp*cr-cy*sr, y],
+                     [-sp, cp*sr, cp*cr, z], [0, 0, 0, 1]])
 
 
 def collectPriors(config, records):

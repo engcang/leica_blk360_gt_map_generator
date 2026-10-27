@@ -22,7 +22,7 @@ function additionalControls()
     element('additional-setup').hidden = registration_state?.runtime.status === 'completed';
     element('additional-message').textContent = !capable ? 'Start the updated app to use Additional Register.' : additional_error;
     element('additional-placement-status').textContent = additional_pending ? 'Saving placements...' : additional_restoring ? 'Checking saved placements...' :
-        additional_poses.slice(1).some(Boolean) ? `${additional_poses.slice(1).filter(Boolean).length} / ${additional_ids.length} new scan placements saved` : '';
+        additional_poses.slice(additional_reference?.items?.length || 1).some(Boolean) ? `${additional_poses.slice(additional_reference?.items?.length || 1).filter(Boolean).length} / ${additional_ids.length} new scan placements saved` : '';
     element('additional-message').hidden = !element('additional-message').textContent;
     element('additional-placement-status').hidden = !element('additional-placement-status').textContent;
     // Freeze selection while starting, including during the editor's final save handshake.
@@ -36,7 +36,9 @@ async function loadAdditionalReference(path)
     const result = await api('registration/reference', {reference_poses:path});
     additional_reference = result;
     additional_poses = [];
-    element('additional-reference-status').textContent = `${result.scans.length} fixed scans - ${result.path}`;
+    element('additional-reference-status').textContent = result.partial
+        ? `${result.items.length} chunks · ${result.scans.length} scans · internal chunk poses preserved — ${result.path}`
+        : `${result.scans.length} fixed scans - ${result.path}`;
     await refresh();
     await loadAdditionalPlacements();
 }
@@ -108,7 +110,7 @@ async function openAdditionalEditor()
     if (additional_editor && !additional_editor.closed) { additional_editor.focus(); return; }
     if (!await loadAdditionalPlacements()) throw Error('Select a reference, new scans and a separate output folder first.');
     additional_context = additionalDraft();
-    additional_editor_items = [structuredClone(additional_reference.item), ...additional_ids.map((id,index) =>
+    additional_editor_items = [...structuredClone(additional_reference.items || [additional_reference.item]), ...additional_ids.map((id,index) =>
     {
         const cloud = project.point_clouds.find(item => item.id === id);
         return {id,name:`${index+1}. ${cloud.name}`,scans:[{name:cloud.name,points:cloud.valid_points,base:identity_pose,url:`/api/placement-sample/${id}`}]};
@@ -127,7 +129,7 @@ window.addEventListener('message', async event =>
         {
             const saved = await api('registration/placements/load',additional_context);
             const items = additional_editor_items.map((item,index) => ({...item,pose:saved.initial_guesses[index]}));
-            event.source.postMessage({type:'placement-input',items,context:additional_context},location.origin);
+            event.source.postMessage({type:'placement-input',items,context:additional_context,comparison_references:saved.comparison_references},location.origin);
         }
         catch (error) { event.source.postMessage({type:'placement-error',error:error.message},location.origin); }
     }
@@ -182,7 +184,7 @@ action('additional-setup',() => { selectTab('register'); element('registration-s
 action('additional-clear',async () =>
 {
     additional_ids = []; additional_reference = null; additional_poses = [];
-    element('additional-reference-status').textContent = 'Select an existing result. Its original PLY files must be available.';
+    element('additional-reference-status').textContent = 'Select relative_poses.json or partial_chunks.json.';
     renderAdditionalScans(); await loadAdditionalPlacements();
 });
 element('additional-output').addEventListener('input',() => loadAdditionalPlacements().catch(error => notice(error.message,true)));

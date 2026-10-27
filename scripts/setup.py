@@ -27,6 +27,7 @@ def sourceFingerprint(_root):
                 "web/*", "tests/*_tests.cpp", "scripts/setup*", "scripts/windows_tools.json",
                 "third_party/kiss-matcher/cpp/kiss_matcher/core/**/*",
                 "third_party/nano_gicp/include/**/*", "third_party/nano_gicp/src/*",
+                "third_party/nanoflann/include/*.hpp", "third_party/nanoflann/COPYING",
                 "LICENSE", "README.md", "docs/*.md"]
     result = hashlib.sha256()
     result.update(str(_root).encode())

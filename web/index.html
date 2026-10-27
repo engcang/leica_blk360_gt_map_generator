@@ -61,10 +61,10 @@
         </div>
         <div id="panel-additional" role="tabpanel" aria-labelledby="tab-additional" hidden>
         <section class="queue-panel" aria-label="Additional registration">
-            <div class="queue-toolbar"><h2>Extend a reference map</h2><button id="additional-reference" class="primary">Open relative_poses.json</button></div>
-            <p id="additional-reference-status" class="hint">Select an existing result. Its original PLY files must be available.</p>
+            <div class="queue-toolbar"><h2>Extend a map or connect chunks</h2><button id="additional-reference" class="primary">Open map or chunks</button></div>
+            <p id="additional-reference-status" class="hint">Select relative_poses.json or partial_chunks.json.</p>
             <div class="registration-actions"><button id="additional-pick" class="secondary">Add PLY files</button><button id="additional-folder" class="secondary">Add folder</button></div>
-            <div id="additional-scans"><div class="empty">Select new scans to attach to the fixed reference map.</div></div>
+            <div id="additional-scans"><div class="empty">Select new scans to extend the map or connect the existing chunks.</div></div>
             <div class="registration-actions"><button id="additional-arrange" class="secondary" disabled>Arrange reference and scans (optional)</button><span id="additional-placement-status" class="hint"></span></div>
             <div class="registration-settings"><label>Map name<input id="additional-name" value="extended_map" maxlength="100"></label><button id="additional-clear" class="quiet">Clear selection</button></div>
             <label class="map-output-label" for="additional-output">NEW RESULT OUTPUT FOLDER</label><div class="map-output"><input id="additional-output" placeholder="Choose a separate folder; the original result stays unchanged"><button id="additional-browse" class="secondary">Browse</button></div>

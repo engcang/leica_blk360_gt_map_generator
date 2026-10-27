@@ -70,7 +70,8 @@ class SetupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             for relative in (".gitmodules", "third_party/kiss-matcher/cpp/kiss_matcher/core/kiss_matcher/KISSMatcher.cpp",
-                             "third_party/nano_gicp/src/nano_gicp.cc", "third_party/nano_gicp/include/nano_gicp/nano_gicp.hpp"):
+                             "third_party/nano_gicp/src/nano_gicp.cc", "third_party/nano_gicp/include/nano_gicp/nano_gicp.hpp",
+                             "third_party/nanoflann/include/nanoflann.hpp", "third_party/nanoflann/COPYING"):
                 before = sourceFingerprint(root)
                 source = root / relative
                 source.parent.mkdir(parents=True, exist_ok=True)

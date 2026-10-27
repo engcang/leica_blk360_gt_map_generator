@@ -195,7 +195,7 @@ async function refreshTrajectory()
     const latest = trajectory_state.jobs.at(-1);
     const monitored = trajectory_state.jobs.filter(job => job.managed_externally);
     element('trajectory-message').textContent = monitored.length
-        ? ['running','queued','auditing','completed','failed','interrupted'].map(status => [status,monitored.filter(job => job.status === status).length])
+        ? ['running','queued','auditing','completed','failed','cancelled','interrupted'].map(status => [status,monitored.filter(job => job.status === status).length])
             .filter(([,count]) => count).map(([status,count]) => `${count} ${status}`).join(' · ')
         : latest?.stage || '';
     const log = element('trajectory-log');

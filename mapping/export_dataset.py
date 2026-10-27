@@ -8,17 +8,19 @@ import tempfile
 import zipfile
 
 from result_layout import posesPath
+from portable_paths import relativePath, resolvePath
 
 
 def poseManifest(_registration, _paths):
     return {"schema_version": 2, "units": "metres", "source_files_included": False,
-            "source_path_base": "JSON directory; relocate missing originals by filename and SHA-256",
+            "source_path_base": "JSON directory",
             "coordinate_frame": _registration["coordinate_frame"],
             "transform_convention": "column vector: p_map = T_map_scan @ [x, y, z, 1]; rigid SE(3), no scale",
             "independently_validated": False,
             "pipeline_id": _registration.get("pipeline_id", "legacy"),
             "registration_mode": _registration.get("registration_mode", "individual_scans"),
             "internal_scan_poses_fixed": _registration.get("internal_scan_poses_fixed", False),
+            "final_refinement_applied": _registration.get("final_refinement_applied"),
             "reference": _registration.get("reference"),
             "native_backend": _registration.get("native_backend"),
             "registration_voxel_m": _registration["registration_voxel_m"],
@@ -29,14 +31,7 @@ def poseManifest(_registration, _paths):
 
 
 def sourcePaths(_registration, _directory):
-    paths = []
-    for record in _registration["scans"]:
-        try:
-            path = os.path.relpath(record["source_path"], _directory)
-        except ValueError:
-            path = record["source_path"]
-        paths.append(pathlib.Path(path).as_posix())
-    return paths
+    return [relativePath(record["source_path"], _directory) for record in _registration["scans"]]
 
 
 def saveLocalPoses(_registration, _report):
@@ -66,7 +61,8 @@ def mapManifest(_registration, _metadata, _map_path):
 
 def saveMapPoses(_registration, _metadata, _map_path, _target=None):
     target = _target or posesPath(_map_path)
-    manifest = mapManifest(_registration, _metadata, _map_path)
+    manifest = poseManifest(_registration, sourcePaths(_registration, target.parent))
+    manifest["map"] = {**_metadata, "file": relativePath(_map_path, target.parent)}
     content = json.dumps(manifest, indent=2, allow_nan=False) + "\n"
     #Codex: Publish a complete JSON atomically without replacing an existing manifest.
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=target.parent, prefix=target.name + ".", suffix=".pending", delete=False) as stream:
@@ -91,11 +87,8 @@ def exportDataset(_records, _destination, _progress):
         map_path = (_records.parent / metadata["file"]).resolve(strict=True)
         manifest_name = _records.name
         for scan in poses["scans"]:
-            source = (_records.parent / scan["file"]).resolve()
-            try:
-                scan["file"] = pathlib.Path(os.path.relpath(source, _destination.parent)).as_posix()
-            except ValueError:
-                scan["file"] = source.as_posix()
+            source = resolvePath(scan["file"], _records.parent)
+            scan["file"] = relativePath(source, _destination.parent)
     else:
         #Codex: Old completed jobs can still export from their original working records.
         registration = json.loads((_records / "registration.json").read_text(encoding="utf-8"))

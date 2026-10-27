@@ -197,6 +197,44 @@ function renderRegistrationJob(job)
         register.className = 'primary';
         register.disabled = !!registration_state.busy || registration_starting || chunk_pending.has(job.id) || registration_state.runtime.status !== 'completed';
         actions.append(chunks, arrange, register, option);
+        if (registration_state.chunk_finalization && job.chunks?.length)
+        {
+            const selection = document.createElement('select');
+            selection.setAttribute('aria-label', 'Chunk to finalize');
+            for (const chunk of job.chunks)
+            {
+                const item = document.createElement('option');
+                item.value = chunk.key; item.textContent = `Chunk ${chunk.number} · ${chunk.scan_count} scans`;
+                selection.append(item);
+            }
+            selection.value = job.chunks.reduce((a,b) => a.scan_count >= b.scan_count ? a : b).key;
+            const finish = button('Finalize selected chunk', async () =>
+            {
+                if (registration_starting || registration_state.busy) return;
+                registration_starting = true; finish.disabled = true;
+                try
+                {
+                    const result = await api('registration/finalize-chunk', {job_id:job.id, chunk_key:selection.value});
+                    registration_visible_jobs.add(result.id);
+                    if (typeof additional_visible_jobs !== 'undefined' && job.kind === 'additional') additional_visible_jobs.add(result.id);
+                    latest_worker_log = 'Finalizing selected chunk...';
+                }
+                finally { registration_starting = false; await refreshRegistration(); }
+            });
+            finish.disabled = selection.disabled = !!registration_state.busy || registration_starting || registration_state.runtime.status !== 'completed';
+            const group = document.createElement('div'); group.className = 'registration-actions';
+            group.append(selection, finish); actions.append(group);
+        }
+        if (registration_state.chunk_reference)
+        {
+            const extend = button('Add scans to chunks', async () =>
+            {
+                await loadAdditionalReference(job.chunks_manifest_path);
+                selectTab('additional');
+            });
+            extend.disabled = !!registration_state.busy || additional_starting;
+            actions.append(extend);
+        }
     }
     else if (job.status === 'needs_connections')
     {
@@ -463,7 +501,7 @@ window.addEventListener('message', async event =>
                 scans: [{name: cloud.name, points: cloud.valid_points, base: identity_pose,
                     url: `/api/placement-sample/${id}`} ]};
         });
-        event.source.postMessage({type: 'placement-input', items, context}, location.origin);
+        event.source.postMessage({type: 'placement-input', items, context, comparison_references:saved.comparison_references}, location.origin);
         }
         catch (error) { event.source.postMessage({type:'placement-error', error:error.message}, location.origin); }
     }

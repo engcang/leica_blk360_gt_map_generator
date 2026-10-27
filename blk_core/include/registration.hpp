@@ -5,6 +5,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <regex>
 #include <sstream>
@@ -101,16 +102,25 @@ namespace blk_core
         nlohmann::json reference(const nlohmann::json &_body)
         {
             const auto reference = readReference(_body);
-            auto items = nlohmann::json::array();
+            auto scans = nlohmann::json::array();
             for (const auto &scan : reference.at("scans"))
             {
                 const auto imported = project_.addPointClouds({scan.at("path").get<std::string>()});
                 if (!imported.at("errors").empty() || imported.at("clouds").size() != 1)
                     throw std::runtime_error("Cannot read reference PLY: " + scan.at("path").get<std::string>());
                 const auto &cloud = imported.at("clouds")[0];
-                items.push_back({{"name", cloud.at("name")}, {"points", cloud.at("valid_points")}, {"base", scan.at("transform_map_from_scan")}, {"url", "/api/placement-sample/" + cloud.at("id").get<std::string>()}});
+                scans.push_back({{"name", cloud.at("name")}, {"points", cloud.at("valid_points")}, {"base", scan.at("transform_map_from_scan")}, {"url", "/api/placement-sample/" + cloud.at("id").get<std::string>()}});
             }
-            return {{"path", reference.at("path")}, {"sha256", reference.at("sha256")}, {"name", reference.at("name")}, {"scans", reference.at("scans")}, {"item", {{"id", "reference"}, {"name", "Fixed reference map"}, {"pose", {0, 0, 0, 0}}, {"scans", items}}}};
+            auto items = nlohmann::json::array();
+            for (const auto &group : reference.at("groups"))
+            {
+                auto members = nlohmann::json::array();
+                for (const auto &index : group.at("indices")) members.push_back(scans.at(index.get<std::size_t>()));
+                items.push_back({{"id", group.at("key")}, {"name", group.at("name")},
+                    {"pose", items.empty() ? nlohmann::json::array({0, 0, 0, 0}) : nlohmann::json()}, {"scans", members}});
+            }
+            return {{"path", reference.at("path")}, {"sha256", reference.at("sha256")}, {"name", reference.at("name")},
+                {"scans", reference.at("scans")}, {"items", items}, {"item", items[0]}, {"partial", reference.at("partial")}};
         }
 
         nlohmann::json placements(const nlohmann::json &_body, bool _save)
@@ -122,7 +132,7 @@ namespace blk_core
             {
                 const auto &job = findJob(state_, _body.at("resume_id").get<std::string>());
                 const auto directory = std::filesystem::u8path(job.at("output_path").get<std::string>()).parent_path();
-                const auto chunks = readJson(directory / "partial_chunks.json").at("chunks");
+                const auto chunks = relativeChunks(readJson(directory / "partial_chunks.json").at("chunks"), directory);
                 if (_save)
                     requireIdleLocked();
                 auto keys = nlohmann::json::array();
@@ -136,6 +146,7 @@ namespace blk_core
                 if (std::filesystem::exists(file))
                 {
                     document = readJson(file);
+                    document["chunks"] = relativeChunks(document.at("chunks"), directory);
                     if (document.at("chunks") != chunks)
                         throw std::runtime_error("Saved chunk placements refer to different chunks. Preserve the saved JSON before starting a new arrangement.");
                 }
@@ -150,13 +161,14 @@ namespace blk_core
                     document["poses"][key] = pose;
                     values.push_back(pose);
                 }
+                const auto references = placementReferences(document, _body, keys, _save);
                 if (_save)
                 {
                     saveJson(file, document);
                     if (readJson(file) != document)
                         throw std::runtime_error("Chunk placement save verification failed");
                 }
-                return {{"path", file.u8string()}, {"initial_guesses", values}, {"chunk_keys", keys}};
+                return {{"path", file.u8string()}, {"initial_guesses", values}, {"chunk_keys", keys}, {"comparison_references", references}};
             }
             const auto directory_text = _body.at("output_directory").get<std::string>();
             if (directory_text.empty())
@@ -169,15 +181,41 @@ namespace blk_core
                 throw std::runtime_error("Select at least two scans");
             if (_save && (!_body.at("initial_guesses").is_array() || _body.at("initial_guesses").size() != ids.size()))
                 throw std::runtime_error("Placement count does not match the selected scans");
+            auto paths = nlohmann::json::array();
+            for (const auto &id : ids)
+                paths.push_back(project_.pointCloud(id.get<std::string>()).at("path"));
+            auto keys = nlohmann::json::array();
+            for (const auto &path : paths)
+                keys.push_back(relativePath(std::filesystem::u8path(path.get<std::string>()), directory));
+            const auto references = placementReferences(document, _body, keys, _save);
+            if (!_save)
+                return {{"path", file.u8string()}, {"initial_guesses", savedScanPlacements(paths, directory).first}, {"comparison_references", references}};
             auto values = nlohmann::json::array();
             for (std::size_t i = 0; i < ids.size(); ++i)
             {
                 const auto cloud = project_.pointCloud(ids[i].get<std::string>());
-                const auto key = std::filesystem::weakly_canonical(std::filesystem::u8path(cloud.at("path").get<std::string>())).u8string();
+                const auto key = relativePath(std::filesystem::u8path(cloud.at("path").get<std::string>()), directory);
                 if (_save)
                 {
                     const auto &pose = _body.at("initial_guesses")[i];
                     validatePlacement(pose);
+                    // Replace an unambiguous imported path instead of accumulating
+                    // aliases that would make the next computer's import ambiguous.
+                    const auto name = placementFilename(key);
+                    std::vector<std::string> aliases;
+                    for (const auto &[saved_key, saved_pose] : document["poses"].items())
+                        if (placementFilename(saved_key) == name) aliases.push_back(saved_key);
+                    const auto selected_count = std::count_if(paths.begin(), paths.end(), [&](const auto &path) {
+                        return placementFilename(path.template get<std::string>()) == name;
+                    });
+                    if (aliases.size() == 1 && selected_count == 1 && aliases.front() != key)
+                    {
+                        const auto &alias = aliases.front();
+                        const bool legacy = std::filesystem::u8path(alias).is_absolute() || alias.find(':') == 1;
+                        if (savedPath(alias, directory) == savedPath(key, directory) ||
+                            (legacy && !std::filesystem::exists(savedPath(alias, directory))))
+                            document["poses"].erase(alias);
+                    }
                     document["poses"][key] = pose;
                 }
                 auto pose = document["poses"].contains(key) ? document["poses"][key] : nlohmann::json();
@@ -187,11 +225,12 @@ namespace blk_core
             if (_save)
             {
                 std::filesystem::create_directories(directory);
+                document["poses"] = relativePoseKeys(document["poses"], directory, paths);
                 saveJson(file, document);
                 if (readJson(file) != document)
                     throw std::runtime_error("Placement save verification failed");
             }
-            return {{"path", file.u8string()}, {"initial_guesses", values}};
+            return {{"path", file.u8string()}, {"initial_guesses", values}, {"comparison_references", references}};
         }
 
         nlohmann::json snapshot()
@@ -202,6 +241,8 @@ namespace blk_core
             result["log_job_id"] = active_id_;
             result["individual_scan_refinement_option"] = true;
             result["additional_registration"] = true;
+            result["chunk_reference"] = true;
+            result["chunk_finalization"] = true;
             for (auto &entry : result["jobs"])
             {
                 if (!entry.contains("poses_path"))
@@ -210,6 +251,18 @@ namespace blk_core
                 }
                 const auto directory = std::filesystem::u8path(entry.at("poses_path").get<std::string>()).parent_path();
                 entry["chunks_available"] = std::filesystem::is_regular_file(directory / "chunks_review.html");
+                if (entry["chunks_available"].get<bool>())
+                {
+                    try
+                    {
+                        entry["chunks"] = nlohmann::json::array();
+                        const auto manifest = readJson(directory / "partial_chunks.json");
+                        entry["chunks_manifest_path"] = (directory / "partial_chunks.json").u8string();
+                        for (const auto &chunk : manifest.at("chunks"))
+                            entry["chunks"].push_back({{"key", chunk.at("key")}, {"number", chunk.at("number")}, {"scan_count", chunk.at("scans").size()}});
+                    }
+                    catch (const std::exception &) { entry.erase("chunks"); }
+                }
                 const auto products_file = directory / "html_source" / "products.json";
                 if (std::filesystem::is_regular_file(products_file))
                 {
@@ -406,6 +459,44 @@ namespace blk_core
             return target;
         }
 
+        std::string finalizeChunk(const nlohmann::json &_body)
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            requireIdleLocked();
+            if (state_["runtime"].value("status", "") != "completed")
+                throw std::runtime_error("Check the registration runtime first");
+            const auto &original = findJob(state_, _body.at("job_id").get<std::string>());
+            const auto source = std::filesystem::u8path(original.at("output_path").get<std::string>()).parent_path() / "partial_chunks.json";
+            const auto reference = readReference({{"reference_poses", source.u8string()}});
+            const auto manifest = readJson(source);
+            const auto key = _body.at("chunk_key").get<std::string>();
+            const auto found = std::find_if(manifest.at("chunks").begin(), manifest.at("chunks").end(), [&](const auto &chunk) { return chunk.at("key") == key; });
+            if (found == manifest.at("chunks").end()) throw std::runtime_error("Chunks changed; select the chunk again");
+            const auto directory = source.parent_path() / ("final_chunk_" + std::to_string(found->at("number").get<int>()));
+            if (std::filesystem::exists(directory)) throw std::runtime_error("This chunk output folder already exists. Open its result or move the folder before retrying.");
+            const auto id = newId();
+            const auto report = root_ / "registration_records" / id;
+            const auto name = original.at("name").get<std::string>().substr(0, 80) + "_chunk_" + std::to_string(found->at("number").get<int>());
+            auto paths = nlohmann::json::array(), scans = nlohmann::json::array();
+            for (const auto &scan : found->at("scans"))
+            {
+                const auto path = std::filesystem::canonical(savedPath(scan.at("source_path").get<std::string>(), source.parent_path()));
+                paths.push_back(path.u8string()); scans.push_back({{"path", path.u8string()}, {"name", scan.at("name")}});
+            }
+            nlohmann::json config = {{"name", name}, {"paths", paths}, {"voxel_m", .01}, {"chunk_source", source.u8string()},
+                {"chunk_key", key}, {"chunk_source_sha256", reference.at("sha256")}, {"output_path", (directory / (name + "_1cm.ply")).u8string()},
+                {"poses_path", (directory / "relative_poses.json").u8string()}, {"review_directory", directory.u8string()}};
+            std::filesystem::create_directories(report);
+            if (!std::filesystem::create_directory(directory)) throw std::runtime_error("Chunk output folder is already in use");
+            saveJson(report / "config.json", config);
+            state_["jobs"].push_back({{"id", id}, {"name", name}, {"scans", scans}, {"voxel_m", .01}, {"status", "running"},
+                {"stage", "Finalizing selected chunk; preserving scan poses"}, {"output_path", config.at("output_path")},
+                {"poses_path", config.at("poses_path")}, {"review_path", (directory / "result_review_and_manage.html").u8string()},
+                {"report_directory", report.u8string()}, {"source_job_id", _body.at("job_id")}, {"initial_placement_count", 0}});
+            launchLocked(id, report, {state_.at("python").get<std::string>(), "-u", (scripts_ / "studio_worker.py").u8string(), "--run", (report / "config.json").u8string(), "--report", report.u8string()});
+            return id;
+        }
+
         void start(const nlohmann::json &_body)
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -533,6 +624,7 @@ namespace blk_core
                     config["reference_poses"] = reference.at("path");
                     config["reference_sha256"] = reference.at("sha256");
                     config["additional_initial_guesses"] = _body.at("initial_guesses");
+                    config["reference_item_count"] = reference.at("groups").size();
                     state_["jobs"].back()["kind"] = "additional";
                     state_["jobs"].back()["new_scan_count"] = _body.at("cloud_ids").size();
                 }
@@ -587,7 +679,7 @@ namespace blk_core
             {
                 int count = 0;
                 const auto &guesses = config.at("additional_initial_guesses");
-                for (std::size_t i = 1; i < guesses.size(); ++i)
+                for (std::size_t i = config.value("reference_item_count", std::size_t(1)); i < guesses.size(); ++i)
                     if (!guesses[i].is_null())
                         ++count;
                 job["initial_placement_count"] = count;
@@ -655,7 +747,28 @@ namespace blk_core
         nlohmann::json readReference(const nlohmann::json &_body)
         {
             const auto path = std::filesystem::canonical(std::filesystem::u8path(_body.at("reference_poses").get<std::string>()));
-            const auto manifest = readJson(path);
+            auto manifest = readJson(path);
+            const bool partial = manifest.value("status", "") == "disconnected_partial_result";
+            auto groups = nlohmann::json::array();
+            if (partial)
+            {
+                auto normalized = nlohmann::json::array();
+                std::set<std::string> keys;
+                for (const auto &chunk : manifest.at("chunks"))
+                {
+                    const auto key = chunk.at("key").get<std::string>();
+                    if (!keys.insert(key).second || chunk.at("scans").empty()) throw std::runtime_error("Invalid reference chunks");
+                    auto indices = nlohmann::json::array();
+                    for (const auto &scan : chunk.at("scans"))
+                    {
+                        indices.push_back(normalized.size());
+                        normalized.push_back({{"file", scan.at("source_path")}, {"points", scan.at("original_points")},
+                            {"sha256", scan.at("source_sha256")}, {"transform_map_from_scan", scan.at("transform_chunk_from_scan")}});
+                    }
+                    groups.push_back({{"key", "@chunk:" + key}, {"name", "Chunk " + std::to_string(chunk.at("number").get<int>())}, {"indices", indices}});
+                }
+                manifest["scans"] = normalized; manifest["units"] = "metres";
+            }
             if (manifest.value("units", "") != "metres" || !manifest.at("scans").is_array() || manifest.at("scans").empty())
                 throw std::runtime_error("Select a BLK Studio relative_poses.json with original PLY files available");
             std::atomic<bool> cancelled(false);
@@ -665,7 +778,7 @@ namespace blk_core
             auto scans = nlohmann::json::array();
             for (const auto &scan : manifest.at("scans"))
             {
-                const auto source = std::filesystem::canonical(path.parent_path() / std::filesystem::u8path(scan.at("file").get<std::string>()));
+                const auto source = std::filesystem::canonical(savedPath(scan.at("file").get<std::string>(), path.parent_path()));
                 for (const auto &previous : scans)
                     if (std::filesystem::equivalent(source, std::filesystem::u8path(previous.at("path").get<std::string>())))
                         throw std::runtime_error("Duplicate reference PLY source");
@@ -704,7 +817,13 @@ namespace blk_core
                     throw std::runtime_error("Reference PLY metadata does not match the saved result");
                 scans.push_back({{"path", source.u8string()}, {"name", source.filename().u8string()}, {"transform_map_from_scan", matrix}});
             }
-            return {{"path", path.u8string()}, {"sha256", hash}, {"name", manifest.value("result_name", "reference_map")}, {"scans", scans}};
+            if (!partial)
+            {
+                auto indices = nlohmann::json::array();
+                for (std::size_t i = 0; i < scans.size(); ++i) indices.push_back(i);
+                groups.push_back({{"key", "@reference"}, {"name", "Fixed reference map"}, {"indices", indices}});
+            }
+            return {{"path", path.u8string()}, {"sha256", hash}, {"name", manifest.value("result_name", "reference_map")}, {"scans", scans}, {"groups", groups}, {"partial", partial}};
         }
 
         nlohmann::json additionalPlacements(const nlohmann::json &_body, bool _save)
@@ -726,13 +845,27 @@ namespace blk_core
             if (!document.at("references").contains(key))
                 document["references"][key] = {{"poses", nlohmann::json::object()}};
             auto &entry = document["references"][key];
-            entry["reference_poses"] = reference.at("path");
+            entry["reference_poses"] = relativePath(std::filesystem::u8path(reference.at("path").get<std::string>()), directory);
             const auto &ids = _body.at("cloud_ids");
             if (!ids.is_array() || ids.empty())
                 throw std::runtime_error("Select at least one new PLY scan");
             auto values = nlohmann::json::array({nlohmann::json::array({0, 0, 0, 0})});
-            if (_save && (_body.at("initial_guesses").size() != ids.size() + 1 || _body.at("initial_guesses")[0] != values[0]))
+            const auto reference_count = reference.at("groups").size();
+            auto keys = nlohmann::json::array({reference.at("groups")[0].at("key")});
+            if (_save && (_body.at("initial_guesses").size() != ids.size() + reference_count || _body.at("initial_guesses")[0] != values[0]))
                 throw std::runtime_error("Reference is fixed; placement selection changed");
+            for (std::size_t i = 1; i < reference_count; ++i)
+            {
+                const auto chunk_key = reference.at("groups")[i].at("key").get<std::string>();
+                keys.push_back(chunk_key);
+                if (_save)
+                {
+                    validatePlacement(_body.at("initial_guesses")[i]);
+                    entry["chunk_poses"][chunk_key] = _body.at("initial_guesses")[i];
+                }
+                auto pose = entry.value("chunk_poses", nlohmann::json::object()).value(chunk_key, nlohmann::json());
+                validatePlacement(pose); values.push_back(pose);
+            }
             for (std::size_t i = 0; i < ids.size(); ++i)
             {
                 const auto cloud = project_.pointCloud(ids[i].get<std::string>());
@@ -740,25 +873,70 @@ namespace blk_core
                 for (const auto &scan : reference.at("scans"))
                     if (std::filesystem::equivalent(path, std::filesystem::u8path(scan.at("path").get<std::string>())))
                         throw std::runtime_error("A selected new scan already belongs to the reference map");
-                const auto source = path.u8string();
+                const auto source = relativePath(path, directory);
+                keys.push_back(source);
                 if (_save)
                 {
-                    const auto &pose = _body.at("initial_guesses")[i + 1];
+                    const auto &pose = _body.at("initial_guesses")[i + reference_count];
                     validatePlacement(pose);
+                    entry["poses"].erase(path.u8string());
                     entry["poses"][source] = pose;
                 }
-                auto pose = entry["poses"].value(source, nlohmann::json());
+                auto pose = savedPoses(nlohmann::json::array({path.u8string()}), entry["poses"], directory).first[0];
                 validatePlacement(pose);
                 values.push_back(pose);
             }
+            const auto references = placementReferences(entry, _body, keys, _save);
             if (_save)
             {
                 std::filesystem::create_directories(directory);
+                entry["poses"] = relativePoseKeys(entry["poses"], directory);
                 saveJson(file, document);
                 if (readJson(file) != document)
                     throw std::runtime_error("Additional placement save verification failed");
             }
-            return {{"path", file.u8string()}, {"initial_guesses", values}};
+            return {{"path", file.u8string()}, {"initial_guesses", values}, {"comparison_references", references}};
+        }
+
+        // Comparison choices are editor context, never a parent transform.
+        // Store identities rather than row indices so reordering/relocation is safe.
+        static nlohmann::json placementReferences(nlohmann::json &document, const nlohmann::json &body,
+                                                  const nlohmann::json &keys, bool save)
+        {
+            auto references = document.value("comparison_references", nlohmann::json::object());
+            if (!references.is_object())
+                throw std::runtime_error("Invalid saved placement comparison references");
+            for (const auto &[key, value] : references.items())
+                if (!value.is_string())
+                    throw std::runtime_error("Invalid saved placement comparison reference");
+            if (save && body.contains("comparison_references"))
+            {
+                const auto &input = body.at("comparison_references");
+                if (!input.is_array() || input.size() != keys.size())
+                    throw std::runtime_error("Placement comparison selection changed");
+                for (std::size_t i = 0; i < keys.size(); ++i)
+                {
+                    // Null means unrecorded/unavailable in this selection. Keep any
+                    // saved reference to a scan outside the current subset.
+                    if (input[i].is_null()) continue;
+                    if (!input[i].is_number_integer() || input[i].get<long long>() < 0 ||
+                        input[i].get<unsigned long long>() >= keys.size() || input[i] == i)
+                        throw std::runtime_error("Choose another selected item as the comparison reference");
+                    references[keys[i].get<std::string>()] = keys[input[i].get<std::size_t>()];
+                }
+                document["comparison_references"] = references;
+            }
+            auto result = nlohmann::json::array();
+            for (std::size_t i = 0; i < keys.size(); ++i)
+            {
+                nlohmann::json index;
+                const auto found = references.find(keys[i].get<std::string>());
+                if (found != references.end())
+                    for (std::size_t j = 0; j < keys.size(); ++j)
+                        if (i != j && *found == keys[j]) { index = j; break; }
+                result.push_back(index);
+            }
+            return result;
         }
 
         static nlohmann::json placementDocument(const std::filesystem::path &_file)
@@ -773,16 +951,122 @@ namespace blk_core
 
         static void verifySavedPlacements(const nlohmann::json &_body, const nlohmann::json &_paths, const std::filesystem::path &_directory)
         {
-            const auto doc = placementDocument(_directory / "initial_placements.json");
+            const auto saved = savedScanPlacements(_paths, _directory);
             const auto guesses = _body.value("initial_guesses", nlohmann::json::array());
             for (std::size_t i = 0; i < _paths.size(); ++i)
             {
-                const auto key = std::filesystem::weakly_canonical(std::filesystem::u8path(_paths[i].get<std::string>())).u8string();
-                if (doc["poses"].contains(key) &&
-                    ((i >= guesses.size() && !doc["poses"][key].is_null()) ||
-                     (i < guesses.size() && guesses[i] != doc["poses"][key])))
+                if (saved.second[i] &&
+                    ((i >= guesses.size() && !saved.first[i].is_null()) ||
+                     (i < guesses.size() && guesses[i] != saved.first[i])))
                     throw std::runtime_error("Saved placements differ from this selection. Reselect the PLYs and their output folder to restore saved poses, then retry. No job was started.");
             }
+        }
+
+        static std::string placementFilename(std::string path)
+        {
+            std::replace(path.begin(), path.end(), '\\', '/');
+            return path.substr(path.find_last_of('/') + 1);
+        }
+
+        static std::filesystem::path savedPath(std::string value, const std::filesystem::path &directory)
+        {
+            std::replace(value.begin(), value.end(), '\\', '/');
+            return std::filesystem::weakly_canonical(directory / std::filesystem::u8path(value));
+        }
+
+        static std::string relativePath(const std::filesystem::path &path, const std::filesystem::path &directory)
+        {
+            const auto relative = std::filesystem::weakly_canonical(path).lexically_relative(std::filesystem::weakly_canonical(directory));
+            if (relative.empty() || relative.is_absolute())
+                throw std::runtime_error("Keep the output and source files on the same drive for relative paths");
+            return relative.generic_u8string();
+        }
+
+        static nlohmann::json relativePoseKeys(const nlohmann::json &poses, const std::filesystem::path &directory,
+                                             const nlohmann::json &selected = nlohmann::json::array())
+        {
+            auto result = nlohmann::json::object();
+            for (const auto &[key, pose] : poses.items())
+            {
+                auto path = savedPath(key, directory);
+                if (!std::filesystem::exists(path) && (std::filesystem::u8path(key).is_absolute() || key.find(':') == 1))
+                {
+                    std::set<std::filesystem::path> candidates;
+                    const auto name = std::filesystem::u8path(placementFilename(key));
+                    if (std::filesystem::is_regular_file(directory / name)) candidates.insert(std::filesystem::canonical(directory / name));
+                    for (const auto &value : selected)
+                    {
+                        const auto local = std::filesystem::u8path(value.get<std::string>()).parent_path() / name;
+                        if (std::filesystem::is_regular_file(local)) candidates.insert(std::filesystem::canonical(local));
+                    }
+                    if (candidates.size() == 1) path = *candidates.begin();
+                }
+                if (key.find(':') == 1 && !std::filesystem::exists(path))
+                    throw std::runtime_error("Cannot relocate saved scan: " + key);
+                const auto relative = relativePath(path, directory);
+                if (result.contains(relative) && result[relative] != pose)
+                    throw std::runtime_error("Conflicting saved placements for " + relative);
+                result[relative] = pose;
+            }
+            return result;
+        }
+
+        static nlohmann::json relativeChunks(nlohmann::json chunks, const std::filesystem::path &directory)
+        {
+            for (auto &chunk : chunks)
+                if (chunk.contains("scans"))
+                    for (auto &scan : chunk["scans"])
+                        if (scan.contains("source_path"))
+                            scan["source_path"] = relativePath(savedPath(scan["source_path"].get<std::string>(), directory), directory);
+            return chunks;
+        }
+
+        static std::pair<nlohmann::json, std::vector<bool>> savedScanPlacements(
+            const nlohmann::json &paths, const std::filesystem::path &directory)
+        {
+            return savedPoses(paths, placementDocument(directory / "initial_placements.json").at("poses"), directory);
+        }
+
+        static std::pair<nlohmann::json, std::vector<bool>> savedPoses(
+            const nlohmann::json &paths, const nlohmann::json &poses, const std::filesystem::path &directory)
+        {
+            std::map<std::string, std::size_t> selected_names;
+            for (const auto &path : paths)
+                ++selected_names[placementFilename(path.get<std::string>())];
+            auto values = nlohmann::json::array();
+            std::vector<bool> present;
+            for (const auto &value : paths)
+            {
+                const auto path = std::filesystem::weakly_canonical(std::filesystem::u8path(value.get<std::string>()));
+                const auto name = placementFilename(path.u8string());
+                nlohmann::json pose;
+                bool found = false;
+                for (const auto &[key, saved] : poses.items())
+                    if (savedPath(key, directory) == path)
+                    {
+                        if (found && pose != saved)
+                            throw std::runtime_error("Conflicting saved placements for " + name);
+                        pose = saved; found = true;
+                    }
+                if (!found)
+                {
+                    // Compatibility with old absolute paths copied from another computer.
+                    // Relative paths always retain their directory identity.
+                    std::vector<nlohmann::json> matches;
+                    for (const auto &[key, saved] : poses.items())
+                        if ((std::filesystem::u8path(key).is_absolute() || key.find(':') == 1) && placementFilename(key) == name)
+                            matches.push_back(saved);
+                    if (!matches.empty())
+                    {
+                        if (matches.size() != 1 || selected_names[name] != 1)
+                            throw std::runtime_error("Ambiguous saved placement for " + name + "; use the correct relative paths.");
+                        pose = matches.front(); found = true;
+                    }
+                }
+                validatePlacement(pose);
+                values.push_back(pose); present.push_back(found);
+            }
+            return {values, present};
         }
 
         static void validatePairs(const std::string &_text,

@@ -4,3 +4,6 @@
 [submodule "nano_gicp"]
 	path = third_party/nano_gicp
 	url = https://github.com/engcang/nano_gicp.git
+[submodule "nanoflann"]
+	path = third_party/nanoflann
+	url = https://github.com/jlblancoc/nanoflann.git

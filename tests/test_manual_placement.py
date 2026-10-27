@@ -7,6 +7,7 @@ import unittest
 from unittest import mock
 import numpy as np
 import open3d as o3d
+from scipy.spatial.transform import Rotation
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "mapping"))
 from manual_placement import applyPlacements, collectPriors, compatibleWithPlacement, placementMatrix
 
@@ -16,9 +17,19 @@ class ManualPlacementTests(unittest.TestCase):
         matrix = placementMatrix([2, 3, 4, np.pi / 2])
         np.testing.assert_allclose(matrix @ [1, 0, 0, 1], [2, 4, 4, 1], atol=1e-12)
         np.testing.assert_array_equal(matrix[2], [0, 0, 1, 4])
-        for bad in ([1, 2, 3], [0, 0, 0, float("nan")], [1e7, 0, 0, 0]):
+        for bad in ([1, 2, 3], [0, 0, 0, float("nan")], [1e7, 0, 0, 0], [0]*5,
+                    [0, 0, 0, 0, float('inf'), 0], [0, 0, 0, 0, 0, 1e7]):
             with self.assertRaises(ValueError):
                 placementMatrix(bad)
+
+    def testFullRotationAndLegacyEquivalence(self):
+        for yaw, roll, pitch in ((0, np.pi/2, 0), (0, 0, np.pi/2), (.4, -.3, .2), (1.2, .5, np.pi/2)):
+            matrix = placementMatrix([2, 3, 4, yaw, roll, pitch])
+            expected = Rotation.from_euler('xyz', [roll, pitch, yaw]).as_matrix()
+            np.testing.assert_allclose(matrix[:3, :3], expected, atol=1e-12)
+            np.testing.assert_array_equal(matrix[:3, 3], [2, 3, 4])
+            np.testing.assert_allclose(matrix[:3, :3].T @ matrix[:3, :3], np.eye(3), atol=1e-12)
+        np.testing.assert_array_equal(placementMatrix([2, 3, 4, .4]), placementMatrix([2, 3, 4, .4, 0, 0]))
 
     def testChunkCompositionAndSourceIdentity(self):
         records = [{"source_sha256": "a"}, {"source_sha256": "b"}]
@@ -27,9 +38,12 @@ class ManualPlacementTests(unittest.TestCase):
         base[:3, 3] = [3, 4, 5]
         config = {"manual_chunks": [{"key": "group", "scans": [
             {"row": 2, "source_sha256": "b", "transform_chunk_from_scan": base.tolist()}]}],
-            "chunk_initial_guesses": {"group": [10, -2, 1, .4]}}
+            "chunk_initial_guesses": {"group": [10, -2, 1, .4, .1, -.2]}}
         priors, membership = collectPriors(config, records)
-        np.testing.assert_allclose(priors[1], placementMatrix([10, -2, 1, .4]) @ base)
+        expected = np.eye(4)
+        expected[:3, :3] = Rotation.from_euler('xyz', [.1, -.2, .4]).as_matrix()
+        expected[:3, 3] = [10, -2, 1]
+        np.testing.assert_allclose(priors[1], expected @ base, atol=1e-12)
         self.assertEqual(membership, {1: "group"})
         records[1]["source_sha256"] = "changed"
         with self.assertRaises(ValueError):
@@ -64,13 +78,18 @@ class ManualPlacementTests(unittest.TestCase):
             config["initial_guesses"][1][0] = .02
             applyPlacements(config, clouds, records, [], root, lambda _: None)
             self.assertEqual(len(calls), 2)
+            config['initial_guesses'][1] = [.02, 0, 0, .03, .01, -.02]
+            applyPlacements(config, clouds, records, [], root, lambda _: None)
+            self.assertEqual(len(calls), 3)
+            expected_rotation = Rotation.from_euler('xyz', [.01, -.02, .03]).as_matrix().T
+            np.testing.assert_allclose(calls[-1][:3, :3], expected_rotation, atol=1e-12)
             config["initial_guesses"][1][0] = 50
             edges = applyPlacements(config, clouds, records, edges, root, lambda _: None)
             self.assertFalse(edges[0]["accepted"])
             saved = json.loads((root / "pairs/00_01.json").read_text(encoding="utf-8"))
             self.assertFalse(saved["accepted"])
             self.assertIn("transform_target_from_source", saved)
-            self.assertEqual(len(calls), 2)
+            self.assertEqual(len(calls), 3)
 
     def testConflictingAutomaticEdgeAndExcessiveCorrectionRejected(self):
         priors = {0: np.eye(4), 1: np.eye(4)}

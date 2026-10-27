@@ -8,20 +8,21 @@ import sys
 import tempfile
 import unittest
 from collections import OrderedDict
-from unittest.mock import patch, Mock
+from unittest.mock import patch
 
 import numpy as np
 import open3d as o3d
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'mapping'))
-from trajectory_fine import FineMatcher
-from point_to_plane import PointToPlaneTarget
+from trajectory_fine import FineMatcher, TiledMapIndex, array_digest
+from point_to_plane import PointToPlaneTarget, IndexedPointToPlaneTarget
 
 
 class FineCacheTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.folder = Path(self.tmp.name)
+        self.indices = []
         uv = np.random.default_rng(12).uniform(-2, 2, (600, 2))
         points = np.concatenate([np.column_stack((uv, np.full(len(uv), -1.))),
             np.column_stack((uv[:,0], np.full(len(uv), 2.), uv[:,1])),
@@ -31,14 +32,33 @@ class FineCacheTests(unittest.TestCase):
         self.source = points + [.002, -.001, .001]
 
     def tearDown(self):
+        for index in self.indices:
+            index.close()
         self.tmp.cleanup()
 
     def matcher(self, cloud=None, caching=True):
         m = FineMatcher.__new__(FineMatcher)
-        m.workers = 2; m.target = None; m.target_pose = None
-        m.target_uses = 0; m.target_points = 0; m.target_digest = None
-        m.result_cache = self.folder if caching else None
-        m.crop = Mock(return_value=copy.deepcopy(cloud if cloud is not None else self.cloud))
+        cloud = cloud if cloud is not None else self.cloud
+        points, normals = np.asarray(cloud.points).astype('<f4'), np.asarray(cloud.normals)
+        m.target_digest = array_digest(points, normals)
+        m.folder = self.folder/m.target_digest
+        m.folder.mkdir(exist_ok=True)
+        normal_folder = m.folder/'normals-4cm-40-v1'
+        normal_folder.mkdir(exist_ok=True)
+        m.index = dict(tile_m=8., tiles={})
+        tiles = np.floor(points/8).astype(int)
+        for tile in np.unique(tiles, axis=0):
+            key = '_'.join(map(str, tile))
+            selected = np.all(tiles == tile, axis=1)
+            points[selected].tofile(m.folder/(key+'.bin'))
+            np.save(normal_folder/(key+'.npy'), normals[selected])
+            m.index['tiles'][key] = int(selected.sum())
+        m.workers = 2
+        m.map_index = TiledMapIndex(m)
+        self.indices.append(m.map_index)
+        m.target = IndexedPointToPlaneTarget(m.map_index, m.workers)
+        m.target_uses = 0; m.target_points = len(points)
+        m.result_cache = self.folder/'requests' if caching else None
         return m
 
     def test_exact_reuse_across_restart_and_target_lifetime(self):
@@ -53,8 +73,8 @@ class FineCacheTests(unittest.TestCase):
                 T, info = m.align(self.source, np.eye(4))
                 np.testing.assert_array_equal(T, reference[0])
                 self.assertTrue(info['result_reused'])
-        self.assertEqual(m.crop.call_count, 2)
-        self.assertEqual(m.target_uses, 2)
+        self.assertEqual(m.map_index.statistics['tree_builds'], 0)
+        self.assertEqual(m.target_uses, 7)
 
     def test_source_pose_target_normals_and_iterations_invalidate(self):
         self.matcher().align(self.source, np.eye(4))
@@ -79,12 +99,38 @@ class FineCacheTests(unittest.TestCase):
         repeated = self.matcher().align(source, np.eye(4), iterations=1)
         self.assertFalse(repeated[1]['converged'])
         self.assertTrue(repeated[1]['result_reused'])
-        path = self.folder/(info['request_key']+'.json')
+        path = self.folder/'requests'/(info['request_key']+'.json')
         path.write_text('{truncated')
         restored = self.matcher().align(source, np.eye(4), iterations=1)
         self.assertFalse(restored[1]['result_reused'])
         np.testing.assert_array_equal(restored[0], T)
         self.assertEqual(json.loads(path.read_text())['fine']['converged'], False)
+
+    def test_information_capture_is_bound_into_request_cache(self):
+        plain = self.matcher().align(self.source,np.eye(4))
+        actual = self.matcher().align(self.source,np.eye(4),capture_information=True)
+        self.assertFalse(actual[1]['result_reused'])
+        self.assertNotEqual(plain[1]['request_key'],actual[1]['request_key'])
+        self.assertEqual(actual[1]['optimizer_information']['observable_directions'],6)
+        repeated = self.matcher().align(self.source,np.eye(4),capture_information=True)
+        self.assertTrue(repeated[1]['result_reused'])
+        self.assertEqual(actual[1]['optimizer_information'],repeated[1]['optimizer_information'])
+
+    def test_read_only_previous_cache_reuses_only_exact_requests(self):
+        m = self.matcher()
+        expected, first = m.align(self.source, np.eye(4))
+        original = {p:p.read_bytes() for p in m.result_cache.glob('*.json')}
+        m.result_sources = (m.result_cache,)
+        m.result_cache = self.folder/'new-requests'
+        with patch.object(PointToPlaneTarget, 'align', side_effect=AssertionError('Repeated old fit')):
+            actual, info = m.align(self.source, np.eye(4))
+        np.testing.assert_array_equal(actual, expected)
+        self.assertTrue(info['result_reused'])
+        changed = np.eye(4); changed[0,3] = .001
+        _, info = m.align(self.source, changed)
+        self.assertFalse(info['result_reused'])
+        self.assertEqual({p:p.read_bytes() for p in original}, original)
+        self.assertEqual(len(list(m.result_cache.glob('*.json'))), 1)
 
     def test_tile_cache_evicts_only_cold_tiles_and_keeps_original_points(self):
         m=FineMatcher.__new__(FineMatcher)

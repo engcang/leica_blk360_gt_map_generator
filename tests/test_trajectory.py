@@ -17,7 +17,7 @@ from trajectory_geometry import Matcher, voxel
 from trajectory_map import write_ply, reconstruct_maps
 from trajectory_native import NativeSession
 from trajectory_worker import run, inputs
-from trajectory_recovery import Recovery, choose_seed
+from trajectory_recovery import Recovery, choose_seed, save_recovery_provenance
 from trajectory_temporal import screen_temporal
 
 
@@ -44,6 +44,50 @@ def fixture(root, count=8):
 
 
 class InputTests(unittest.TestCase):
+    def test_backend_switch_preserves_all_other_resume_guards(self):
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder)
+            old = dict(protocol='studio-recovery-v11', fine_engine='open3d-point-to-plane-tukey-v4',
+                       map={'source_sha256':'a'*64}, thresholds={'plane_rms_m':.08})
+            new = dict(old, correspondence=dict(backend='native-tiled-map-v1', sha256='b'*64))
+            save_recovery_provenance(output, old)
+            for changed in (dict(new, fine_engine='different'), dict(new, map={'source_sha256':'c'*64}),
+                            dict(new, thresholds={'plane_rms_m':.2})):
+                with self.assertRaisesRegex(ValueError, 'Recovery resume engine'):
+                    save_recovery_provenance(output, changed)
+            save_recovery_provenance(output, new)
+            record=json.loads((output/'backend_transitions.jsonl').read_text())
+            self.assertEqual(record['previous'], old)
+            save_recovery_provenance(output, new)
+            self.assertEqual(len((output/'backend_transitions.jsonl').read_text().splitlines()),1)
+            with self.assertRaisesRegex(ValueError, 'Recovery resume engine'):
+                save_recovery_provenance(output, dict(new, correspondence=dict(backend='native-tiled-map-v1', sha256='c'*64)))
+
+    def test_fresh_output_accepts_external_scheduler_heartbeat(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); config = fixture(root)
+            output = root/'output'; output.mkdir()
+            heartbeat = dict(status='queued', stage='Waiting for a worker', updated_unix=1700000000.)
+            save_json(output/'job_status.json', heartbeat)
+            with patch('trajectory_worker.prepare_map', side_effect=RuntimeError('map preparation reached')):
+                with self.assertRaisesRegex(RuntimeError, 'map preparation reached'):
+                    run(config, root/'progress.json')
+            self.assertEqual(json.loads((output/'job_status.json').read_text()), heartbeat)
+
+    def test_fresh_output_rejects_unrelated_or_invalid_scheduler_files(self):
+        for filename, contents in [('notes.txt', 'existing work'), ('job_status.json', 'not JSON'),
+                                   ('job_status.json', '{"status":"queued"}'),
+                                   ('job_status.json', '[]')]:
+            with self.subTest(filename=filename, contents=contents), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder); config = fixture(root)
+                output = root/'output'; output.mkdir()
+                (output/filename).write_text(contents)
+                with patch('trajectory_worker.prepare_map') as prepare:
+                    with self.assertRaisesRegex(ValueError, 'result folder is not empty'):
+                        run(config, root/'progress.json')
+                    prepare.assert_not_called()
+                self.assertEqual((output/filename).read_text(), contents)
+
     def test_seed_window_skips_unavailable_anchor(self):
         recovery = Recovery.__new__(Recovery)
         recovery.scan = lambda index: None
@@ -181,6 +225,11 @@ class InputTests(unittest.TestCase):
         class Source:
             def pose(self, stamps):return np.tile(np.eye(4),(len(stamps),1,1))
         recovery.source=Source();recovery.poses={};recovery.quality={};recovery.quarantined=[]
+        from point_to_plane import FINE_ENGINE
+        recovery.baseline_is_fine=True
+        for q in recovery.rows:
+            q.update(validation_map_voxel_m=.01, validation_protocol='independent-map-context-v2',
+                     fine=dict(engine=FINE_ENGINE, converged=True))
         recovery.keep_baseline()
         self.assertIn(2,recovery.quarantined);self.assertNotIn(2,recovery.poses)
         recovery.conflicted=set();logs=[];recovery.log=logs.append
@@ -279,6 +328,243 @@ class InputTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get('BLK_REGISTRATION_EXECUTABLE'), 'native engine path required')
 class NativeTests(unittest.TestCase):
+    def test_reference_to_native_resume_retains_completed_fits(self):
+        from native_correspondence import libraryPath
+        if not libraryPath().is_file():
+            self.skipTest('Build blk_correspondence for backend-switch integration')
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);config=fixture(root);report=root/'progress.json'
+            with patch.dict(os.environ, BLK_CORRESPONDENCE_BACKEND='python'):
+                run(config,report)
+            output=root/'output'
+            trajectory=(output/'recovery/candidate_trajectory.tum').read_bytes()
+            journal=(output/'baseline/forward_attempts.jsonl').read_bytes()
+            with patch.dict(os.environ, BLK_CORRESPONDENCE_BACKEND='cpp'), \
+                    patch('trajectory_fine.FineMatcher.align', side_effect=AssertionError('Completed fit repeated')):
+                run(config,report)
+            self.assertEqual(trajectory,(output/'recovery/candidate_trajectory.tum').read_bytes())
+            self.assertEqual(journal,(output/'baseline/forward_attempts.jsonl').read_bytes())
+            self.assertEqual(json.loads(report.read_text())['status'],'completed')
+            self.assertTrue((output/'recovery/backend_transitions.jsonl').is_file())
+
+    def test_partial_field_of_view_uses_neighbor_geometry_without_extra_fits(self):
+        from trajectory_fine import FineMatcher
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); config = fixture(root)
+            # Three mapped walls cover only about one third of each sensor scan.
+            # Unmapped distant surfaces cannot be ICP inliers or validation support.
+            rng = np.random.default_rng(701)
+            outside = rng.uniform([20, 20, 20], [30, 30, 30], (22000, 3)).astype(np.float32)
+            for path in (root/'scans').glob('*.npy'):
+                np.save(path, np.r_[np.load(path), outside])
+            original = FineMatcher.align; calls = []
+            def recorded(matcher, points, initial, **kwargs):
+                calls.append(1)
+                return original(matcher, points, initial, **kwargs)
+            with patch.object(FineMatcher, 'align', new=recorded):
+                run(config, root/'progress.json', local_only=True)
+            quality = [json.loads(line) for line in (root/'output/recovery/quality.jsonl').read_text().splitlines()]
+            self.assertEqual(len(calls), 8)
+            for q in quality:
+                self.assertTrue(q['accepted'], q)
+                self.assertLess(q['coverage_20cm'], .65)
+                self.assertEqual(q['acceptance_scope'], 'independent-full-rank-scans')
+                self.assertEqual(len(q['context_validation']['witness_indices']), 2)
+            np.testing.assert_allclose(np.loadtxt(root/'output/recovery/candidate_trajectory.tum'),
+                                       np.loadtxt(root/'estimate.tum'), atol=1e-4)
+            before = (root/'output/recovery/candidate_trajectory.tum').read_bytes()
+            run(config, root/'progress.json', local_only=True)
+            self.assertEqual((root/'output/recovery/candidate_trajectory.tum').read_bytes(), before)
+
+    def test_weak_single_planes_require_jointly_fitted_independent_submap(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); config = fixture(root, count=9)
+            for i, path in enumerate(sorted((root/'scans').glob('*.npy'))):
+                points = np.load(path)
+                np.save(path, points[(i % 3)*3500:((i % 3)+1)*3500])
+            A = np.eye(4); A[:3, 3] = [.08, -.06, .04]
+            config['initial_alignment'] = A.tolist()
+            run(config, root/'progress.json', local_only=True)
+            baseline = [json.loads(line) for line in (root/'output/baseline/quality.jsonl').read_text().splitlines()]
+            self.assertTrue(all(not q['accepted'] for q in baseline))
+            quality = [json.loads(line) for line in (root/'output/recovery/quality.jsonl').read_text().splitlines()]
+            accepted = [q for q in quality if q['accepted']]
+            self.assertGreaterEqual(len(accepted), 3)
+            for q in accepted:
+                self.assertLess(q['observable_directions'], 6)
+                self.assertEqual(q['acceptance_scope'], 'jointly-fitted-submap')
+                self.assertTrue(q['context_validation']['shared_transform_fitted'])
+                self.assertEqual(q['context_validation']['observable_directions'], 6)
+                self.assertEqual(q['context_validation']['training_observable_directions'], 6)
+                self.assertEqual(q['context_validation']['optimizer_observable_directions'], 6)
+                self.assertTrue(q['fine']['converged'])
+            expected = np.loadtxt(root/'estimate.tum')[[q['index'] for q in accepted]]
+            np.testing.assert_allclose(np.loadtxt(root/'output/recovery/candidate_trajectory.tum'), expected, atol=1e-4)
+
+    def test_a_shared_submap_of_only_one_plane_still_has_no_six_dof_gt(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); config = fixture(root, count=8)
+            for path in (root/'scans').glob('*.npy'):
+                np.save(path, np.load(path)[:3500])
+            run(config, root/'progress.json', local_only=True)
+            quality = [json.loads(line) for line in (root/'output/recovery/quality.jsonl').read_text().splitlines()]
+            self.assertTrue(all(not q['accepted'] for q in quality))
+            self.assertEqual((root/'output/recovery/candidate_trajectory.tum').stat().st_size, 0)
+            attempts = [json.loads(line) for line in (root/'output/recovery/attempts.jsonl').read_text().splitlines()]
+            seeds = [q for q in attempts if q['stage'] == 'submap_seed']
+            self.assertTrue(seeds)
+            self.assertTrue(all(not q['accepted'] for q in seeds))
+            self.assertTrue(all(q['training_quality']['observable_directions'] == 3 for q in seeds))
+
+    def test_weak_shared_training_fit_cannot_borrow_rank_from_heldout_walls(self):
+        from trajectory_worker import baseline
+        from trajectory_map import prepare_map
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); config = fixture(root, count=6)
+            for i, path in enumerate(sorted((root/'scans').glob('*.npy'))):
+                points = np.load(path)
+                np.save(path, points[(i % 3)*3500:((i % 3)+1)*3500])
+            source, _, tls, output, cache, indices = inputs(config)
+            output.mkdir()
+            prepare_map(tls, cache, 2, lambda _:None)
+            baseline(config, source, cache, output/'baseline', indices, 2, lambda _:None)
+            recovery = Recovery(output/'baseline', root/'training-rank-check', cache, source, 2, lambda _:None,
+                                baseline_is_fine=True)
+            try:
+                anchor = source.scan(0)
+                floor_scan = source.scan(3)
+                train = transform(floor_scan.points, np.linalg.inv(anchor.frontend_T)@floor_scan.frontend_T)
+                train = train[np.all(abs(train[:, :2]) < 1., axis=1)]
+                validators = [source.scan(i) for i in (1, 2, 4)]
+                initial = np.eye(4); initial[0, 3] = .07
+                # Training floor has no lateral constraint. Held-out walls can
+                # refine by 7cm (below the agreement limit), but must not make
+                # an unfitted shared lateral coordinate into GT.
+                result = recovery.validate_seed(anchor, train, validators, initial, 'training-rank-test', 1.)
+                self.assertIsNone(result)
+                self.assertEqual(recovery.seed_hypotheses, [])
+            finally:
+                recovery.close()
+            attempts = [json.loads(line) for line in (root/'training-rank-check/attempts.jsonl').read_text().splitlines()]
+            result = next(q for q in attempts if q['stage'] == 'submap_seed')
+            self.assertTrue(result['fine']['converged'])
+            self.assertEqual(result['training_quality']['observable_directions'], 3)
+            self.assertEqual(result['fine']['optimizer_information']['observable_directions'], 3)
+            self.assertEqual(result['reason'], 'shared_fit_weak_geometry')
+            self.assertEqual(result['checks'], [])
+            self.assertAlmostEqual(result['T_map_from_base'][0][3], .07, places=5)
+
+    def test_global_fallback_does_not_repeat_reverse_tracking(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); config = fixture(root)
+            run(config, root/'progress.json')
+            baseline = root/'output/baseline'
+            rows = [json.loads(line) for line in (baseline/'quality.jsonl').read_text().splitlines()]
+            rows[3]['accepted'] = False
+            (baseline/'quality.jsonl').write_text(''.join(json.dumps(q)+'\n' for q in rows))
+            np.savetxt(baseline/'candidate_trajectory.tum', np.delete(np.loadtxt(root/'estimate.tum'), 3, axis=0))
+            source, _, _, _, cache, _ = inputs(config)
+            recovery = Recovery(baseline, root/'no-repeat', cache, source, 2, lambda _:None, baseline_is_fine=True)
+            try:
+                with patch.object(recovery, 'propagate', return_value={}) as propagation, \
+                     patch.object(recovery, 'submap_seed', return_value=None) as seeds:
+                    recovery.run()
+                self.assertEqual([call.args[-1] for call in propagation.call_args_list], ['reverse_fine'])
+                self.assertEqual([call.kwargs['allow_global'] for call in seeds.call_args_list], [False, True])
+            finally:
+                recovery.close()
+
+    def test_fine_forward_failure_tries_reverse_before_any_submap(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);config=fixture(root)
+            run(config,root/'progress.json')
+            baseline=root/'output/baseline'
+            rows=[json.loads(line) for line in (baseline/'quality.jsonl').read_text().splitlines()]
+            expected=np.loadtxt(baseline/'candidate_trajectory.tum')
+            rows[3]['accepted']=False
+            (baseline/'quality.jsonl').write_text(''.join(json.dumps(q)+'\n' for q in rows))
+            np.savetxt(baseline/'candidate_trajectory.tum',np.delete(expected,3,axis=0))
+            source,_,_,_,cache,_=inputs(config)
+            recovery=Recovery(baseline,root/'reverse-only',cache,source,2,lambda _:None,baseline_is_fine=True)
+            try:
+                with patch.object(recovery,'propagate',wraps=recovery.propagate) as propagate, \
+                     patch.object(recovery,'submap_seed',side_effect=AssertionError('Reverse already recovered the gap')):
+                    recovery.run(local_only=True)
+                    self.assertEqual([call.args[-1] for call in propagate.call_args_list],['reverse_fine'])
+                    self.assertEqual(propagate.call_args.args[0],[3])
+            finally:recovery.close()
+            np.testing.assert_allclose(np.loadtxt(root/'reverse-only/candidate_trajectory.tum'),expected,atol=1e-4)
+
+    def test_forward_pass_refines_every_pose_despite_large_global_slam_offset(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);config=fixture(root,count=20)
+            expected=np.loadtxt(root/'estimate.tum')
+            drifted=expected.copy();drifted[:,1]+=10+np.arange(len(drifted))*.04
+            np.savetxt(root/'estimate.tum',drifted)
+            A=np.eye(4);A[0,3]=-10;config['initial_alignment']=A.tolist()
+            run(config,root/'progress.json',local_only=True)
+            rows=[json.loads(line) for line in (root/'output/baseline/quality.jsonl').read_text().splitlines()]
+            self.assertEqual(len(rows),len(expected))
+            for q in rows:
+                self.assertTrue(q['accepted'],q)
+                self.assertEqual(q['stage'],'forward_fine')
+                self.assertTrue(q['fine']['converged'])
+                self.assertEqual(q['fine']['source_voxel_m'],.01)
+                self.assertEqual(q['validation_map_voxel_m'],.01)
+                self.assertGreaterEqual(q['validation_s'],0)
+            np.testing.assert_allclose(np.loadtxt(root/'output/recovery/candidate_trajectory.tum'),expected,atol=1e-4)
+
+    def test_corrupt_accepted_timestamp_is_removed_before_checkpoint(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); config = fixture(root)
+            run(config, root/'progress.json')
+            baseline = root/'output/baseline'
+            rows = [json.loads(line) for line in (baseline/'quality.jsonl').read_text().splitlines()]
+            poses = np.loadtxt(baseline/'candidate_trajectory.tum')
+            # Both checkpoint files agree with each other, and the fine-engine
+            # metadata is current, but this is not index 3's real scan anchor.
+            rows[3]['timestamp'] += .03; poses[3, 0] += .03
+            (baseline/'quality.jsonl').write_text(''.join(json.dumps(q)+'\n' for q in rows))
+            np.savetxt(baseline/'candidate_trajectory.tum', poses)
+            source, _, _, _, cache, _ = inputs(config)
+            output = root/'timestamp-audit'
+            recovery = Recovery(baseline, output, cache, source, 2, lambda _:None, baseline_is_fine=True)
+            try:
+                with patch.object(recovery.fine, 'align', side_effect=AssertionError('Trusted metadata path must audit timestamps')):
+                    recovery.keep_baseline()
+                self.assertNotIn(3, recovery.poses)
+                self.assertFalse(recovery.quality[3]['accepted'])
+                self.assertEqual(recovery.quality[3]['reason'], 'scan_timestamp_mismatch')
+                recovery.checkpoint()
+            finally:
+                recovery.close()
+            saved = [json.loads(line) for line in (output/'quality.jsonl').read_text().splitlines()]
+            self.assertFalse(saved[3]['accepted'])
+            self.assertEqual(saved[3]['reason'], 'scan_timestamp_mismatch')
+            np.testing.assert_allclose(np.loadtxt(output/'candidate_trajectory.tum'), np.delete(poses, 3, axis=0), atol=1e-9)
+
+    def test_imported_accepted_poses_are_initial_guesses_for_fine_refitting(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);config=fixture(root)
+            run(config,root/'progress.json')
+            baseline=root/'output/baseline'
+            rows=[json.loads(line) for line in (baseline/'quality.jsonl').read_text().splitlines()]
+            expected=np.loadtxt(baseline/'candidate_trajectory.tum')
+            shifted=expected.copy();shifted[:,1]+=.03
+            np.savetxt(baseline/'candidate_trajectory.tum',shifted)
+            for q in rows:
+                q.pop('fine');q.pop('validation_map_voxel_m')
+                q['T_map_from_base'][0][3]+=.03
+            (baseline/'quality.jsonl').write_text(''.join(json.dumps(q)+'\n' for q in rows))
+            source,_,_,_,cache,_=inputs(config)
+            recovery=Recovery(baseline,root/'refitted',cache,source,2,lambda _:None)
+            try:
+                recovery.keep_baseline();recovery.checkpoint()
+            finally:recovery.close()
+            np.testing.assert_allclose(np.loadtxt(root/'refitted/candidate_trajectory.tum'),expected,atol=1e-4)
+            refitted=[json.loads(line) for line in (root/'refitted/quality.jsonl').read_text().splitlines()]
+            self.assertTrue(all(q['accepted'] and q['stage']=='baseline_fine' and not q['baseline_reused'] for q in refitted))
+
     def test_conflicting_tracks_retry_an_independently_verified_window(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);config=fixture(root,count=10)
@@ -378,6 +664,36 @@ class NativeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'Resume inputs or settings changed'):
                 run(changed, root/'progress.json')
 
+    def test_changed_initial_alignment_cannot_reuse_uncheckpointed_forward_fits(self):
+        from trajectory_recovery import fit_scan
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); config = fixture(root)
+            calls = []
+            def interrupted(fine, scan, initial):
+                calls.append(scan.index)
+                if len(calls) > 1:
+                    raise OSError('simulated stop before checkpoint')
+                return fit_scan(fine, scan, initial)
+            with patch('trajectory_worker.fit_scan', side_effect=interrupted):
+                with self.assertRaisesRegex(OSError, 'simulated stop'):
+                    run(config, root/'progress.json')
+            baseline = root/'output/baseline'
+            self.assertFalse((baseline/'quality.jsonl').exists())
+            journal = baseline/'forward_attempts.jsonl'
+            before = journal.read_bytes()
+            self.assertEqual(len(before.splitlines()), 1)
+            shifted = np.eye(4); shifted[0, 3] = .05
+            with patch('trajectory_worker.fit_scan') as fitting:
+                with self.assertRaisesRegex(ValueError, 'Resume inputs or settings changed'):
+                    run(dict(config, initial_alignment=shifted.tolist()), root/'progress.json')
+                fitting.assert_not_called()
+            self.assertEqual(journal.read_bytes(), before)
+            with patch('trajectory_worker.fit_scan', wraps=fit_scan) as fitting:
+                run(config, root/'progress.json')
+                self.assertEqual(fitting.call_count, 7)
+            np.testing.assert_allclose(np.loadtxt(root/'output/recovery/candidate_trajectory.tum'),
+                                       np.loadtxt(root/'estimate.tum'), atol=1e-4)
+
     def test_interrupted_recovery_reuses_complete_fit_journal(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);config=fixture(root)
@@ -417,7 +733,8 @@ class NativeTests(unittest.TestCase):
             self.assertEqual(json.loads((recovered/'status.json').read_text())['global_attempts'],1)
             np.testing.assert_allclose(result[:,1:4],trajectory[:,1:4],atol=1e-4)
             receipt=json.loads((recovered/'provenance.json').read_text())
-            self.assertEqual(receipt['fine_engine'],'open3d-point-to-plane-tukey-v3')
+            from point_to_plane import FINE_ENGINE
+            self.assertEqual(receipt['fine_engine'], FINE_ENGINE)
             self.assertEqual(receipt['iterations_per_stage'],60)
             receipt['fine_engine']='previous-nano-engine'
             save_json(recovered/'provenance.json',receipt)
@@ -444,6 +761,12 @@ class NativeTests(unittest.TestCase):
             result = json.loads(report.read_text())
             self.assertEqual(result['status'],'completed'); self.assertGreaterEqual(result['accepted'],6)
             output = root/'output'
+            for name in ('baseline','recovery'):
+                quality=[json.loads(line) for line in (output/name/'quality.jsonl').read_text().splitlines()]
+                for q in quality:
+                    if q['accepted']:
+                        self.assertTrue(q['fine']['converged'])
+                        self.assertEqual(q['validation_map_voxel_m'],.01)
             before = (output/'recovery/candidate_trajectory.tum').read_bytes()
             scene = json.loads((output/'viewer.json').read_text())
             self.assertEqual({x['key'] for x in scene['maps']},{'tls_10cm','tls_gt','estimate_0','estimate_1'})

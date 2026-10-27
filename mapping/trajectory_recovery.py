@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from collections import OrderedDict
+import copy
 import json
 from pathlib import Path
 import time
@@ -14,8 +15,32 @@ from trajectory_fine import FineMatcher
 from trajectory_io import digest, save_json, transform, PoseGap
 from trajectory_geometry import Matcher, voxel
 from trajectory_temporal import screen_temporal, motion_limits
+from trajectory_validation import (confirm_partial_views, jointly_observable, VALIDATION_PROTOCOL,
+    LOW_OVERLAP_CONTEXT, MIN_SUPPORT_POINTS, MIN_SUPPORT_CELLS, SUPPORT_CELL_M, MIN_PRINCIPAL_SPAN_M)
 from parallel_runtime import cacheBudget
 from point_to_plane import FINE_ENGINE, RECOVERY_DISTANCES, RECOVERY_ITERATIONS
+
+
+def save_recovery_provenance(output, current):
+    receipt = output/'provenance.json'
+    if receipt.exists():
+        previous = json.loads(receipt.read_text())
+        if previous != current:
+            old, new = dict(previous), dict(current)
+            old_backend = old.pop('correspondence', {'backend':'scipy-tiled-map-v1'})
+            new_backend = new.pop('correspondence', {'backend':'scipy-tiled-map-v1'})
+            # Only the verified reference -> exact native implementation change
+            # can reuse checkpoints. Geometry, inputs, validation and solver
+            # settings must still match, and native binary changes remain strict.
+            compatible = (old == new and old_backend == {'backend':'scipy-tiled-map-v1'}
+                          and new_backend.get('backend') == 'native-tiled-map-v1'
+                          and len(new_backend.get('sha256', '')) == 64)
+            if not compatible:
+                raise ValueError('Recovery resume engine, inputs, or settings changed; choose a new output folder')
+            with (output/'backend_transitions.jsonl').open('a', encoding='utf-8') as stream:
+                stream.write(json.dumps(dict(changed_unix=time.time(), previous=previous,
+                    correspondence=new_backend, retained='validated poses and completed attempt journals'), allow_nan=False)+'\n')
+    save_json(receipt, current)
 
 
 def pose(row):
@@ -31,6 +56,26 @@ def difference(a,b):
 def partition(scan):
     p=voxel(scan.points,.01)
     return p[::2],voxel(p[1::2],.10)
+
+
+def fit_scan(fine, scan, initial):
+    """Every accepted trajectory pose must pass the same 1 cm fit and validation."""
+    started = time.perf_counter()
+    train, held = partition(scan)
+    partitioned = time.perf_counter()
+    try:
+        T, info = fine.align(train, initial)
+    except (RuntimeError, ValueError) as exc:
+        T, info = initial.copy(), dict(converged=False, reason='registration_error', detail=str(exc))
+    fitted = time.perf_counter()
+    q = fine.quality(held, T)
+    q.update(index=scan.index, timestamp=scan.timestamp, fine=info,
+             correction_m_deg=difference(T, initial), T_map_from_base=T.tolist(),
+             partition_s=partitioned-started, validation_s=time.perf_counter()-fitted,
+             total_fit_s=time.perf_counter()-started)
+    if not info.get('converged'):
+        q.update(accepted=False, reason='fine_registration_failed')
+    return T, q
 
 
 def capped_distance_cost(quality):
@@ -59,9 +104,10 @@ def choose_seed(hypotheses):
 
 
 class Recovery:
-    def __init__(self, baseline, output, cache, source, workers, progress):
+    def __init__(self, baseline, output, cache, source, workers, progress, *, baseline_is_fine=False, reuse_fits_from=()):
         self.baseline, self.output = Path(baseline), Path(output)
         self.cache, self.source, self.progress = Path(cache), source, progress
+        self.baseline_is_fine = baseline_is_fine
         self.rows = [json.loads(x) for x in (self.baseline/'quality.jsonl').read_text().splitlines()]
         if (len({q['index'] for q in self.rows}) != len(self.rows) or
                 np.any(np.diff([q['timestamp'] for q in self.rows]) <= 0) or
@@ -72,6 +118,10 @@ class Recovery:
         self.original_poses = np.loadtxt(self.baseline/'candidate_trajectory.tum', ndmin=2) if (self.baseline/'candidate_trajectory.tum').stat().st_size else np.empty((0, 8))
         self.A = np.asarray(json.loads((self.baseline/'initial_alignment.json').read_text())['T_map_from_frontend'])
         self.scans = OrderedDict()
+        self.prepared = OrderedDict()
+        self.prepared_bytes = 0
+        self.prepared_limit = cacheBudget(.02)
+        self.window_cache = OrderedDict()
         self.scan_cache_limit = cacheBudget(.03)
         self.scan_cache_bytes = 0
         self.poses, self.quality = {}, {}
@@ -79,8 +129,10 @@ class Recovery:
         self.latest_attempt, self.fit_cache, self.seed_cache = {}, {}, {}
         self.kiss_targets = {}
         self.seed_hypotheses = []
+        self.seed_certificates, self.context_certificates = {}, {}
         self.conflicted = set()
-        self.provenance = dict(protocol='studio-recovery-v8', input=self.source.provenance,
+        self.provenance = dict(protocol='studio-recovery-v12', input=self.source.provenance,
+            baseline_policy='verified-1cm' if baseline_is_fine else 'refit-imported-at-1cm',
             baseline_trajectory_sha256=digest(self.baseline/'candidate_trajectory.tum'),
             baseline_quality_sha256=digest(self.baseline/'quality.jsonl'),
             map=json.loads((cache/'map.json').read_text()),
@@ -89,20 +141,35 @@ class Recovery:
                        trusted_end_guesses=True, anchor_withheld=True, retry_partial_fits=True,
                        direct_fine_before_coarse=True, compare_coarse_candidates=True,
                        selection='withheld-capped-distance', competing_cost_ratio=.8,
-                       retry_conflicting_tracks=True, iterations_per_stage=180),
+                       retry_conflicting_tracks=True, iterations_per_stage=180,
+                       schedule='all-reverse-before-submaps', iteration_limit_continuation=180,
+                       exact_fit_reuse_across_stages=True, exact_window_reuse=True),
             validation=dict(map_voxel_m=.01, planar_neighbors=20, planar_radius_m=.3,
-                            temporal_screen='supported-temporal-chain-v2'),
+                            temporal_screen='supported-temporal-chain-v2',
+                            context_protocol=VALIDATION_PROTOCOL, independent_witness_scans=2,
+                            rank_deficiency_policy='full-rank-shared-fit-and-independent-joint-information',
+                            shared_training_observable_directions=6, training_validation_voxel_m=.1,
+                            shared_training_information='actual-final-Tukey-weighted-fit'),
             target_normals='original-map-4cm-40-with-tile-halo-v1',
             correspondence_distances=list(RECOVERY_DISTANCES), iterations_per_stage=RECOVERY_ITERATIONS,
             relative_fitness=1e-6, relative_rmse=1e-6, solver_threads=1,
-            thresholds=dict(coverage_20cm=.65, plane_rms_m=.08, observable_directions=6,
+            thresholds=dict(partial_view_context_below_coverage=LOW_OVERLAP_CONTEXT,
+                            minimum_coverage=None, support_points=MIN_SUPPORT_POINTS,
+                            support_cells=MIN_SUPPORT_CELLS, support_cell_m=SUPPORT_CELL_M,
+                            second_principal_span_m=MIN_PRINCIPAL_SPAN_M,
+                            weak_submap_departure_scaled_m=.01,
+                            plane_rms_m=.08, joint_observable_directions=6,
                             correction_m=.5, correction_deg=10, agreement_m=.15, agreement_deg=3))
-        receipt = self.output/'provenance.json'
-        if receipt.exists() and json.loads(receipt.read_text()) != self.provenance:
-            raise ValueError('Recovery resume engine, inputs, or settings changed; choose a new output folder')
-        save_json(receipt, self.provenance)
+        from native_correspondence import backendInfo as correspondenceInfo
+        correspondence = correspondenceInfo()
+        if correspondence['backend'] == 'native-tiled-map-v1':
+            self.provenance['correspondence'] = correspondence
+        save_recovery_provenance(self.output, self.provenance)
         self.matcher = Matcher(self.cache, workers)
         self.fine = FineMatcher(self.cache, workers, result_cache=self.output/'fine_requests')
+        # Read-only acceleration: source points, target, initial pose, solver and
+        # iteration settings must match the full request hash. Validation is new.
+        self.fine.result_sources = tuple(Path(p)/'fine_requests' for p in reuse_fits_from)
         attempts = self.output/'attempts.jsonl'
         valid_lines = []
         if attempts.exists():
@@ -120,6 +187,8 @@ class Recovery:
                     self.fit_cache[q['fit_key']] = q
                 if q.get('stage') == 'seed_complete':
                     self.seed_cache[(q['index'], q.get('allow_global', True))] = q.get('T_map_from_base')
+                    if q.get('certificate'):
+                        self.remember_certificate(q['index'], q['certificate'])
             attempts.write_text(''.join(valid_lines))
         self.attempt_file = attempts.open('a', buffering=1)
         save_json(self.output/'initial_alignment.json', {'T_map_from_frontend':self.A.tolist()})
@@ -140,30 +209,65 @@ class Recovery:
     def log(self,row):
         self.attempt_file.write(json.dumps(row,allow_nan=False)+'\n')
 
+    def prepared_scan(self, scan):
+        """Keep the exact train/held-out split; evict using available RAM."""
+        if scan.index in self.prepared:
+            self.prepared.move_to_end(scan.index)
+            return self.prepared[scan.index]
+        result = partition(scan)
+        size = sum(p.nbytes for p in result)
+        limit = min(self.prepared_limit, cacheBudget(.02))
+        while self.prepared and self.prepared_bytes+size > limit:
+            _, old = self.prepared.popitem(last=False)
+            self.prepared_bytes -= sum(p.nbytes for p in old)
+        if size <= limit:
+            self.prepared[scan.index] = result
+            self.prepared_bytes += size
+        return result
+
+    def fit_continued(self, scan, initial):
+        # The initial pass is unchanged. Only recovery gives a geometrically
+        # supported iteration-limited fit more time before building submaps.
+        started = time.perf_counter()
+        train, held = self.prepared_scan(scan)
+        prepared = time.perf_counter()
+        try:
+            T, info = self.fine.align(train, initial)
+            q = self.fine.quality(held, T)
+            if (not info.get('converged') and info.get('convergence_reason') == 'iteration_limit'
+                    and q.get('geometry_supported')):
+                first = info
+                T, info = self.fine.align(train, T, iterations=180)
+                info = dict(info, continuation_from=first, continuation_iterations_per_stage=180)
+                q = self.fine.quality(held, T)
+        except (RuntimeError, ValueError) as exc:
+            T, info = initial.copy(), dict(converged=False, reason='registration_error', detail=str(exc))
+            q = self.fine.quality(held, T)
+        q.update(index=scan.index, timestamp=scan.timestamp, fine=info,
+                 correction_m_deg=difference(T, initial), T_map_from_base=T.tolist(),
+                 partition_s=prepared-started, total_fit_s=time.perf_counter()-started)
+        if not info.get('converged'):
+            q.update(accepted=False, reason='fine_registration_failed')
+        return T, q
+
     def fit(self,s,initial,stage):
         import hashlib
-        if abs(s.timestamp-self.rows_by_index[s.index]['timestamp']) > 1e-6:
+        anchor_timestamp = self.source.anchor_timestamp(s.index)
+        expected = (self.rows_by_index[s.index]['timestamp'] if s.index in self.rows_by_index
+                    else anchor_timestamp)
+        if abs(s.timestamp-expected) > 1e-6 or abs(s.timestamp-anchor_timestamp) > 1e-6:
             raise ValueError(f'Scan/pose timestamp mismatch at index {s.index}')
-        key = f'{stage}:{s.index}:' + hashlib.sha256(np.asarray(initial, dtype='<f8').tobytes()).hexdigest()
+        key = f'{s.index}:' + hashlib.sha256(np.asarray(initial, dtype='<f8').tobytes()).hexdigest()
         if key in self.fit_cache:
-            q = dict(self.fit_cache[key])
+            q = copy.deepcopy(self.fit_cache[key])
+            q['stage'] = stage
             self.latest_attempt[s.index] = q
             return np.asarray(q['T_map_from_base']), q
-        train,held=partition(s)
-        try:
-            T,info=self.fine.align(train,initial)
-        except (RuntimeError,ValueError) as exc:
-            T,info=initial.copy(),dict(converged=False,reason='registration_error',detail=str(exc))
-        q=self.fine.quality(held,T)
-        q.update(index=s.index,timestamp=s.timestamp,stage=stage,fine=info,
-                 correction_m_deg=difference(T,initial),T_map_from_base=T.tolist())
-        # A solver failure never becomes a new tracking anchor merely because
-        # the initial pose happens to pass the coarse geometry check.
-        if not info.get('converged'):
-            q.update(accepted=False,reason='fine_registration_failed')
+        T,q=self.fit_continued(s,initial)
+        q['stage']=stage
         q["fit_key"] = key
         self.log(q)
-        self.fit_cache[key] = q
+        self.fit_cache[key] = copy.deepcopy(q)
         self.latest_attempt[s.index]=q
         return T,q
 
@@ -185,11 +289,32 @@ class Recovery:
                 delta=difference(T,pose(prev)@np.linalg.inv(F[0])@F[1])
                 if delta[0]>1 or delta[1]>15:
                     self.quarantined.append(q['index']);continue
-            self.poses[q['index']]=T
-            self.quality[q['index']]=dict(q,stage='baseline_retained',baseline_reused=True)
+            verified = (self.baseline_is_fine and q.get('validation_map_voxel_m') == .01
+                        and q.get('fine', {}).get('engine') == FINE_ENGINE
+                        and q.get('validation_protocol') == VALIDATION_PROTOCOL
+                        and q.get('fine', {}).get('converged'))
+            if not verified:
+                s = self.scan(q['index'])
+                if s is None:
+                    self.latest_attempt[q['index']] = dict(q, accepted=False, reason='scan_unavailable')
+                    continue
+                if k % 25 == 0:
+                    self.progress(f'Refining imported baseline at 1 cm: {k+1}/{len(accepted)} poses')
+                T, refined = self.fit(s, T, 'baseline_fine')
+                q = refined
+            if q['accepted']:
+                self.poses[q['index']]=T
+            self.quality[q['index']]=dict(q,stage='baseline_retained' if verified else 'baseline_fine',
+                                         baseline_reused=bool(verified))
+        promoted = confirm_partial_views(list(self.quality.values()), self.source)
+        for index in promoted:
+            self.poses[index] = np.asarray(self.quality[index]['T_map_from_base'])
         self.baseline_temporal_removed = sorted(self.screen_poses('baseline_temporal_audit'))
 
     def screen_poses(self, stage):
+        # Context validation can invalidate an already retained timestamp.
+        # Pose membership must never override that rejection at checkpoint.
+        self.poses = {i:T for i,T in self.poses.items() if self.quality.get(i, {}).get('accepted', False)}
         times = {q['index']: q['timestamp'] for q in self.rows}
         screened, edges = screen_temporal(self.poses, times, self.source)
         all_edges = list(edges)
@@ -212,7 +337,8 @@ class Recovery:
             return np.asarray(value) if value is not None else None
         result = self._submap_seed(index,allow_global)
         self.seed_cache[key] = result.tolist() if result is not None else None
-        self.log(dict(stage='seed_complete', index=index, allow_global=allow_global, T_map_from_base=self.seed_cache[key]))
+        self.log(dict(stage='seed_complete', index=index, allow_global=allow_global,
+                      T_map_from_base=self.seed_cache[key], certificate=self.seed_certificates.get(index)))
         return result
 
     def seed_guesses(self, anchor):
@@ -229,6 +355,10 @@ class Recovery:
         return guesses
 
     def seed_window(self, index, radius):
+        key = (index, radius)
+        if hasattr(self, 'window_cache') and key in self.window_cache:
+            self.window_cache.move_to_end(key)
+            return self.window_cache[key]
         anchor = self.scan(index)
         if anchor is None:
             self.log(dict(stage='submap_skipped', index=index, radius_s=radius,
@@ -254,19 +384,80 @@ class Recovery:
             return None
         train = voxel(np.concatenate([transform(voxel(s.points, .01),
             np.linalg.inv(anchor.frontend_T) @ s.frontend_T) for s in train_scans]), .01)
-        return anchor, train, validators
+        result = anchor, train, validators
+        # Only the current anchor's two windows are useful across KISS scales.
+        # Bound retained scans too; this cache owns references outside scan().
+        limit = cacheBudget(.02)
+        def size(window):
+            a, p, vs = window
+            return p.nbytes+a.points.nbytes+sum(s.points.nbytes for s in vs)
+        if size(result) <= limit:
+            while self.window_cache and (len(self.window_cache) >= 2 or
+                    sum(size(w) for w in self.window_cache.values())+size(result) > limit):
+                self.window_cache.popitem(last=False)
+            self.window_cache[key] = result
+        return result
+
+    def remember_certificate(self, index, certificate):
+        self.seed_certificates[index] = certificate
+        for member in certificate['members']:
+            self.context_certificates[member['index']] = dict(certificate,
+                member=member, shared_anchor_index=index)
+
+    def certify_submap_pose(self, T, q):
+        certificate = self.context_certificates.get(q['index'])
+        if (certificate is None or not certificate.get('training_quality', {}).get('geometry_supported')
+                or certificate['training_quality'].get('observable_directions') != 6
+                or certificate.get('optimizer_information', {}).get('observable_directions') != 6
+                or not q.get('geometry_supported') or not q.get('fine', {}).get('converged')):
+            return
+        member = certificate['member']
+        dm, da = difference(T, np.asarray(member['T_map_from_base']))
+        if abs(q['timestamp']-member['timestamp']) > 1e-6 or dm > .15 or da > 3:
+            return
+        predicted = np.asarray(member['T_map_from_base'])
+        increment = np.r_[5*Rotation.from_matrix(T[:3, :3]@predicted[:3, :3].T).as_rotvec(),
+                          T[:3, 3]-predicted[:3, 3]]
+        weak = np.asarray(q.get('weak_directions', [])).reshape(-1, 6)
+        weak_departure = float(np.linalg.norm(weak@increment))
+        if weak_departure > .01:
+            q.update(accepted=False, reason='unconstrained_submap_departure')
+            return
+        # The candidate was wholly excluded from the shared-transform fit,
+        # and independent withheld geometry constrains all six directions.
+        q.update(accepted=True, reason='independent_submap_geometry',
+                 acceptance_scope='jointly-fitted-submap',
+                 context_validation=dict(protocol=VALIDATION_PROTOCOL,
+                     shared_transform_fitted=True,
+                     shared_anchor_index=certificate['shared_anchor_index'],
+                     shared_anchor_timestamp=certificate['anchor_timestamp'],
+                     witness_indices=[m['index'] for m in certificate['members'] if m['index'] != q['index']],
+                     observable_directions=certificate['joint']['observable_directions'],
+                     training_observable_directions=certificate['training_quality']['observable_directions'],
+                     optimizer_observable_directions=certificate['optimizer_information']['observable_directions'],
+                     scaled_information_eigenvalues=certificate['joint']['scaled_information_eigenvalues'],
+                     shared_transform_agreement_m_deg=[dm, da],
+                     weak_direction_departure_m=weak_departure, weak_direction_limit_m=.01))
 
     def validate_seed(self, anchor, train, validators, initial, scope, radius, resolution=None):
         self.progress(f'Validating scan {anchor.index}: {2*radius:g} s submap, {scope}, 1 cm fitting')
         self.log(dict(stage='submap_seed_started', index=anchor.index, scope=scope,
                       radius_s=radius, resolution_m=resolution, started_unix=time.time()))
         try:
-            T, info = self.fine.align(train, initial, iterations=180)
+            T, info = self.fine.align(train, initial, iterations=180, capture_information=True)
         except (RuntimeError, ValueError) as exc:
             self.log(dict(stage='submap_seed_failed', index=anchor.index, scope=scope,
                           radius_s=radius, resolution_m=resolution, reason=str(exc)))
             return None
-        _, held = partition(anchor)
+        # Convergence alone does not mean the shared fit determined every DOF.
+        # Check actual training geometry separately from independent validation:
+        # a floor-only fit must never inherit lateral coordinates from SLAM.
+        training_quality = self.fine.quality(voxel(train, .1), T)
+        optimizer_information = info.get('optimizer_information', {})
+        training_supported = (training_quality.get('geometry_supported')
+                              and training_quality.get('observable_directions') == 6
+                              and optimizer_information.get('observable_directions') == 6)
+        _, held = self.prepared_scan(anchor)
         aq = self.fine.quality(held, T)
         costs = [capped_distance_cost(aq)]
         context = []
@@ -281,49 +472,80 @@ class Recovery:
                 context.append(difference(T, self.poses[i]@np.linalg.inv(F)@anchor.frontend_T))
         consistent = all(dm <= .5 and da <= 10 for dm, da in context)
         checks = []
-        if aq['accepted'] and consistent:
+        if training_supported and aq.get('geometry_supported') and consistent and info.get('converged'):
             for s in validators[::max(1, len(validators)//3)][:3]:
                 guess = T @ np.linalg.inv(anchor.frontend_T) @ s.frontend_T
-                costs.append(capped_distance_cost(self.fine.quality(partition(s)[1], guess)))
+                predicted = self.fine.quality(self.prepared_scan(s)[1], guess)
+                costs.append(capped_distance_cost(predicted))
                 fitted, q = self.fit(s, guess, 'submap_heldout')
-                checks.append(dict(q, agreement_m_deg=difference(fitted, guess)))
-        good = sum(q['accepted'] and q['agreement_m_deg'][0] <= .15 and
-                   q['agreement_m_deg'][1] <= 3 for q in checks)
-        plausible = bool(aq['accepted'] and good >= 2 and consistent)
+                checks.append(dict(q, agreement_m_deg=difference(fitted, guess),
+                                   shared_transform_quality=predicted, shared_transform_pose=guess.tolist()))
+        valid = [q for q in checks if q.get('geometry_supported') and q.get('fine', {}).get('converged')
+                 and q['shared_transform_quality'].get('geometry_supported')
+                 and q['agreement_m_deg'][0] <= .15 and q['agreement_m_deg'][1] <= 3]
+        joint = jointly_observable([aq]+[q['shared_transform_quality'] for q in valid],
+            [T]+[np.asarray(q['shared_transform_pose']) for q in valid], T,
+            shared_transform_fitted=bool(info.get('converged')))
+        plausible = bool(training_supported and len(valid) >= 2 and consistent and joint['accepted'])
         ok = bool(info.get('converged') and plausible)
+        certificate = dict(anchor_timestamp=anchor.timestamp, joint=joint, training_quality=training_quality,
+            optimizer_information=optimizer_information,
+            members=[dict(index=anchor.index, timestamp=anchor.timestamp, T_map_from_base=T.tolist())]+
+                    [dict(index=q['index'], timestamp=q['timestamp'],
+                          T_map_from_base=q['shared_transform_pose']) for q in valid])
         if plausible:
-            self.seed_hypotheses.append(dict(T=T, costs=costs, accepted=ok))
+            self.seed_hypotheses.append(dict(T=T, costs=costs, accepted=ok, certificate=certificate))
+        # Keep the raw per-scan rank in each check; the separate joint record is
+        # the evidence that allows a rank-deficient withheld pose to be used.
+        for q in valid:
+            q['accepted_by_joint_validation'] = ok
         self.log(dict(stage='submap_seed', index=anchor.index, scope=scope, radius_s=radius,
                       resolution_m=resolution, T_map_from_base=T.tolist(), accepted=ok,
                       anchor_quality=aq, checks=checks, fine=info, heldout_capped_costs=costs,
+                      training_quality=training_quality, joint_validation=joint,
+                      reason='shared_fit_weak_geometry' if not training_supported else joint['reason'],
                       nearby_anchor_disagreement_m_deg=context))
         return T if ok else None
 
     def _submap_seed(self, index, allow_global=True):
         # Try both local windows before constructing expensive whole-map
         # descriptors. The dense global search is the final fallback.
-        for radius in (1., 3.):
+        local_radii = () if allow_global and (index, False) in self.seed_cache else (1., 3.)
+        for radius in local_radii:
             window = self.seed_window(index, radius)
             if window is None:
                 continue
             anchor, train, validators = window
             guesses = self.seed_guesses(anchor)
             self.seed_hypotheses = []
+            held = self.prepared_scan(anchor)[1]
+            coarse_source = voxel(train, .1)
+            seen = set()
             # A drifted global alignment must not replace a nearby trusted end
             # anchor. Try both ends independently before feature relocalization.
             for label, initial in guesses:
-                q = self.matcher.quality(partition(anchor)[1], initial)
-                if q.get('coverage_20cm', 0) < .3 or q.get('plane_rms_m', 1) >= .12:
+                key = np.asarray(initial, dtype='<f8').tobytes()
+                if key in seen:
+                    continue
+                seen.add(key)
+                q = self.matcher.quality(held, initial)
+                if not q.get('geometry_supported'):
                     continue
                 self.validate_seed(anchor, train, validators, initial, label, radius)
             for label, initial in guesses:
-                coarse = self.matcher.icp(voxel(train, .1), initial)
-                q = self.matcher.quality(partition(anchor)[1], coarse)
-                if q.get('coverage_20cm', 0) < .3 or q.get('plane_rms_m', 1) >= .12:
+                coarse = self.matcher.icp(coarse_source, initial)
+                key = np.asarray(coarse, dtype='<f8').tobytes()
+                if key in seen:
+                    continue
+                seen.add(key)
+                q = self.matcher.quality(held, coarse)
+                if not q.get('geometry_supported'):
                     continue
                 self.validate_seed(anchor, train, validators, coarse, label+'_coarse', radius)
             selected = choose_seed(self.seed_hypotheses)
             if selected is not None:
+                selected_hypothesis = next(h for h in self.seed_hypotheses if h['T'] is selected)
+                self.remember_certificate(index, selected_hypothesis['certificate'])
                 return selected
             if self.seed_hypotheses:
                 self.log(dict(stage='ambiguous_submap_seed', index=index, accepted=False))
@@ -357,13 +579,15 @@ class Recovery:
                     self.validate_seed(anchor, train, validators, initial, label, radius, resolution)
                 selected = choose_seed(self.seed_hypotheses)
                 if selected is not None:
+                    selected_hypothesis = next(h for h in self.seed_hypotheses if h['T'] is selected)
+                    self.remember_certificate(index, selected_hypothesis['certificate'])
                     return selected
                 if self.seed_hypotheses:
                     self.log(dict(stage='ambiguous_submap_seed', index=index, accepted=False))
         return None
 
     def propagate(self,indices,seed_index,seed_T,direction):
-        result={}
+        result={}; pending={}
         seed=self.scan(seed_index)
         if seed is None:return result
         last_T,last_F,last_time=seed_T,seed.frontend_T,seed.timestamp
@@ -378,10 +602,31 @@ class Recovery:
             initial=last_T@np.linalg.inv(last_F)@s.frontend_T
             T,q=self.fit(s,initial,direction)
             dm,da=difference(T,initial)
-            # Large independent corrections need the submap verification path;
-            # elapsed time since an old anchor must not excuse a 90deg jump.
+            # SLAM is a short-interval consistency check, never map evidence.
             limit_m, limit_deg = motion_limits(last_F, s.frontend_T, s.timestamp-last_time)
-            supported=q['accepted'] and dm<=limit_m and da<=limit_deg
+            within_motion = dm <= limit_m and da <= limit_deg
+            if not within_motion:
+                q.update(accepted=False, reason='tracking_motion_inconsistent')
+            else:
+                pending[index] = (T, q)
+                self.certify_submap_pose(T, q)
+                if q.get('reason') == 'partial_view_needs_context':
+                    # Compare decoded scan-anchor timestamps. Dataset selection
+                    # timestamps can refer to the beginning of a rotating scan.
+                    nearby = {i:r for i,r in self.quality.items()
+                              if abs(r.get('timestamp', -1e30)-s.timestamp) <= 1}
+                    nearby.update({i:r for i,r in self.latest_attempt.items()
+                                   if abs(r.get('timestamp', -1e30)-s.timestamp) <= 1})
+                    blocked = self.conflicted | set(self.quarantined) | {i for i, r in nearby.items()
+                        if self.quality.get(i, {}).get('reason') == 'temporal_inconsistency'}
+                    nearby = {i:r for i,r in nearby.items() if i not in blocked}
+                    if s.index not in blocked:
+                        nearby[s.index] = q
+                    promoted = confirm_partial_views(list(nearby.values()), self.source)
+                    for i in promoted:
+                        if i in pending:
+                            result[i] = pending[i]
+            supported=q['accepted'] and within_motion
             if supported:
                 last_T,last_F,last_time=T,s.frontend_T,s.timestamp
                 result[index]=(T,q)
@@ -429,22 +674,26 @@ class Recovery:
     def run(self, local_only=False):
         started=time.monotonic();self.keep_baseline();baseline_count=len(self.poses)
         self.checkpoint()
-        for allow_global in ((False,) if local_only else (False, True)):
+        for phase in (('tracking', 'local') if local_only else ('tracking', 'local', 'global')):
+            allow_global = phase == 'global'
             blocks=[];block=[]
             for q in self.rows:
                 if q['index'] not in self.poses:block.append(q['index'])
                 elif block:blocks.append(block);block=[]
             if block:blocks.append(block)
             suspect = set(self.baseline_temporal_removed)
-            blocks.sort(key=lambda b: (not bool(suspect.intersection(b)), -len(b), b[0]))
-            original_anchors=dict(self.poses)
+            blocks.sort(key=(lambda b: -b[-1]) if phase == 'tracking' else
+                        (lambda b: (not bool(suspect.intersection(b)), -len(b), b[0])))
             for block_number,indices in enumerate(blocks):
+                original_anchors=dict(self.poses)
                 lo,hi=indices[0],indices[-1]
                 before=[i for i in original_anchors if i<lo];after=[i for i in original_anchors if i>hi]
                 forward={};backward={}
-                if before:
+                # Fresh localization already tried every scan forward at 1 cm.
+                # Imported baselines may still have gaps never tried by this engine.
+                if phase == 'tracking' and before and not self.baseline_is_fine:
                     i=max(before);forward=self.propagate(indices,i,original_anchors[i],'forward_fine')
-                if after:
+                if phase == 'tracking' and after:
                     i=min(after);backward=self.propagate(list(reversed(indices)),i,original_anchors[i],'reverse_fine')
                 disputed = set(self.conflicted).intersection(indices)
                 for i in set(forward).intersection(backward):
@@ -461,7 +710,7 @@ class Recovery:
                 # Partial fits also get independent seeds; good residuals at a
                 # wrong local minimum must not suppress relocalization.
                 search_needed = remaining
-                if search_needed:
+                if search_needed and phase != 'tracking':
                     # End/middle/start first, then other stable time segments. A
                     # failed seed does not abandon the rest of a long interval.
                     seeds=list(dict.fromkeys([search_needed[-1],search_needed[len(search_needed)//2],search_needed[0]]))
@@ -479,10 +728,11 @@ class Recovery:
                         # validate_seed may have moved the target to a held-out scan;
                         # obtain the anchor's own final fit and validation again.
                         T,q=self.fit(s,T,'verified_submap_anchor')
+                        self.certify_submap_pose(T, q)
                         if not q['accepted']:continue
                         q.update(index=s.index,timestamp=s.timestamp,stage='verified_submap_seed')
-                        new_forward={seed_index:(T,q),**self.propagate([i for i in indices if i>seed_index],seed_index,T,'submap_forward')}
-                        new_backward={seed_index:(T,q),**self.propagate([i for i in reversed(indices) if i<seed_index],seed_index,T,'submap_reverse')}
+                        new_forward={seed_index:(T,q),**self.propagate([i for i in indices if i>seed_index and (i not in forward and i not in backward or i in disputed)],seed_index,T,'submap_forward')}
+                        new_backward={seed_index:(T,q),**self.propagate([i for i in reversed(indices) if i<seed_index and (i not in forward and i not in backward or i in disputed)],seed_index,T,'submap_reverse')}
                         covered=set(new_forward)|set(new_backward)
                         resolved=covered.intersection(disputed)-verified_indices
                         for i in resolved:
@@ -526,4 +776,4 @@ class Recovery:
 
     def close(self):
         self.attempt_file.close()
-        self.fine.native.close()
+        self.fine.close()

@@ -20,21 +20,25 @@ from trajectory_io import Trajectory, ScanSource, PoseGap, digest, rigid, save_j
 from trajectory_geometry import Matcher, voxel, ply_vertices
 from trajectory_map import prepare_map, reconstruct_maps
 from trajectory_native import NativeSession
-from trajectory_recovery import Recovery, difference, pose
-from trajectory_temporal import screen_temporal
 from point_to_plane import FINE_ENGINE
+from trajectory_validation import (confirm_partial_views, jointly_observable, VALIDATION_PROTOCOL)
+from trajectory_recovery import Recovery, difference, pose, fit_scan
+from trajectory_fine import FineMatcher
+from trajectory_temporal import screen_temporal
 
 
 def record_execution(output, workers):
     from datetime import datetime, timezone
     from importlib.metadata import version
     from native_backend import backendInfo, executablePath
+    from native_correspondence import backendInfo as correspondenceInfo
     sources = sorted([*Path(__file__).parent.glob('trajectory*.py'), Path(__file__).with_name('parallel_runtime.py'),
-                      Path(__file__).with_name('point_to_plane.py')])
+                      Path(__file__).with_name('point_to_plane.py'), Path(__file__).with_name('native_correspondence.py')])
     record = dict(started_utc=datetime.now(timezone.utc).isoformat(), python=sys.version,
                   packages={name:version(name) for name in ('numpy', 'scipy', 'open3d', 'PyYAML')},
                   source_sha256={path.name:digest(path) for path in sources},
                   native=backendInfo(), native_sha256=digest(executablePath()), cpu_threads=workers,
+                  correspondence=correspondenceInfo(),
                   fine_engine=FINE_ENGINE, solver_threads=1, blas_threads=1, available_memory_bytes=availableMemory())
     with (output/'execution.jsonl').open('a', encoding='utf-8') as stream:
         stream.write(json.dumps(record, allow_nan=False)+'\n')
@@ -119,6 +123,9 @@ def inputs(config):
 
 
 def checkpoint_baseline(output, rows):
+    quality = output/'quality.jsonl.tmp'
+    quality.write_text(''.join(json.dumps(q, allow_nan=False)+'\n' for q in rows))
+    quality.replace(output/'quality.jsonl')
     temporary = output/'candidate_trajectory.tum.tmp'
     with temporary.open('w') as f:
         for q in rows:
@@ -155,8 +162,12 @@ def initialize(config, source, matcher, cache, output, indices, workers, progres
                 A = native.kiss(voxel(cloud, resolution), voxel(matcher.p, resolution), resolution, workers)
                 A = matcher.icp(cloud, A)
                 quality = [matcher.quality(voxel(s.points, .1), A@s.frontend_T) for s in held]
-                count = sum(q['accepted'] for q in quality)
-                hypotheses.append(dict(passes=count, T_map_from_frontend=A.tolist(), quality=quality))
+                supported = [(q, A@s.frontend_T) for q, s in zip(quality, held) if q.get('geometry_supported')]
+                joint = jointly_observable([q for q, _ in supported], [T for _, T in supported], A,
+                                           shared_transform_fitted=True, minimum_scans=2)
+                count = len(supported) if joint['accepted'] else 0
+                hypotheses.append(dict(passes=count, T_map_from_frontend=A.tolist(), quality=quality,
+                                       initialization_validation=joint))
             except (ValueError, RuntimeError) as exc:
                 hypotheses.append(dict(passes=0, error=str(exc)))
     save_json(output/'alignment_diagnostics.json', {'hypotheses': hypotheses})
@@ -171,7 +182,11 @@ def baseline(config, source, cache, output, indices, workers, progress):
     output.mkdir(exist_ok=True)
     matcher = Matcher(cache, workers)
     A = initialize(config, source, matcher, cache, output, indices, workers, progress)
-    rows, path = [], output/'quality.jsonl'
+    del matcher
+    rows, path = [], output/'forward_attempts.jsonl'
+    snapshot = output/'quality.jsonl'
+    if not path.exists() and snapshot.exists():
+        path.write_bytes(snapshot.read_bytes())
     if path.exists():
         valid = []
         for line in path.read_text().splitlines(keepends=True):
@@ -183,29 +198,43 @@ def baseline(config, source, cache, output, indices, workers, progress):
                 break
             rows.append(q); valid.append(line)
         path.write_text(''.join(valid))
+    confirm_partial_views(rows, source)
     done = {q['index'] for q in rows}
     accepted = [q for q in rows if q['accepted']]
+    accepted_count = len(accepted)
     last_T = np.asarray(accepted[-1]['T_map_from_base']) if accepted else None
     last_F = source.pose([accepted[-1]['timestamp']])[0] if accepted else None
-    with path.open('a', buffering=1) as stream:
+    with ExitStack() as resources:
+        stream = resources.enter_context(path.open('a', buffering=1))
+        fine = FineMatcher(cache, workers, result_cache=output/'fine_requests')
+        resources.callback(fine.close)
         for scan in source.iter_scans(scan_indices=[i for i in indices if int(i) not in done]):
             initial = A@scan.frontend_T if last_T is None else last_T@np.linalg.inv(last_F)@scan.frontend_T
-            points = voxel(scan.points, .1)
-            T = matcher.icp(points[::2], initial)
-            q = matcher.quality(points[1::2], T)
+            T, q = fit_scan(fine, scan, initial)
             correction = difference(T, initial)
-            q.update(index=scan.index, timestamp=scan.timestamp, T_map_from_base=T.tolist(), correction_m_deg=correction)
+            q['stage'] = 'forward_fine'
             if correction[0] > .5 or correction[1] > 10:
                 q.update(accepted=False, reason='unverified_large_correction')
-            if q['accepted']:
-                last_T, last_F = T, scan.frontend_T
-                accepted.append(q)
+            accepted_count += int(q['accepted'])
             rows.append(q)
+            # Existing independent fits are enough for partial-view context;
+            # weak single-scan directions wait for a fitted submap in recovery.
+            recent = []
+            for candidate in reversed(rows):
+                if scan.timestamp-candidate['timestamp'] > 2:
+                    break
+                recent.append(candidate)
+            accepted_count += len(confirm_partial_views(recent, source))
+            latest = next((r for r in recent if r['accepted']), None)
+            if latest is not None:
+                last_T = np.asarray(latest['T_map_from_base'])
+                last_F = source.pose([latest['timestamp']])[0]
             stream.write(json.dumps(q, allow_nan=False)+'\n')
             if len(rows) % 50 == 0:
                 checkpoint_baseline(output, rows)
                 save_json(output/'input_quality.json', source.scan_quality)
-                progress(f'Localizing scans: {len(rows)}/{len(indices)}, {len(accepted)} accepted')
+                progress(f'Localizing scans at 1 cm: {len(rows)}/{len(indices)}, {accepted_count} accepted')
+        fine.verify_unchanged()
     checkpoint_baseline(output, rows)
     save_json(output/'input_quality.json', source.scan_quality)
     return A
@@ -234,8 +263,8 @@ def import_baseline(folder, output, source, binding):
     return rigid(json.loads((output/'initial_alignment.json').read_text())['T_map_from_frontend'])
 
 
-def export_viewer(config, source, trajectories, output, cache, A, progress):
-    result = output/'recovery'
+def export_viewer(config, source, trajectories, output, cache, A, progress, recovery_name='recovery'):
+    result = output/recovery_name
     quality = [json.loads(line) for line in (result/'quality.jsonl').read_text().splitlines()]
     rows = np.loadtxt(result/'candidate_trajectory.tum', ndmin=2) if (result/'candidate_trajectory.tum').stat().st_size else np.empty((0, 8))
     accepted = [q for q in quality if q['accepted']]
@@ -281,7 +310,23 @@ def export_viewer(config, source, trajectories, output, cache, A, progress):
     save_json(output/'products.json', products)
 
 
-def run(config, report, inspect_only=False, local_only=False):
+def pending_job_status(path):
+    """Recognize the external scheduler's heartbeat before any result exists."""
+    if path.name != 'job_status.json' or not path.is_file() or path.is_symlink():
+        return False
+    try:
+        status = json.loads(path.read_text(encoding='utf-8'))
+        updated = status.get('updated_unix')
+        return (status.get('status') in ('queued', 'running')
+                and isinstance(status.get('stage'), str)
+                and type(updated) in (int, float) and np.isfinite(updated) and updated > 0)
+    except (OSError, ValueError, TypeError, OverflowError, AttributeError):
+        return False
+
+
+def run(config, report, inspect_only=False, local_only=False, baseline_only=False, recovery_only=False, recovery_name='recovery'):
+    if not recovery_name.startswith('recovery') or Path(recovery_name).name != recovery_name or '\\' in recovery_name:
+        raise ValueError('Recovery name must be a single directory name starting with recovery')
     def progress(stage, status='running', **values):
         save_json(report, dict(status=status, stage=stage, **values))
         print(stage, flush=True)
@@ -296,7 +341,8 @@ def run(config, report, inspect_only=False, local_only=False):
                  first_scan_points=len(probe.points), trajectories=[dict(poses=len(t.times), start=float(t.times[0]), end=float(t.times[-1])) for t in trajectories])
         return
     if output.exists() and not (output/'provenance.json').exists():
-        if any(p.name not in ('.trajectory.lock', 'map_cache') for p in output.iterdir()):
+        if any(p.name not in ('.trajectory.lock', 'map_cache') and not pending_job_status(p)
+               for p in output.iterdir()):
             raise ValueError('The selected result folder is not empty; choose a new folder or resume an existing result')
     output.mkdir(parents=True, exist_ok=True)
     cache.mkdir(parents=True, exist_ok=True)
@@ -308,7 +354,7 @@ def run(config, report, inspect_only=False, local_only=False):
                 shutil.rmtree(temporary)
         progress(f'Using up to {workers} CPU threads')
         binding = prepare_map(tls, cache, workers, progress)
-        provenance = dict(protocol='studio-trajectory-v1', config=config, input=source.provenance, map=binding,
+        provenance = dict(protocol='studio-trajectory-v3', validation_protocol=VALIDATION_PROTOCOL, fine_engine=FINE_ENGINE, config=config, input=source.provenance, map=binding,
                           estimate_sha256=[{str(p): digest(p) for p in t.files} for t in trajectories])
         receipt = output/'provenance.json'
         if receipt.exists():
@@ -317,8 +363,12 @@ def run(config, report, inspect_only=False, local_only=False):
                 old_config, new_config = dict(previous['config']), dict(config)
                 old_config.pop('initial_alignment', None)
                 new_config.pop('initial_alignment', None)
-                log = output/'baseline/quality.jsonl'
-                can_initialize = (not log.exists() or log.stat().st_size == 0) and bool(config.get('initial_alignment'))
+                # Before the first checkpoint, completed fits already live in
+                # the append-only journal. A new initial transform must not
+                # silently reuse those poses under a different provenance.
+                logs = [output/'baseline'/name for name in ('quality.jsonl', 'forward_attempts.jsonl')]
+                can_initialize = (all(not log.exists() or log.stat().st_size == 0 for log in logs)
+                                  and bool(config.get('initial_alignment')))
                 previous_without_config = {k:v for k,v in previous.items() if k != 'config'}
                 current_without_config = {k:v for k,v in provenance.items() if k != 'config'}
                 if can_initialize:
@@ -335,21 +385,37 @@ def run(config, report, inspect_only=False, local_only=False):
         save_json(receipt, provenance)
         record_execution(output, workers)
         start = time.monotonic()
-        if config.get('baseline_directory'):
+        from trajectory_stages import ready_baseline, mark_baseline_ready
+        ready = ready_baseline(output, adopt_legacy=True, selected=len(indices))
+        if ready:
+            A = rigid(json.loads((output/'baseline/initial_alignment.json').read_text())['T_map_from_frontend'])
+        elif recovery_only:
+            raise ValueError('Finish the initial 1 cm fitting before running recovery')
+        elif config.get('baseline_directory'):
             A = import_baseline(config['baseline_directory'], output/'baseline', source, binding)
         else:
             A = baseline(config, source, cache, output/'baseline', indices, workers, progress)
+        source.verify_unchanged()
+        if ready is None:
+            ready = mark_baseline_ready(output, len(indices))
+        if baseline_only:
+            progress(f"Initial 1 cm fitting ready: {ready['accepted']}/{ready['processed']} poses; recovery pending",
+                     'baseline_ready', phase='baseline_ready', accepted=ready['accepted'], processed=ready['processed'],
+                     selected=len(indices), elapsed_s=time.monotonic()-start, output_directory=str(output))
+            return
         progress('Preparing 1 cm point-to-plane / Tukey recovery')
-        recovery = Recovery(output/'baseline', output/'recovery', cache, source, workers, progress)
+        recovery = Recovery(output/'baseline', output/recovery_name, cache, source, workers, progress,
+                            baseline_is_fine=not bool(config.get('baseline_directory')),
+                            reuse_fits_from=[output/'recovery'] if recovery_name != 'recovery' else ())
         try:
             recovery.run(local_only=local_only)
         finally:
             recovery.close()
         del recovery  # Release fine tiles and the normal index before map export.
         progress('Building trajectory and map viewer')
-        export_viewer(config, source, trajectories, output, cache, A, progress)
+        export_viewer(config, source, trajectories, output, cache, A, progress, recovery_name)
         source.verify_unchanged()
-        summary = json.loads((output/'recovery/status.json').read_text())
+        summary = json.loads((output/recovery_name/'status.json').read_text())
         progress(f"Completed: {summary['accepted']}/{summary['processed']} poses", 'completed',
                  accepted=summary['accepted'], rejected=summary['rejected'], recovered=summary['recovered'],
                  pending_global_search=bool(local_only),
@@ -362,9 +428,13 @@ def main():
     parser.add_argument('--report', type=Path, required=True)
     parser.add_argument('--inspect', action='store_true')
     parser.add_argument('--local-only', action='store_true', help='Write the local recovery result before optional global search; the same output can resume without this flag')
+    stage = parser.add_mutually_exclusive_group()
+    stage.add_argument('--baseline-only', action='store_true', help='Finish initial 1 cm fitting and preserve it for later recovery')
+    stage.add_argument('--recovery-only', action='store_true', help='Resume recovery from a verified completed 1 cm baseline')
+    parser.add_argument('--recovery-name', default='recovery', help='Separate recovery directory; preserves earlier recovery attempts')
     args = parser.parse_args()
     try:
-        run(json.loads(args.config.read_text(encoding='utf-8')), args.report, args.inspect, args.local_only)
+        run(json.loads(args.config.read_text(encoding='utf-8')), args.report, args.inspect, args.local_only, args.baseline_only, args.recovery_only, args.recovery_name)
     except Exception as error:
         save_json(args.report, dict(status='failed', stage=str(error)))
         raise

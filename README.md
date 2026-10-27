@@ -197,10 +197,12 @@
 - **Run:** choose a separate output folder → **Check inputs** → **Generate trajectory**.
   - KISS initialization → 1 cm Open3D point-to-plane + Tukey localization → recovery of rejected intervals.
   - Every accepted pose passes 1 cm fitting and held-out validation; imported baseline poses are initial guesses for the same refinement.
-  - Recovery: finish reverse tracking on all failed intervals → submap/KISS for unresolved intervals; propagate from newly verified anchors.
-  - Continue supported fits that hit the iteration limit before trying expensive submaps; keep the same geometric and temporal checks.
-  - Partial views use independent neighboring scans; weak single-scan directions require a jointly fitted submap and independent validation.
-  - Recovery seeds: trusted poses on both sides, 2 s / 6 s submaps, regional and full-map KISS at 30 / 50 / 8 cm.
+  - Recovery: reuse or initialize the end pose → reverse tracking → local submap fitting for remaining gaps.
+  - Continue geometrically supported iteration-limited fits before trying submaps; preserve the same validation.
+  - Local submaps: 2 / 6 s windows, initialized from nearby accepted poses and the original map alignment.
+  - Fit the submap at 1 cm, then refine and validate each recovered scan at 1 cm. Stop when local submap recovery fails.
+  - KISS remains part of initial map alignment and independent end initialization; it is not a fallback after local recovery.
+  - Save completed forward/reverse checkpoints for reuse before local submaps.
   - Validate recovered poses on the original 1 cm map; check existing and recovered poses against chronological relative motion.
   - Seed checks withhold the anchor scan and require agreement from at least two other scans.
   - Reuse original 1 cm map search indices across scans; CPU and cache budgets adapt to available resources.

@@ -176,10 +176,8 @@ function visibleTrajectoryJobs(jobs)
             ? JSON.stringify([config.scans.path.replace(/[\\/]+$/, ''), config.tls_map]) : job.id;
     };
     for (const job of jobs)
-        if (!job.inspect && ['completed','saved'].includes(job.status) && job.viewer_available)
-            latest.set(identity(job), job.id);
-    return jobs.filter(job => !job.inspect &&
-        (!['completed','saved'].includes(job.status) || !job.viewer_available || latest.get(identity(job)) === job.id));
+        if (!job.inspect) latest.set(identity(job), job.id);
+    return jobs.filter(job => !job.inspect && latest.get(identity(job)) === job.id);
 }
 
 async function refreshTrajectory()

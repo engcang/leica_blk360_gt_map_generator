@@ -14,9 +14,11 @@ import urllib.request
 import argparse
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--batch", type=Path, required=True)
+parser.add_argument("--plan", default='plan.json')
+parser.add_argument("--release", default='recovery_ready.json')
 args = parser.parse_args()
 BATCH = args.batch.resolve()
-PLAN = json.loads((BATCH/'plan.json').read_text())
+PLAN = json.loads((BATCH/args.plan).read_text())
 ROOT = Path(PLAN['root'])
 sys.path.insert(0, str(ROOT/'mapping'))
 from parallel_runtime import availableMemory
@@ -88,7 +90,7 @@ def register_apps():
                 break
 
 def recovery_ready():
-    release = read(BATCH/'recovery_ready.json')
+    release = read(BATCH/args.release)
     if not release.get('validated') or not release.get('source_sha256'):
         return False
     return all((ROOT/name).is_file() and digest(ROOT/name) == expected
@@ -111,7 +113,7 @@ def launch(job, phase):
                '--config', job['config'], '--report', str(report),
                '--baseline-only' if phase == 'forward' else '--recovery-only']
     if phase == 'recovery':
-        command += ['--recovery-name', PLAN.get('recovery_name', 'recovery_v12')]
+        command += ['--recovery-name', PLAN.get('recovery_name', 'recovery')]
     process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=log,
         stderr=subprocess.STDOUT, start_new_session=True)
     active[seq] = dict(job=job, process=process, log=log, report=report, phase=phase)
@@ -123,16 +125,18 @@ def launch(job, phase):
     print(f'Started {seq}: {phase}, PID {process.pid}', flush=True)
 
 def snapshot():
+    for job in PLAN['jobs']:
+        if states[job['sequence']]['status'] == 'queued':
+            heartbeat(job)
     ordered = [dict(sequence=j['sequence'], output=j['output'], **states[j['sequence']])
                for j in sorted(PLAN['jobs'], key=lambda j:j['sequence'])]
     counts = {s:sum(j['status']==s for j in ordered)
               for s in ('queued','running','completed','failed','cancelled')}
     save_json(BATCH/'status.json', dict(updated_unix=time.time(), started_unix=started,
               controller_pid=os.getpid(), counts=counts, baseline_ready=sum(bool(j.get('baseline_ready')) for j in ordered), jobs=ordered))
-    rows = ['# Fresh 1 cm trajectory runs', '',
-            '- Initial 1 cm fitting for every sequence first; recovery starts after the validated release is ready.',
-            '- Every pose is refitted; saved initial coordinate transforms only.',
-            '- Original eight comparison results remain unchanged.',
+    rows = ['# Trajectory generation', '',
+            '- Preserve completed forward/reverse checkpoints; finish missing reverse work, then local submaps.',
+            '- Local submap fitting → individual 1 cm fitting and validation; no later KISS fallback.',
             '- C++ correspondence search; completed checkpoint poses and attempts retained on resume.',
             f"- Concurrency: {PLAN['max_concurrent']} jobs, {PLAN['threads_per_job']} CPU threads each.", '',
             '| Sequence | State | Stage | Elapsed |', '|---|---|---|---:|']
@@ -151,7 +155,7 @@ for job in PLAN['jobs']:
     output = Path(job['output']); output.mkdir(exist_ok=True)
     previous = read(output/'job_status.json')
     ready = ready_baseline(output, adopt_legacy=True, selected=previous.get('selected'))
-    result = output/PLAN.get('recovery_name', 'recovery_v12')
+    result = output/PLAN.get('recovery_name', 'recovery')
     viewer, summary = read(output/'viewer.json'), read(result/'status.json')
     if (ready and previous.get('status') == 'completed' and summary.get('status') == 'candidate_complete'
             and not summary.get('pending_global_search') and (result/'candidate_trajectory.tum').is_file()
@@ -160,11 +164,14 @@ for job in PLAN['jobs']:
         heartbeat(job)
         continue
     states[job['sequence']] = dict(previous, status='queued', phase='recovery_pending' if ready else 'forward',
-        stage='Initial 1 cm fitting ready; recovery waiting for all baselines and validated update' if ready else 'Waiting for initial 1 cm fitting',
+        stage='Initial 1 cm fitting ready; waiting for a recovery worker' if ready else 'Waiting for initial 1 cm fitting',
         baseline_ready=bool(ready), elapsed_before_s=previous.get('elapsed_s',0))
     states[job['sequence']].pop('pid', None)
     if ready:
         states[job['sequence']].update(processed=ready['processed'], accepted=ready['accepted'])
+        if (result/'quality.jsonl').is_file():
+            states[job['sequence']]['accepted'] = sum(bool(json.loads(line).get('accepted'))
+                for line in (result/'quality.jsonl').read_text().splitlines())
         recoveries.append(job)
     else:
         pending.append(job)
@@ -211,7 +218,7 @@ try:
                     if not ready:
                         raise ValueError('Worker did not publish its baseline completion receipt')
                     heartbeat(job, status='queued', phase='recovery_pending', baseline_ready=True,
-                              stage='Initial 1 cm fitting ready; recovery waiting for all baselines and validated update',
+                              stage='Initial 1 cm fitting ready; waiting for a recovery worker',
                               accepted=ready['accepted'], processed=ready['processed'], elapsed_s=elapsed)
                     recoveries.append(job)
                 else:

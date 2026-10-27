@@ -95,52 +95,36 @@
   - A weak single-scan direction remains provisional until an actual shared submap fit and independent withheld geometry jointly constrain all six directions. SLAM relative motion contributes no geometric information to the rank test.
   - These support and information thresholds are engineering defaults, not sensor-noise-calibrated accuracy bounds.
   - Rotation/translation information scaled with a 5 m lever arm; weak eigenvectors retained in `quality.jsonl`.
-- **Recovery:** shared Open3D point-to-plane ICP + Tukey engine on 1 cm source points and original TLS point tiles.
-  - Same engine as Register, chunk merging, and Additional registration.
+- **Recovery order:** forward 1 cm → reverse 1 cm → local submaps → final validation and export.
+  - Engine: Open3D point-to-plane ICP + Tukey, shared with the registration tabs.
   - Correspondence gates: 80 / 30 / 10 cm; Tukey scales: 10 / 10 / 3.33 cm.
-  - Initial fitting: up to 60 iterations per correspondence gate; stop early on convergence.
-  - Recovery: a geometrically supported individual fit that hits the iteration limit can continue from its last pose, up to 180 iterations per gate. Require the same convergence, held-out geometry, and temporal checks.
-  - Submap seeds: up to 180 iterations per gate.
-  - Convergence: stable fitness/RMSE, or three stable pose updates below 10 µm / 1 µrad with stable RMSE; require positive Tukey support.
-  - Target normals: 4 cm radius, up to 40 neighbors; cached on original tiles with neighbors across tile boundaries.
-  - Held-out validation: original 1 cm target, 20-neighbor planar support within 30 cm; the same residual, distribution, and contextual checks.
-  - After the 1 cm forward pass, finish reverse tracking across all rejected intervals before attempting submap relocalization for remaining failures.
-  - Propagate both ways from a newly verified submap anchor. Imported baselines also receive forward gap recovery because their gaps may never have had a 1 cm attempt.
-  - Relative-motion gate: starts at 15 cm / 3°, with bounded distance/time allowance up to 50 cm / 10°.
-  - Audit existing and recovered poses in both time directions; remove inconsistent runs before fitting and map export.
-  - Exact scan-index/timestamp checks before accepting or exporting poses.
-  - Relocalization: 2 s and 6 s submaps, with guesses from both retained ends and the initial alignment.
-  - KISS fallback: regional/full-map matching at 30 / 50 / 8 cm, followed by the same 1 cm refinement.
-  - Try direct fine fitting and both local window sizes first; visit all local recovery intervals before global search.
-  - Compare direct and coarse-initialized candidates on the same withheld scans, including unmatched points in the cost; reject unresolved alternatives.
-  - Withhold the anchor and entire validation scans from submap fitting; require agreement from at least two other scans.
-  - Require six constrained directions in the actual final Tukey-weighted submap fit, distributed training geometry, and independently withheld geometry. Validation surfaces that received zero fitting weight cannot establish training observability.
-  - Rebase withheld information matrices to the shared anchor before testing joint observability. A final anchor fit must remain within 15 cm / 3° of the independently checked shared transform, with at most 1 cm departure along its individually weak directions (using the 5 m rotation scale).
-  - Record raw single-scan rank separately from joint rank, witness scan indices, and the geometric acceptance scope.
-  - Partial geometric fits still receive independent seed attempts; low residual alone does not suppress relocalization.
-  - Retry conflicting forward/reverse tracks with an independently validated submap; reject unresolved conflicts between seeds.
-  - Parallel normal estimation and correspondence queries; serial Open3D optimizer/reductions; normals/search index reused for nearby scans.
-  - Reuse nearest correspondences between iterations only when the second-neighbor distance and point movement prove they remain exact; ties are queried again.
-  - Cache exact scan partitions and submap windows within a memory budget; reuse identical fits across recovery stages. Different initial poses still receive separate fits.
-  - Previously completed fit requests may be read from an older recovery directory only when every hashed fit input and solver setting matches; validation runs again and the older result stays unchanged.
-  - Reuse tile search plans with a conservative movement margin; include every tile that can contain a closer point, including tile boundaries.
-  - C++/OpenMP searches use persistent nanoflann tile indices, exact correspondence certificates, and reusable Open3D point/normal buffers.
-  - Native search runs automatically when the bundled library is available; `BLK_CORRESPONDENCE_BACKEND=python` selects the reference implementation.
-  - Low-memory or broad diagnostic searches stream through the reference path; point density and distance gates stay unchanged.
+  - Individual fits: 60 iterations per gate; geometrically supported iteration-limit results can continue for 180 iterations per gate.
+  - Reverse tracking reuses an accepted end pose. Otherwise, independently initialize end windows with KISS, then track backwards; try earlier windows if the last window fails.
+    - End initialization uses 2 / 4 / 6 s windows and 30 / 50 / 8 cm KISS resolutions, nearby regions before the whole map.
+    - Its independent scan checks and conditional leave-one-scan-out stability checks are retained.
+  - Local submaps use 2 / 6 s windows, up to 11 / 21 scans, and the preceding/following accepted poses plus the original alignment as initial guesses.
+    - Try the supplied guess and its 10 cm coarse refinement; fit the submap at 1 cm with up to 180 iterations per gate.
+    - Withhold the anchor and complete validation scans; require independent geometry and consistent temporal motion.
+    - Refine each accepted scan individually at 1 cm and propagate from verified anchors in both directions.
+    - Weak individual directions require full-rank shared fitting and independent joint geometry; agreement within 15 cm / 3° and weak-direction departure within 1 cm using the 5 m rotation scale.
+    - Mark support-dependent acceptance only when the individual scan did not already pass.
+    - Stop after local submap recovery; no subsequent KISS search.
+  - Exact scan/timestamp matching, competing-candidate checks, and temporal auditing apply before export.
+  - CPU/memory-aware caches reuse original TLS tiles, normals, exact correspondence indices, partitions, and identical fitting requests.
+  - C++/OpenMP correspondence queries use persistent nanoflann indices and reusable buffers; optimizer reductions remain ordered.
 
 ## Staged campaigns
 
 - **Initial fitting only:** `trajectory_worker.py --config CONFIG --report REPORT --baseline-only`.
   - Saves a completed, hashed `baseline/status.json`; reports `baseline_ready`, with recovery pending.
-- **Continue recovery:** same config with `--recovery-only --recovery-name recovery_v12`.
-  - Verifies the baseline receipt and reuses its completed poses; preserves older `recovery/` results.
-  - Writes the new recovery under `recovery_v12/`; publishes the viewer after recovery and map export finish.
+- **Continue recovery:** same config with `--recovery-only`.
+  - Verify the completed baseline and reuse the hashed `tracking/` checkpoint when available.
+  - Finish missing reverse work before local submaps; save the tracking checkpoint separately.
+  - Publish a trajectory preview against the scanned map during recovery; reconstruct the generated map after recovery finishes.
 - **Batch scheduling:** `scripts/run_trajectory_campaign.py --batch BATCH_DIRECTORY`.
-  - Reads the campaign's `plan.json`; finishes every initial fitting job before starting recovery.
-  - Recovery release requires `recovery_ready.json` with `validated: true` and matching `source_sha256` file hashes.
-  - Failed initial fitting or changed release files hold recovery; queued work is not marked completed.
-  - Exact distance ties retain the reference neighbor choice; original correspondence and solver reduction order are preserved.
-  - Seed progress includes the scan, submap duration, and search scope; individual fit logs separate partitioning, target preparation, fitting, and validation times.
+  - Read `plan.json`; finish initial fitting before launching recovery.
+  - Require `recovery_ready.json` with `validated: true` and matching source hashes.
+  - Bound concurrent jobs and threads; refresh queued and running status in the app.
 - **CPU threads:** Auto uses the available logical CPUs, respecting process affinity and `BLK_CPU_THREADS`.
   - Leave the UI field blank; configuration `workers: 0` or omitted selects Auto.
   - An explicit count limits parallel work; the effective count is recorded in `execution.jsonl`.
@@ -158,9 +142,6 @@
   - Reuse identical submap ICP requests across candidate checks and restarts; bind source points, initial pose, original map hash, normal/index version, solver settings, and library versions.
   - Recompute held-out geometry and temporal checks for each candidate; cached fitting results do not bypass acceptance checks.
   - Changed inputs/settings require a new output folder.
-  - Earlier Nano-GICP recovery journals remain viewable; use a new output folder for the unified engine.
-  - Trajectory v3 / recovery v11 bind validation protocol v2 and the fine-engine version; older results remain viewable, but new computation requires a new output folder.
-  - CLI `--local-only`: save local recovery first; resume the same command without this flag for global search.
   - Existing handoff baselines can be imported without changing their files.
 - **Validity:** accepted poses only in the TUM trajectory; rejected poses remain in quality records.
   - Directions still weak after independent joint validation remain unresolved; no invented poses or interpolation across missing GT.
@@ -170,6 +151,7 @@
 
 - **Trajectory:** `recovery/candidate_trajectory.tum`.
 - **Diagnostics:** `baseline/`, `recovery/quality.jsonl`, `recovery/attempts.jsonl`, `input_quality.json`, `provenance.json`.
+- **Reusable tracking:** `tracking/quality.jsonl`, `tracking/candidate_trajectory.tum`, and their hashed completion receipt.
 - **Live job state:** monitored jobs read `job_status.json`; a saved viewer can remain available while recovery is running or queued.
   - Saved-result imports without live status are labeled `saved`; only a completed worker is labeled `completed`.
   - Background controllers register configurations through `/api/trajectory/monitor` and refresh status timestamps; missing or stale progress is shown as interrupted.

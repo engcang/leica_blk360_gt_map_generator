@@ -263,7 +263,7 @@ def import_baseline(folder, output, source, binding):
     return rigid(json.loads((output/'initial_alignment.json').read_text())['T_map_from_frontend'])
 
 
-def export_viewer(config, source, trajectories, output, cache, A, progress, recovery_name='recovery'):
+def export_viewer(config, source, trajectories, output, cache, A, progress, recovery_name='recovery', preview=False):
     result = output/recovery_name
     quality = [json.loads(line) for line in (result/'quality.jsonl').read_text().splitlines()]
     rows = np.loadtxt(result/'candidate_trajectory.tum', ndmin=2) if (result/'candidate_trajectory.tum').stat().st_size else np.empty((0, 8))
@@ -285,9 +285,11 @@ def export_viewer(config, source, trajectories, output, cache, A, progress, reco
         aligned = A@trajectory.matrices
         data = np.column_stack((trajectory.times, aligned[:, :3, 3], Rotation.from_matrix(aligned[:, :3, :3]).as_quat()))
         layers.append(dict(key=key, label=config['trajectories'][n].get('label') or ('Odometry' if n == 0 else f'Estimate {n+1}'), color=colors[n%len(colors)], rows=data.tolist()))
-    products, input_gaps = reconstruct_maps(source, selections, output, progress, estimates=trajectories, alignment=A, indices=indices,
-                                          workers=threadBudget(config.get('workers')),
-                                          pose_timestamps={'tls_gt':{q['index']:q['timestamp'] for q in accepted}})
+    products, input_gaps = {}, []
+    if not preview:
+        products, input_gaps = reconstruct_maps(source, selections, output, progress, estimates=trajectories, alignment=A, indices=indices,
+                                              workers=threadBudget(config.get('workers')),
+                                              pose_timestamps={'tls_gt':{q['index']:q['timestamp'] for q in accepted}})
     maps = [dict(key='tls_10cm', label='Scanned GT map · 10 cm', path=str(cache/'tls_10cm.ply'), color='#FFFFFF')]
     for layer in layers:
         if layer['key'] in products:
@@ -298,16 +300,17 @@ def export_viewer(config, source, trajectories, output, cache, A, progress, reco
     for item in maps:
         item.setdefault('points', len(ply_vertices(Path(item['path']))))
         item.setdefault('bounds', bounds)
-    input_quality = json.loads((result/'input_quality.json').read_text())
+    input_quality = json.loads((output/'baseline/input_quality.json' if preview else result/'input_quality.json').read_text())
     input_quality['skipped_scan_intervals'] = input_gaps
     input_quality['checked_selected_scans'] = len(indices)
     save_json(output/'input_quality.json', input_quality)
-    save_json(output/'viewer.json', dict(schema_version=1, name=config.get('name', source.sequence), maps=maps,
+    save_json(output/'viewer.json', dict(schema_version=1, name=config.get('name', source.sequence), preview=preview, maps=maps,
         trajectories=layers, gap_s=float(config.get('max_pose_gap_s', .5)),
         quality=[{k:q[k] for k in ('index','timestamp','accepted','reason','plane_rms_m','coverage_20cm','observable_directions') if k in q} for q in quality],
         input_quality=input_quality,
         T_map_from_estimate=A.tolist(), trajectory_sha256=digest(result/'candidate_trajectory.tum')))
-    save_json(output/'products.json', products)
+    if not preview:
+        save_json(output/'products.json', products)
 
 
 def pending_job_status(path):
@@ -324,7 +327,7 @@ def pending_job_status(path):
         return False
 
 
-def run(config, report, inspect_only=False, local_only=False, baseline_only=False, recovery_only=False, recovery_name='recovery'):
+def run(config, report, inspect_only=False, baseline_only=False, recovery_only=False, recovery_name='recovery'):
     if not recovery_name.startswith('recovery') or Path(recovery_name).name != recovery_name or '\\' in recovery_name:
         raise ValueError('Recovery name must be a single directory name starting with recovery')
     def progress(stage, status='running', **values):
@@ -404,11 +407,15 @@ def run(config, report, inspect_only=False, local_only=False, baseline_only=Fals
                      selected=len(indices), elapsed_s=time.monotonic()-start, output_directory=str(output))
             return
         progress('Preparing 1 cm point-to-plane / Tukey recovery')
+        last_preview = [0.]
+        def preview():
+            if time.monotonic()-last_preview[0] >= 60:
+                export_viewer(config, source, trajectories, output, cache, A, progress, recovery_name, preview=True)
+                last_preview[0] = time.monotonic()
         recovery = Recovery(output/'baseline', output/recovery_name, cache, source, workers, progress,
-                            baseline_is_fine=not bool(config.get('baseline_directory')),
-                            reuse_fits_from=[output/'recovery'] if recovery_name != 'recovery' else ())
+                            baseline_is_fine=not bool(config.get('baseline_directory')), tracking_directory=output/'tracking', on_checkpoint=preview)
         try:
-            recovery.run(local_only=local_only)
+            recovery.run()
         finally:
             recovery.close()
         del recovery  # Release fine tiles and the normal index before map export.
@@ -418,7 +425,7 @@ def run(config, report, inspect_only=False, local_only=False, baseline_only=Fals
         summary = json.loads((output/recovery_name/'status.json').read_text())
         progress(f"Completed: {summary['accepted']}/{summary['processed']} poses", 'completed',
                  accepted=summary['accepted'], rejected=summary['rejected'], recovered=summary['recovered'],
-                 pending_global_search=bool(local_only),
+                 pending_global_search=False,
                  elapsed_s=time.monotonic()-start, output_directory=str(output))
 
 
@@ -427,14 +434,13 @@ def main():
     parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--report', type=Path, required=True)
     parser.add_argument('--inspect', action='store_true')
-    parser.add_argument('--local-only', action='store_true', help='Write the local recovery result before optional global search; the same output can resume without this flag')
     stage = parser.add_mutually_exclusive_group()
     stage.add_argument('--baseline-only', action='store_true', help='Finish initial 1 cm fitting and preserve it for later recovery')
     stage.add_argument('--recovery-only', action='store_true', help='Resume recovery from a verified completed 1 cm baseline')
     parser.add_argument('--recovery-name', default='recovery', help='Separate recovery directory; preserves earlier recovery attempts')
     args = parser.parse_args()
     try:
-        run(json.loads(args.config.read_text(encoding='utf-8')), args.report, args.inspect, args.local_only, args.baseline_only, args.recovery_only, args.recovery_name)
+        run(json.loads(args.config.read_text(encoding='utf-8')), args.report, args.inspect, args.baseline_only, args.recovery_only, args.recovery_name)
     except Exception as error:
         save_json(args.report, dict(status='failed', stage=str(error)))
         raise

@@ -5,6 +5,7 @@ import argparse
 from collections import OrderedDict
 import copy
 import json
+import shutil
 from pathlib import Path
 import time
 
@@ -13,11 +14,13 @@ from scipy.spatial.transform import Rotation
 
 from trajectory_fine import FineMatcher
 from trajectory_io import digest, save_json, transform, PoseGap
-from trajectory_geometry import Matcher, voxel
+from trajectory_geometry import voxel
 from trajectory_temporal import screen_temporal, motion_limits
 from trajectory_validation import (confirm_partial_views, jointly_observable, VALIDATION_PROTOCOL,
     LOW_OVERLAP_CONTEXT, MIN_SUPPORT_POINTS, MIN_SUPPORT_CELLS, SUPPORT_CELL_M, MIN_PRINCIPAL_SPAN_M)
 from parallel_runtime import cacheBudget
+from trajectory_tail import TailInitializer, SUBMAP_PROTOCOL, WINDOW_RADII, SUPPORT_AGREEMENT
+from trajectory_local_submaps import LocalSubmaps
 from point_to_plane import FINE_ENGINE, RECOVERY_DISTANCES, RECOVERY_ITERATIONS
 
 
@@ -103,8 +106,8 @@ def choose_seed(hypotheses):
     return best['T']
 
 
-class Recovery:
-    def __init__(self, baseline, output, cache, source, workers, progress, *, baseline_is_fine=False, reuse_fits_from=()):
+class Recovery(LocalSubmaps, TailInitializer):
+    def __init__(self, baseline, output, cache, source, workers, progress, *, baseline_is_fine=False, tracking_directory=None, on_checkpoint=None):
         self.baseline, self.output = Path(baseline), Path(output)
         self.cache, self.source, self.progress = Path(cache), source, progress
         self.baseline_is_fine = baseline_is_fine
@@ -128,28 +131,31 @@ class Recovery:
         self.quarantined, self.global_attempts = [], 0
         self.latest_attempt, self.fit_cache, self.seed_cache = {}, {}, {}
         self.kiss_targets = {}
+        self.seed_fits = {}
+        self.matcher = None
+        self.tracking_directory = Path(tracking_directory) if tracking_directory else self.output/'tracking'
+        self.on_checkpoint = on_checkpoint
+        self.kiss_attempts = set()
         self.seed_hypotheses = []
         self.seed_certificates, self.context_certificates = {}, {}
         self.conflicted = set()
-        self.provenance = dict(protocol='studio-recovery-v12', input=self.source.provenance,
+        self.provenance = dict(protocol='studio-recovery-final-local-v1', input=self.source.provenance,
             baseline_policy='verified-1cm' if baseline_is_fine else 'refit-imported-at-1cm',
             baseline_trajectory_sha256=digest(self.baseline/'candidate_trajectory.tum'),
             baseline_quality_sha256=digest(self.baseline/'quality.jsonl'),
             map=json.loads((cache/'map.json').read_text()),
-            registration='Multiscale KISS / Open3D point-to-plane + Tukey 1cm', fine_engine=FINE_ENGINE,
-            seeds=dict(window_radii_s=[1., 3.], kiss_resolutions_m=[.3, .5, .08],
-                       trusted_end_guesses=True, anchor_withheld=True, retry_partial_fits=True,
-                       direct_fine_before_coarse=True, compare_coarse_candidates=True,
-                       selection='withheld-capped-distance', competing_cost_ratio=.8,
-                       retry_conflicting_tracks=True, iterations_per_stage=180,
-                       schedule='all-reverse-before-submaps', iteration_limit_continuation=180,
-                       exact_fit_reuse_across_stages=True, exact_window_reuse=True),
-            validation=dict(map_voxel_m=.01, planar_neighbors=20, planar_radius_m=.3,
-                            temporal_screen='supported-temporal-chain-v2',
-                            context_protocol=VALIDATION_PROTOCOL, independent_witness_scans=2,
-                            rank_deficiency_policy='full-rank-shared-fit-and-independent-joint-information',
-                            shared_training_observable_directions=6, training_validation_voxel_m=.1,
-                            shared_training_information='actual-final-Tukey-weighted-fit'),
+            registration='Forward/reverse 1cm; local submap 1cm; individual 1cm validation', fine_engine=FINE_ENGINE,
+            seeds=dict(window_radii_s=[1.,3.], iterations_per_stage=180,
+                       initial_guesses=['initial_alignment','before_anchor','after_anchor'],
+                       local_coarse_voxel_m=.1, post_reverse_kiss=False,
+                       tail_initialization='shared-kiss-selective-support-v1',
+                       tail_window_radii_s=list(WINDOW_RADII), tail_kiss_resolutions_m=[.3,.5,.08],
+                       iteration_limit_continuation=180,
+                       schedule='forward-then-reverse-then-local-submaps'),
+            validation=dict(context_protocol=VALIDATION_PROTOCOL, independent_witness_scans=2,
+                            shared_training_observable_directions=6,
+                            shared_training_information='actual-final-Tukey-weighted-fit',
+                            shared_agreement_m_deg=[.15,3.], weak_departure_m=.01),
             target_normals='original-map-4cm-40-with-tile-halo-v1',
             correspondence_distances=list(RECOVERY_DISTANCES), iterations_per_stage=RECOVERY_ITERATIONS,
             relative_fitness=1e-6, relative_rmse=1e-6, solver_threads=1,
@@ -165,11 +171,9 @@ class Recovery:
         if correspondence['backend'] == 'native-tiled-map-v1':
             self.provenance['correspondence'] = correspondence
         save_recovery_provenance(self.output, self.provenance)
-        self.matcher = Matcher(self.cache, workers)
         self.fine = FineMatcher(self.cache, workers, result_cache=self.output/'fine_requests')
         # Read-only acceleration: source points, target, initial pose, solver and
         # iteration settings must match the full request hash. Validation is new.
-        self.fine.result_sources = tuple(Path(p)/'fine_requests' for p in reuse_fits_from)
         attempts = self.output/'attempts.jsonl'
         valid_lines = []
         if attempts.exists():
@@ -181,7 +185,8 @@ class Recovery:
                 if not line.endswith('\n'):
                     break
                 valid_lines.append(line)
-                if q.get('stage') in ('submap_seed', 'submap_seed_failed') and q.get('scope') in ('regional', 'global'):
+                if (q.get('stage') == 'kiss_search' or
+                        q.get('stage') in ('submap_seed', 'submap_seed_failed') and q.get('scope') in ('regional', 'global')):
                     self.global_attempts += 1
                 if 'fit_key' in q:
                     self.fit_cache[q['fit_key']] = q
@@ -189,6 +194,8 @@ class Recovery:
                     self.seed_cache[(q['index'], q.get('allow_global', True))] = q.get('T_map_from_base')
                     if q.get('certificate'):
                         self.remember_certificate(q['index'], q['certificate'])
+                    if q.get('fit') and q.get('T_map_from_base'):
+                        self.seed_fits[q['index']] = (np.asarray(q['T_map_from_base']), q['fit'])
             attempts.write_text(''.join(valid_lines))
         self.attempt_file = attempts.open('a', buffering=1)
         save_json(self.output/'initial_alignment.json', {'T_map_from_frontend':self.A.tolist()})
@@ -330,16 +337,6 @@ class Recovery:
             self.log(dict(stage=stage, rejected_indices=sorted(removed), edges=all_edges))
         return removed
 
-    def submap_seed(self,index,allow_global=True):
-        key = (index, allow_global)
-        if key in self.seed_cache:
-            value = self.seed_cache[key]
-            return np.asarray(value) if value is not None else None
-        result = self._submap_seed(index,allow_global)
-        self.seed_cache[key] = result.tolist() if result is not None else None
-        self.log(dict(stage='seed_complete', index=index, allow_global=allow_global,
-                      T_map_from_base=self.seed_cache[key], certificate=self.seed_certificates.get(index)))
-        return result
 
     def seed_guesses(self, anchor):
         guesses = [('initial_alignment', self.A @ anchor.frontend_T)]
@@ -354,81 +351,55 @@ class Recovery:
                 guesses.append((label, self.poses[i] @ np.linalg.inv(previous.frontend_T) @ anchor.frontend_T))
         return guesses
 
-    def seed_window(self, index, radius):
-        key = (index, radius)
-        if hasattr(self, 'window_cache') and key in self.window_cache:
-            self.window_cache.move_to_end(key)
-            return self.window_cache[key]
-        anchor = self.scan(index)
-        if anchor is None:
-            self.log(dict(stage='submap_skipped', index=index, radius_s=radius,
-                          reason='anchor_scan_unavailable'))
-            return None
-        times = self.source.timestamps
-        nearby = np.flatnonzero(abs(times-times[index]) <= radius)
-        count = 11 if radius <= 1 else 21
-        nearby = nearby[np.unique(np.linspace(0, len(nearby)-1, min(count, len(nearby))).astype(int))]
-        scans = [self.scan(int(i)) for i in nearby]
-        scans = [s for s in scans if s is not None]
-        if len(scans) < 5:
-            return None
-        ts = np.array([s.timestamp for s in scans])
-        ps = np.array([s.frontend_T[:3, 3] for s in scans])
-        if np.any(np.diff(ts) > .5) or np.any(np.linalg.norm(np.diff(ps, axis=0), axis=1)/np.diff(ts) > 8):
-            self.log(dict(stage='submap_skipped', index=index, radius_s=radius, reason='unsupported_relative_motion'))
-            return None
-        # Withhold the anchor and entire validation scans from seed fitting.
-        others = [s for s in scans if s.index != index]
-        train_scans, validators = others[::2], others[1::2]
-        if len(train_scans) < 2 or len(validators) < 2:
-            return None
-        train = voxel(np.concatenate([transform(voxel(s.points, .01),
-            np.linalg.inv(anchor.frontend_T) @ s.frontend_T) for s in train_scans]), .01)
-        result = anchor, train, validators
-        # Only the current anchor's two windows are useful across KISS scales.
-        # Bound retained scans too; this cache owns references outside scan().
-        limit = cacheBudget(.02)
-        def size(window):
-            a, p, vs = window
-            return p.nbytes+a.points.nbytes+sum(s.points.nbytes for s in vs)
-        if size(result) <= limit:
-            while self.window_cache and (len(self.window_cache) >= 2 or
-                    sum(size(w) for w in self.window_cache.values())+size(result) > limit):
-                self.window_cache.popitem(last=False)
-            self.window_cache[key] = result
-        return result
-
     def remember_certificate(self, index, certificate):
         self.seed_certificates[index] = certificate
         for member in certificate['members']:
             self.context_certificates[member['index']] = dict(certificate,
                 member=member, shared_anchor_index=index)
 
-    def certify_submap_pose(self, T, q):
-        certificate = self.context_certificates.get(q['index'])
-        if (certificate is None or not certificate.get('training_quality', {}).get('geometry_supported')
+    def certify_tail_pose(self, T, q, certificate=None):
+        if q.get('accepted'):
+            return
+        if certificate is None:
+            certificate = self.context_certificates.get(q['index'])
+        if certificate and 'member' not in certificate:
+            member = next((m for m in certificate['members'] if m['index'] == q['index']), None)
+            certificate = dict(certificate, member=member, shared_anchor_index=certificate['members'][0]['index']) if member else None
+        if (certificate is None or certificate.get('protocol') != SUBMAP_PROTOCOL
+                or not certificate.get('stability', {}).get('accepted')
+                or not certificate.get('joint', {}).get('accepted')
+                or q['index'] in certificate.get('training_indices', ())
+                or q.get('reason') not in ('weak_directions', 'partial_view_needs_context')
+                or not certificate.get('training_quality', {}).get('geometry_supported')
                 or certificate['training_quality'].get('observable_directions') != 6
                 or certificate.get('optimizer_information', {}).get('observable_directions') != 6
                 or not q.get('geometry_supported') or not q.get('fine', {}).get('converged')):
             return
         member = certificate['member']
         dm, da = difference(T, np.asarray(member['T_map_from_base']))
-        if abs(q['timestamp']-member['timestamp']) > 1e-6 or dm > .15 or da > 3:
+        q['submap_support_check'] = dict(anchor_index=certificate['shared_anchor_index'],
+            agreement_m_deg=[dm, da], agreement_limit_m_deg=list(SUPPORT_AGREEMENT), accepted=False)
+        if abs(q['timestamp']-member['timestamp']) > 1e-6 or dm > SUPPORT_AGREEMENT[0] or da > SUPPORT_AGREEMENT[1]:
+            q['submap_support_check']['reason'] = 'shared_transform_disagreement'
             return
         predicted = np.asarray(member['T_map_from_base'])
         increment = np.r_[5*Rotation.from_matrix(T[:3, :3]@predicted[:3, :3].T).as_rotvec(),
                           T[:3, 3]-predicted[:3, 3]]
         weak = np.asarray(q.get('weak_directions', [])).reshape(-1, 6)
         weak_departure = float(np.linalg.norm(weak@increment))
+        q['submap_support_check'].update(weak_departure_m=weak_departure, weak_limit_m=.01)
         if weak_departure > .01:
+            q['submap_support_check']['reason'] = 'unconstrained_submap_departure'
             q.update(accepted=False, reason='unconstrained_submap_departure')
             return
         # The candidate was wholly excluded from the shared-transform fit,
         # and independent withheld geometry constrains all six directions.
         q.update(accepted=True, reason='independent_submap_geometry',
+                 submap_support_only=True, support_anchor_index=certificate['shared_anchor_index'],
                  acceptance_scope='jointly-fitted-submap',
                  context_validation=dict(protocol=VALIDATION_PROTOCOL,
-                     shared_transform_fitted=True,
+                     shared_transform_fitted=True, support_protocol=SUBMAP_PROTOCOL,
+                     stability=certificate['stability'],
                      shared_anchor_index=certificate['shared_anchor_index'],
                      shared_anchor_timestamp=certificate['anchor_timestamp'],
                      witness_indices=[m['index'] for m in certificate['members'] if m['index'] != q['index']],
@@ -438,159 +409,17 @@ class Recovery:
                      scaled_information_eigenvalues=certificate['joint']['scaled_information_eigenvalues'],
                      shared_transform_agreement_m_deg=[dm, da],
                      weak_direction_departure_m=weak_departure, weak_direction_limit_m=.01))
-
-    def validate_seed(self, anchor, train, validators, initial, scope, radius, resolution=None):
-        self.progress(f'Validating scan {anchor.index}: {2*radius:g} s submap, {scope}, 1 cm fitting')
-        self.log(dict(stage='submap_seed_started', index=anchor.index, scope=scope,
-                      radius_s=radius, resolution_m=resolution, started_unix=time.time()))
-        try:
-            T, info = self.fine.align(train, initial, iterations=180, capture_information=True)
-        except (RuntimeError, ValueError) as exc:
-            self.log(dict(stage='submap_seed_failed', index=anchor.index, scope=scope,
-                          radius_s=radius, resolution_m=resolution, reason=str(exc)))
-            return None
-        # Convergence alone does not mean the shared fit determined every DOF.
-        # Check actual training geometry separately from independent validation:
-        # a floor-only fit must never inherit lateral coordinates from SLAM.
-        training_quality = self.fine.quality(voxel(train, .1), T)
-        optimizer_information = info.get('optimizer_information', {})
-        training_supported = (training_quality.get('geometry_supported')
-                              and training_quality.get('observable_directions') == 6
-                              and optimizer_information.get('observable_directions') == 6)
-        _, held = self.prepared_scan(anchor)
-        aq = self.fine.quality(held, T)
-        costs = [capped_distance_cost(aq)]
-        context = []
-        for label, ids in (('before', [i for i in self.poses if i < anchor.index]),
-                           ('after', [i for i in self.poses if i > anchor.index])):
-            if not ids:
-                continue
-            i = max(ids) if label == 'before' else min(ids)
-            stamp = self.rows_by_index[i]['timestamp']
-            if abs(stamp-anchor.timestamp) <= 3:
-                F = self.source.pose([stamp])[0]
-                context.append(difference(T, self.poses[i]@np.linalg.inv(F)@anchor.frontend_T))
-        consistent = all(dm <= .5 and da <= 10 for dm, da in context)
-        checks = []
-        if training_supported and aq.get('geometry_supported') and consistent and info.get('converged'):
-            for s in validators[::max(1, len(validators)//3)][:3]:
-                guess = T @ np.linalg.inv(anchor.frontend_T) @ s.frontend_T
-                predicted = self.fine.quality(self.prepared_scan(s)[1], guess)
-                costs.append(capped_distance_cost(predicted))
-                fitted, q = self.fit(s, guess, 'submap_heldout')
-                checks.append(dict(q, agreement_m_deg=difference(fitted, guess),
-                                   shared_transform_quality=predicted, shared_transform_pose=guess.tolist()))
-        valid = [q for q in checks if q.get('geometry_supported') and q.get('fine', {}).get('converged')
-                 and q['shared_transform_quality'].get('geometry_supported')
-                 and q['agreement_m_deg'][0] <= .15 and q['agreement_m_deg'][1] <= 3]
-        joint = jointly_observable([aq]+[q['shared_transform_quality'] for q in valid],
-            [T]+[np.asarray(q['shared_transform_pose']) for q in valid], T,
-            shared_transform_fitted=bool(info.get('converged')))
-        plausible = bool(training_supported and len(valid) >= 2 and consistent and joint['accepted'])
-        ok = bool(info.get('converged') and plausible)
-        certificate = dict(anchor_timestamp=anchor.timestamp, joint=joint, training_quality=training_quality,
-            optimizer_information=optimizer_information,
-            members=[dict(index=anchor.index, timestamp=anchor.timestamp, T_map_from_base=T.tolist())]+
-                    [dict(index=q['index'], timestamp=q['timestamp'],
-                          T_map_from_base=q['shared_transform_pose']) for q in valid])
-        if plausible:
-            self.seed_hypotheses.append(dict(T=T, costs=costs, accepted=ok, certificate=certificate))
-        # Keep the raw per-scan rank in each check; the separate joint record is
-        # the evidence that allows a rank-deficient withheld pose to be used.
-        for q in valid:
-            q['accepted_by_joint_validation'] = ok
-        self.log(dict(stage='submap_seed', index=anchor.index, scope=scope, radius_s=radius,
-                      resolution_m=resolution, T_map_from_base=T.tolist(), accepted=ok,
-                      anchor_quality=aq, checks=checks, fine=info, heldout_capped_costs=costs,
-                      training_quality=training_quality, joint_validation=joint,
-                      reason='shared_fit_weak_geometry' if not training_supported else joint['reason'],
-                      nearby_anchor_disagreement_m_deg=context))
-        return T if ok else None
-
-    def _submap_seed(self, index, allow_global=True):
-        # Try both local windows before constructing expensive whole-map
-        # descriptors. The dense global search is the final fallback.
-        local_radii = () if allow_global and (index, False) in self.seed_cache else (1., 3.)
-        for radius in local_radii:
-            window = self.seed_window(index, radius)
-            if window is None:
-                continue
-            anchor, train, validators = window
-            guesses = self.seed_guesses(anchor)
-            self.seed_hypotheses = []
-            held = self.prepared_scan(anchor)[1]
-            coarse_source = voxel(train, .1)
-            seen = set()
-            # A drifted global alignment must not replace a nearby trusted end
-            # anchor. Try both ends independently before feature relocalization.
-            for label, initial in guesses:
-                key = np.asarray(initial, dtype='<f8').tobytes()
-                if key in seen:
-                    continue
-                seen.add(key)
-                q = self.matcher.quality(held, initial)
-                if not q.get('geometry_supported'):
-                    continue
-                self.validate_seed(anchor, train, validators, initial, label, radius)
-            for label, initial in guesses:
-                coarse = self.matcher.icp(coarse_source, initial)
-                key = np.asarray(coarse, dtype='<f8').tobytes()
-                if key in seen:
-                    continue
-                seen.add(key)
-                q = self.matcher.quality(held, coarse)
-                if not q.get('geometry_supported'):
-                    continue
-                self.validate_seed(anchor, train, validators, coarse, label+'_coarse', radius)
-            selected = choose_seed(self.seed_hypotheses)
-            if selected is not None:
-                selected_hypothesis = next(h for h in self.seed_hypotheses if h['T'] is selected)
-                self.remember_certificate(index, selected_hypothesis['certificate'])
-                return selected
-            if self.seed_hypotheses:
-                self.log(dict(stage='ambiguous_submap_seed', index=index, accepted=False))
-        if not allow_global:
-            return None
-        for resolution in (.3, .5, .08):
-            if resolution not in self.kiss_targets:
-                self.kiss_targets[resolution] = voxel(self.fine.kiss_points, resolution)
-            target = self.kiss_targets[resolution]
-            for radius in (1., 3.):
-                window = self.seed_window(index, radius)
-                if window is None:
-                    continue
-                anchor, train, validators = window
-                guesses = self.seed_guesses(anchor)
-                src = voxel(train, resolution)
-                moved = transform(src, guesses[-1][1])
-                lo, hi = moved.min(0)-5, moved.max(0)+5
-                regional = target[np.all((target >= lo) & (target <= hi), axis=1)]
-                targets = [('regional', regional), ('global', target)] if 80 <= len(regional) < len(target)*.9 else [('global', target)]
-                self.seed_hypotheses = []
-                for label, target_points in targets:
-                    self.global_attempts += 1
-                    self.progress(f'Relocalizing scan {index}: {2*radius:g} s submap, KISS {resolution:g} m, {label}')
-                    try:
-                        initial = self.fine.native.kiss(src, target_points, resolution, self.fine.workers)
-                    except (RuntimeError, ValueError) as exc:
-                        self.log(dict(stage='submap_seed_failed', index=index, scope=label,
-                                      radius_s=radius, resolution_m=resolution, reason=str(exc)))
-                        continue
-                    self.validate_seed(anchor, train, validators, initial, label, radius, resolution)
-                selected = choose_seed(self.seed_hypotheses)
-                if selected is not None:
-                    selected_hypothesis = next(h for h in self.seed_hypotheses if h['T'] is selected)
-                    self.remember_certificate(index, selected_hypothesis['certificate'])
-                    return selected
-                if self.seed_hypotheses:
-                    self.log(dict(stage='ambiguous_submap_seed', index=index, accepted=False))
-        return None
+        q['submap_support_check'].update(accepted=True, reason='independent_submap_geometry')
 
     def propagate(self,indices,seed_index,seed_T,direction):
         result={}; pending={}
         seed=self.scan(seed_index)
         if seed is None:return result
         last_T,last_F,last_time=seed_T,seed.frontend_T,seed.timestamp
+        seed_quality = self.quality.get(seed_index, self.seed_fits.get(seed_index, (None, {}))[1])
+        support_ancestors = set(seed_quality.get('support_ancestors', []))
+        if seed_quality.get('submap_support_only'):
+            support_ancestors.add(seed_index)
         lost=0
         last_progress = 0.
         for n,index in enumerate(indices):
@@ -601,6 +430,7 @@ class Recovery:
                 last_progress = time.monotonic()
             initial=last_T@np.linalg.inv(last_F)@s.frontend_T
             T,q=self.fit(s,initial,direction)
+            q['support_ancestors'] = sorted(support_ancestors)
             dm,da=difference(T,initial)
             # SLAM is a short-interval consistency check, never map evidence.
             limit_m, limit_deg = motion_limits(last_F, s.frontend_T, s.timestamp-last_time)
@@ -630,6 +460,8 @@ class Recovery:
             if supported:
                 last_T,last_F,last_time=T,s.frontend_T,s.timestamp
                 result[index]=(T,q)
+                if q.get('submap_support_only'):
+                    support_ancestors.add(index)
             # Partial overlap at a stale pose must not postpone relocalization
             # through thousands of rejected scans.
             lost=0 if supported else lost+1
@@ -656,9 +488,92 @@ class Recovery:
                     q.update(reason='isolated_large_correction_quarantined',stage='quarantined')
                 if index in self.poses:
                     T=self.poses[index];row=np.r_[original['timestamp'],T[:3,3],Rotation.from_matrix(T[:3,:3]).as_quat()]
+                    q['T_map_from_base'] = T.tolist()
                     f.write(' '.join(f'{x:.9f}' for x in row)+'\n')
                 g.write(json.dumps(q,allow_nan=False)+'\n')
         pose_tmp.replace(self.output/'candidate_trajectory.tum');quality_tmp.replace(self.output/'quality.jsonl')
+        if self.on_checkpoint:
+            self.on_checkpoint()
+
+
+    def restore_accepted_checkpoint(self):
+        path = self.output/'quality.jsonl'
+        if not path.exists():
+            return
+        self.poses, self.quality = {}, {}
+        for q in map(json.loads, path.read_text().splitlines()):
+            index = q['index']
+            self.quality[index] = q
+            if q.get('reason') == 'seed_disagreement':
+                self.conflicted.add(index)
+            if index in self.poses or not q.get('accepted') or index in self.quarantined:
+                continue
+            if index not in self.rows_by_index or abs(q['timestamp']-self.source.anchor_timestamp(index)) > 1e-6:
+                raise ValueError('Recovery checkpoint scan timestamp changed')
+            self.poses[index] = np.asarray(q['T_map_from_base'])
+            self.quality[index] = q
+        self.screen_poses('resumed_temporal_audit')
+
+    def restore_tracking(self):
+        folder = self.tracking_directory
+        receipt = folder/'tracking_complete.json'
+        if not receipt.exists():
+            return False
+        saved = json.loads(receipt.read_text())
+        keys = ('input', 'map', 'baseline_trajectory_sha256', 'baseline_quality_sha256',
+                'fine_engine', 'correspondence_distances', 'iterations_per_stage', 'thresholds')
+        if (saved.get('protocol') != 'forward-reverse-checkpoint-v1' or not saved.get('completed')
+                or any(saved['provenance'].get(k) != self.provenance.get(k) for k in keys)):
+            raise ValueError('Forward/reverse checkpoint inputs or settings changed')
+        for name, key in (('quality.jsonl', 'quality_sha256'), ('candidate_trajectory.tum', 'trajectory_sha256')):
+            if digest(folder/name) != saved[key]:
+                raise ValueError('Forward/reverse checkpoint is incomplete or changed')
+        rows = [json.loads(line) for line in (folder/'quality.jsonl').read_text().splitlines()]
+        if [q['index'] for q in rows] != [q['index'] for q in self.rows]:
+            raise ValueError('Forward/reverse checkpoint scan selection changed')
+        values = np.loadtxt(folder/'candidate_trajectory.tum', ndmin=2) if saved['accepted'] else np.empty((0,8))
+        accepted = [q for q in rows if q.get('accepted')]
+        if len(accepted) != saved['accepted'] or len(values) != len(accepted):
+            raise ValueError('Forward/reverse checkpoint pose count mismatch')
+        allowed = {'baseline_retained', 'baseline_fine', 'forward_fine', 'reverse_fine', 'tail_seed', 'tail_forward'}
+        for q, row in zip(accepted, values):
+            if (q.get('stage') not in allowed or abs(q['timestamp']-row[0]) > 1e-6
+                    or abs(q['timestamp']-self.source.anchor_timestamp(q['index'])) > 1e-6
+                    or not np.allclose(pose(row), q['T_map_from_base'], atol=2e-8, rtol=0)):
+                raise ValueError('Forward/reverse checkpoint contains an invalid or post-reverse pose')
+        self.quality = {q['index']:q for q in rows}
+        self.poses = {q['index']:np.asarray(q['T_map_from_base']) for q in accepted}
+        self.quarantined = saved['quarantined']
+        self.conflicted = set(saved['conflicted'])
+        self.baseline_temporal_removed = saved['baseline_temporal_removed']
+        self.log(dict(stage='tracking_checkpoint_reused', accepted=len(accepted)))
+        return True
+
+    def save_tracking(self):
+        self.checkpoint()
+        folder = self.tracking_directory
+        folder.mkdir(parents=True, exist_ok=True)
+        for name in ('quality.jsonl', 'candidate_trajectory.tum'):
+            temporary = folder/(name+'.tmp')
+            shutil.copyfile(self.output/name, temporary)
+            temporary.replace(folder/name)
+        save_json(folder/'tracking_complete.json', dict(protocol='forward-reverse-checkpoint-v1',
+            completed=True, accepted=len(self.poses), processed=len(self.rows), provenance=self.provenance,
+            quality_sha256=digest(folder/'quality.jsonl'), trajectory_sha256=digest(folder/'candidate_trajectory.tum'),
+            quarantined=self.quarantined, conflicted=sorted(self.conflicted),
+            baseline_temporal_removed=self.baseline_temporal_removed))
+
+    def seed_indices(self, indices, *, from_end=False):
+        if not indices:
+            return []
+        ordered = list(reversed(indices)) if from_end else indices
+        seeds = [ordered[0]]
+        stamp = self.rows_by_index[ordered[0]]['timestamp']
+        for index in ordered[1:]:
+            t = self.rows_by_index[index]['timestamp']
+            if abs(t-stamp) >= 30:
+                seeds.append(index); stamp = t
+        return list(dict.fromkeys(seeds+[ordered[len(ordered)//2], ordered[-1]]))
 
     def merge_direction(self,dest,new):
         for i,value in new.items():
@@ -671,11 +586,17 @@ class Recovery:
                     continue
             dest[i]=value
 
-    def run(self, local_only=False):
+    def run(self, tracking_only=False):
         started=time.monotonic();self.keep_baseline();baseline_count=len(self.poses)
+        tracking_ready = self.restore_tracking()
+        self.restore_accepted_checkpoint()
         self.checkpoint()
-        for phase in (('tracking', 'local') if local_only else ('tracking', 'local', 'global')):
-            allow_global = phase == 'global'
+        phases = ('tracking',) if tracking_only else ('tracking', 'local')
+        for phase in phases:
+            if phase == 'tracking' and tracking_ready:
+                continue
+            allow_global = False
+            self.window_cache.clear()
             blocks=[];block=[]
             for q in self.rows:
                 if q['index'] not in self.poses:block.append(q['index'])
@@ -695,6 +616,28 @@ class Recovery:
                     i=max(before);forward=self.propagate(indices,i,original_anchors[i],'forward_fine')
                 if phase == 'tracking' and after:
                     i=min(after);backward=self.propagate(list(reversed(indices)),i,original_anchors[i],'reverse_fine')
+                elif phase == 'tracking':
+                    # Reuse an accepted end when available; otherwise initialize
+                    # independent windows from the end, including earlier windows
+                    # when the last scan is outside the TLS map.
+                    for seed_index in self.seed_indices(indices, from_end=True):
+                        T = self.initialize_tail(seed_index, allow_global=False)
+                        if T is None:
+                            T = self.initialize_tail(seed_index, allow_global=True)
+                        if T is None:
+                            continue
+                        T, q = self.seed_pose(seed_index, T)
+                        self.certify_submap_pose(T, q)
+                        if not q.get('accepted'):
+                            continue
+                        q.update(stage='tail_seed')
+                        self.seed_fits[seed_index] = (T, q)
+                        backward = {seed_index:(T,q), **self.propagate(
+                            [i for i in reversed(indices) if i < seed_index], seed_index,T,'reverse_fine')}
+                        forward = self.propagate([i for i in indices if i > seed_index],seed_index,T,'tail_forward')
+                        self.log(dict(stage='tail_initialized', index=seed_index,
+                                      reverse_recovered=len(backward), forward_recovered=len(forward)))
+                        break
                 disputed = set(self.conflicted).intersection(indices)
                 for i in set(forward).intersection(backward):
                     dm, da = difference(forward[i][0], backward[i][0])
@@ -725,8 +668,8 @@ class Recovery:
                         T=self.submap_seed(seed_index, allow_global=allow_global)
                         if T is None:continue
                         s=self.scan(seed_index)
-                        # validate_seed may have moved the target to a held-out scan;
-                        # obtain the anchor's own final fit and validation again.
+                        # Use the fitted submap as the initial pose for the
+                        # anchor's own 1 cm fitting and validation.
                         T,q=self.fit(s,T,'verified_submap_anchor')
                         self.certify_submap_pose(T, q)
                         if not q['accepted']:continue
@@ -759,6 +702,8 @@ class Recovery:
                 self.checkpoint()
                 self.progress(f'Recovered {len(self.poses)-baseline_count} poses; interval {block_number+1}/{len(blocks)}')
                 print(f'{self.source.sequence}: block {block_number+1}/{len(blocks)}, {len(self.poses)-baseline_count} recovered',flush=True)
+            if phase == 'tracking':
+                self.save_tracking()
         self.source.verify_unchanged();self.fine.verify_unchanged()
         if digest(self.baseline/'candidate_trajectory.tum')!=self.provenance['baseline_trajectory_sha256']:
             raise ValueError('Baseline changed during recovery')
@@ -766,11 +711,11 @@ class Recovery:
         # Preserve baseline skipped-input facts; recovery does not invent deskew.
         save_json(self.output/'input_quality.json',json.loads((self.baseline/'input_quality.json').read_text()))
         save_json(self.output/'status.json',dict(status='candidate_complete',processed=len(self.rows),
-            pending_global_search=bool(local_only),
+            pending_global_search=False, recovery_method='local-submap-final-v1',
             accepted=len(self.poses),rejected=len(self.rows)-len(self.poses),baseline_retained=baseline_count,
             recovered=len(self.poses)-baseline_count,quarantined_indices=self.quarantined,
             baseline_temporal_rejected=self.baseline_temporal_removed,
-            elapsed_s=time.monotonic()-started,elapsed_scope='current_recovery_invocation',global_attempts=self.global_attempts,
+            elapsed_s=time.monotonic()-started,elapsed_scope='current_recovery_invocation',tail_kiss_attempts=self.global_attempts,
             has_invalid_intervals=len(self.poses)<len(self.rows),certified_gt=False))
 
 

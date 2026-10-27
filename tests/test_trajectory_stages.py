@@ -100,7 +100,7 @@ class StagedTrajectoryTests(unittest.TestCase):
             try:
                 with patch.object(r,'propagate',side_effect=lambda *a:events.append(('reverse',a[0])) or {}), \
                      patch.object(r,'submap_seed',side_effect=lambda *a,**kw:events.append(('submap',a[0]))):
-                    r.run(local_only=True)
+                    r.run()
                 self.assertEqual([e[0] for e in events[:2]],['reverse','reverse'])
                 self.assertTrue(all(e[0]=='submap' for e in events[2:]))
                 window=r.seed_window(3,1.)

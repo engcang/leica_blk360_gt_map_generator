@@ -362,7 +362,7 @@ class NativeTests(unittest.TestCase):
                 calls.append(1)
                 return original(matcher, points, initial, **kwargs)
             with patch.object(FineMatcher, 'align', new=recorded):
-                run(config, root/'progress.json', local_only=True)
+                run(config, root/'progress.json')
             quality = [json.loads(line) for line in (root/'output/recovery/quality.jsonl').read_text().splitlines()]
             self.assertEqual(len(calls), 8)
             for q in quality:
@@ -373,7 +373,7 @@ class NativeTests(unittest.TestCase):
             np.testing.assert_allclose(np.loadtxt(root/'output/recovery/candidate_trajectory.tum'),
                                        np.loadtxt(root/'estimate.tum'), atol=1e-4)
             before = (root/'output/recovery/candidate_trajectory.tum').read_bytes()
-            run(config, root/'progress.json', local_only=True)
+            run(config, root/'progress.json')
             self.assertEqual((root/'output/recovery/candidate_trajectory.tum').read_bytes(), before)
 
     def test_weak_single_planes_require_jointly_fitted_independent_submap(self):
@@ -384,7 +384,7 @@ class NativeTests(unittest.TestCase):
                 np.save(path, points[(i % 3)*3500:((i % 3)+1)*3500])
             A = np.eye(4); A[:3, 3] = [.08, -.06, .04]
             config['initial_alignment'] = A.tolist()
-            run(config, root/'progress.json', local_only=True)
+            run(config, root/'progress.json')
             baseline = [json.loads(line) for line in (root/'output/baseline/quality.jsonl').read_text().splitlines()]
             self.assertTrue(all(not q['accepted'] for q in baseline))
             quality = [json.loads(line) for line in (root/'output/recovery/quality.jsonl').read_text().splitlines()]
@@ -406,7 +406,7 @@ class NativeTests(unittest.TestCase):
             root = Path(folder); config = fixture(root, count=8)
             for path in (root/'scans').glob('*.npy'):
                 np.save(path, np.load(path)[:3500])
-            run(config, root/'progress.json', local_only=True)
+            run(config, root/'progress.json')
             quality = [json.loads(line) for line in (root/'output/recovery/quality.jsonl').read_text().splitlines()]
             self.assertTrue(all(not q['accepted'] for q in quality))
             self.assertEqual((root/'output/recovery/candidate_trajectory.tum').stat().st_size, 0)
@@ -454,7 +454,7 @@ class NativeTests(unittest.TestCase):
             self.assertEqual(result['checks'], [])
             self.assertAlmostEqual(result['T_map_from_base'][0][3], .07, places=5)
 
-    def test_global_fallback_does_not_repeat_reverse_tracking(self):
+    def test_failed_local_submap_stops_without_kiss_fallback(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder); config = fixture(root)
             run(config, root/'progress.json')
@@ -470,7 +470,7 @@ class NativeTests(unittest.TestCase):
                      patch.object(recovery, 'submap_seed', return_value=None) as seeds:
                     recovery.run()
                 self.assertEqual([call.args[-1] for call in propagation.call_args_list], ['reverse_fine'])
-                self.assertEqual([call.kwargs['allow_global'] for call in seeds.call_args_list], [False, True])
+                self.assertEqual([call.kwargs['allow_global'] for call in seeds.call_args_list], [False])
             finally:
                 recovery.close()
 
@@ -489,7 +489,7 @@ class NativeTests(unittest.TestCase):
             try:
                 with patch.object(recovery,'propagate',wraps=recovery.propagate) as propagate, \
                      patch.object(recovery,'submap_seed',side_effect=AssertionError('Reverse already recovered the gap')):
-                    recovery.run(local_only=True)
+                    recovery.run()
                     self.assertEqual([call.args[-1] for call in propagate.call_args_list],['reverse_fine'])
                     self.assertEqual(propagate.call_args.args[0],[3])
             finally:recovery.close()
@@ -502,7 +502,7 @@ class NativeTests(unittest.TestCase):
             drifted=expected.copy();drifted[:,1]+=10+np.arange(len(drifted))*.04
             np.savetxt(root/'estimate.tum',drifted)
             A=np.eye(4);A[0,3]=-10;config['initial_alignment']=A.tolist()
-            run(config,root/'progress.json',local_only=True)
+            run(config,root/'progress.json')
             rows=[json.loads(line) for line in (root/'output/baseline/quality.jsonl').read_text().splitlines()]
             self.assertEqual(len(rows),len(expected))
             for q in rows:
@@ -588,7 +588,7 @@ class NativeTests(unittest.TestCase):
                     return result
                 return original(indices,seed_index,seed_T,direction)
             try:
-                with patch.object(recovery,'propagate',side_effect=conflicting):recovery.run(local_only=True)
+                with patch.object(recovery,'propagate',side_effect=conflicting):recovery.run()
             finally:recovery.close()
             actual=np.loadtxt(root/'conflict-recovery/candidate_trajectory.tum')
             np.testing.assert_allclose(actual,all_poses,atol=1e-4)
@@ -612,7 +612,7 @@ class NativeTests(unittest.TestCase):
                 np.testing.assert_allclose(repeated,T,atol=1e-4)
                 self.assertIsNone(native.process)
 
-    def test_submap_end_seed_recovers_without_a_baseline_anchor(self):
+    def test_local_submap_recovers_when_end_initialization_fails(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder); config = fixture(root)
             run(config, root/'progress.json')
@@ -626,14 +626,16 @@ class NativeTests(unittest.TestCase):
             recovered = root/'new-seed'
             recovery = Recovery(baseline, recovered, cache, source, 2, lambda text: None)
             try:
-                recovery.run(local_only=True)
+                with patch.object(recovery, 'initialize_tail', return_value=None):
+                    recovery.run()
             finally:
                 recovery.close()
             actual = np.loadtxt(recovered/'candidate_trajectory.tum')
-            self.assertTrue(json.loads((recovered/'status.json').read_text())['pending_global_search'])
+            self.assertFalse(json.loads((recovered/'status.json').read_text())['pending_global_search'])
             recovery = Recovery(baseline, recovered, cache, source, 2, lambda text: None)
             try:
-                recovery.run()
+                with patch.object(recovery, 'initialize_tail', return_value=None):
+                    recovery.run()
             finally:
                 recovery.close()
             np.testing.assert_array_equal(np.loadtxt(recovered/'candidate_trajectory.tum'),actual)
@@ -730,7 +732,7 @@ class NativeTests(unittest.TestCase):
             finally:resumed.close()
             result=np.loadtxt(recovered/'candidate_trajectory.tum')
             self.assertEqual(len(result),8)
-            self.assertEqual(json.loads((recovered/'status.json').read_text())['global_attempts'],1)
+            self.assertEqual(json.loads((recovered/'status.json').read_text())['tail_kiss_attempts'],1)
             np.testing.assert_allclose(result[:,1:4],trajectory[:,1:4],atol=1e-4)
             receipt=json.loads((recovered/'provenance.json').read_text())
             from point_to_plane import FINE_ENGINE

@@ -22,7 +22,7 @@ namespace blk_core
                 ? readJson(root_ / "trajectory_jobs.json")
                 : nlohmann::json{{"jobs", nlohmann::json::array()}, {"draft", nlohmann::json::object()}};
             for (auto &job : state_["jobs"])
-                if (job.value("status", "") == "running" && !job.value("managed_externally", false)) job["status"] = "interrupted";
+                if ((job.value("status", "") == "running" || job.value("status", "") == "queued") && !job.value("managed_externally", false)) job["status"] = "interrupted";
             save();
         }
 
@@ -87,83 +87,154 @@ namespace blk_core
                     }
                     catch (...) {}
                 }
-                job["viewer_available"] = std::filesystem::is_regular_file(std::filesystem::u8path(job.at("output_directory").get<std::string>()) / "viewer.json");
+                job["viewer_available"] = std::filesystem::is_regular_file(viewerPath(job));
             }
             return result;
         }
 
-        void start(const nlohmann::json &body, const std::string &python)
+        nlohmann::json helper(nlohmann::json request, const std::string &python)
         {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (running_) throw std::runtime_error("A trajectory worker is already running");
-            if (worker_.joinable()) worker_.join();
-            const bool inspect = body.value("inspect", false);
-            nlohmann::json config;
-            std::string id;
-            if (body.contains("resume_id"))
+            const auto temporary = root_ / "trajectory_requests" / newId();
+            std::filesystem::create_directories(temporary);
+            try
             {
-                auto &job = find(body.at("resume_id"));
-                if (job.value("managed_externally", false)) throw std::runtime_error("This job is managed by its existing worker");
-                config = job.at("config");
-                id = job.at("id");
+                writeText(temporary / "request.json", request.dump());
+                std::atomic<bool> cancelled{false};
+                const int code = runWorkerProcess({python, "-u", (scripts_ / "trajectory_project.py").u8string(),
+                    "--request", (temporary / "request.json").u8string(), "--response", (temporary / "response.json").u8string()},
+                    temporary / "worker.log", cancelled);
+                if (code != 0) throw std::runtime_error("Could not read trajectory files: " + tail(temporary / "worker.log"));
+                const auto response = readJson(temporary / "response.json");
+                std::filesystem::remove_all(temporary);
+                if (response.contains("error")) throw std::runtime_error(response.at("error").get<std::string>());
+                return response;
             }
-            else
-            {
-                config = body.at("config");
-                const auto output = config.at("output_directory").get<std::string>();
-                if (output.empty()) throw std::runtime_error("Choose a trajectory output folder");
-                config["output_directory"] = std::filesystem::weakly_canonical(std::filesystem::absolute(std::filesystem::u8path(output))).u8string();
-                id = newId();
-                state_["jobs"].push_back({{"id", id}, {"name", config.value("name", "Trajectory")}, {"config", config},
-                    {"output_directory", config.at("output_directory")}, {"inspect", inspect}});
-            }
-            const auto report = root_ / "trajectory_reports" / newId();
-            std::filesystem::create_directories(report);
-            writeText(report / "config.json", config.dump(2));
-            writeText(report / "progress.json", nlohmann::json{{"status", "running"}, {"stage", "Starting trajectory worker"}}.dump());
-            auto &job = find(id);
-            job["report_directory"] = report.u8string();
-            job["status"] = "running";
-            job["stage"] = inspect ? "Checking inputs" : "Starting trajectory generation";
-            state_["draft"] = config;
-            save();
-            std::vector<std::string> args{python, "-u", (scripts_ / "trajectory_worker.py").u8string(),
-                "--config", (report / "config.json").u8string(), "--report", (report / "progress.json").u8string()};
-            if (inspect) args.push_back("--inspect");
-            cancel_.store(false);
-            running_ = true;
-            worker_ = std::thread([this, id, args, report]
-            {
-                nlohmann::json result;
-                try
-                {
-                    const int code = runWorkerProcess(args, report / "worker.log", cancel_);
-                    result = readJson(report / "progress.json");
-                    if (code == -1) result = {{"status", "cancelled"}, {"stage", "Stopped; completed work is available for resume"}};
-                    else if (code != 0) result["status"] = "failed";
-                }
-                catch (const std::exception &error) { result = {{"status", "failed"}, {"stage", error.what()}}; }
-                std::lock_guard<std::mutex> guard(mutex_);
-                find(id).update(result);
-                running_ = false;
-                try { save(); } catch (...) {}
-            });
+            catch (...) { std::filesystem::remove_all(temporary); throw; }
         }
 
-        void open(const std::string &directory)
+        nlohmann::json start(const nlohmann::json &body, const std::string &python)
         {
-            const auto path = std::filesystem::canonical(std::filesystem::u8path(directory));
-            const auto viewer = readJson(path / "viewer.json");
-            const auto provenance = readJson(path / "provenance.json");
-            if (viewer.value("schema_version", 0) != 1 || !viewer.at("maps").is_array())
-                throw std::runtime_error("Not a BLK Studio trajectory result");
             std::lock_guard<std::mutex> lock(mutex_);
-            for (const auto &job : state_["jobs"])
-                if (!job.value("inspect", false) && job.at("output_directory") == path.u8string()) return;
-            state_["jobs"].push_back({{"id", newId()}, {"name", viewer.value("name", "Trajectory")},
-                {"output_directory", path.u8string()}, {"config", provenance.at("config")}, {"status", "saved"}, {"stage", "Saved result available"},
-                {"managed_externally", std::filesystem::is_regular_file(path / "job_status.json")}});
+            if (running_) throw std::runtime_error("A trajectory batch is already running");
+            if (worker_.joinable()) worker_.join();
+            const bool inspect = body.value("inspect", false);
+            auto configs = body.contains("configs") ? body.at("configs") : nlohmann::json::array();
+            std::string resume;
+            if (body.contains("resume_id"))
+            {
+                resume = body.at("resume_id");
+                auto &job = find(resume);
+                if (job.value("managed_externally", false)) throw std::runtime_error("This job is managed by its existing worker");
+                configs.push_back(job.at("config"));
+            }
+            else if (configs.empty() && body.contains("config")) configs.push_back(body.at("config"));
+            if (!configs.is_array() || configs.empty()) throw std::runtime_error("Add at least one sequence");
+            // An explicit batch shares one CPU budget; single-job resume keeps its saved settings.
+            auto budget = body.contains("configs") ? helper({{"operation","budget"},{"configs",configs},
+                {"workers",body.value("workers",0)}}, python) : nlohmann::json{{"concurrency",1}};
+            std::vector<std::string> ids;
+            std::vector<std::vector<std::string>> commands;
+            std::vector<std::filesystem::path> reports;
+            for (auto config : configs)
+            {
+                auto output = config.at("output_directory").get<std::string>();
+                if (output.empty()) throw std::runtime_error("Choose a sequence output folder");
+                output = std::filesystem::weakly_canonical(std::filesystem::absolute(std::filesystem::u8path(output))).u8string();
+                config["output_directory"] = output;
+                if (budget.contains("workers_per_sequence")) config["workers"] = budget.at("workers_per_sequence");
+                const auto id = resume.empty() ? newId() : resume;
+                if (resume.empty()) state_["jobs"].push_back({{"id",id},{"name",config.value("name","Trajectory")},
+                    {"config",config},{"output_directory",output},{"inspect",inspect}});
+                const auto report = root_ / "trajectory_reports" / newId();
+                std::filesystem::create_directories(report);
+                writeText(report / "config.json", config.dump(2));
+                writeText(report / "progress.json", nlohmann::json{{"status","queued"},{"stage","Waiting for a batch worker"}}.dump());
+                auto &job = find(id);
+                job["report_directory"] = report.u8string(); job["status"] = "queued";
+                job["stage"] = "Waiting for a batch worker";
+                ids.push_back(id); reports.push_back(report);
+                commands.push_back({python,"-u",(scripts_/"trajectory_worker.py").u8string(),
+                    "--config",(report/"config.json").u8string(),"--report",(report/"progress.json").u8string()});
+                if (inspect) commands.back().push_back("--inspect");
+            }
+            if (body.contains("config")) state_["draft"] = body.at("config");
+            save(); cancel_.store(false); running_ = true;
+            const auto concurrency = std::min(ids.size(), budget.at("concurrency").get<std::size_t>());
+            worker_ = std::thread([this, ids, commands, reports, concurrency, inspect]
+            {
+                std::atomic<std::size_t> next{0};
+                std::vector<std::thread> lanes;
+                for (std::size_t lane=0; lane<concurrency; ++lane) lanes.emplace_back([&]
+                {
+                    while (!cancel_.load())
+                    {
+                        const auto i=next.fetch_add(1);
+                        if (i>=ids.size()) break;
+                        {
+                            std::lock_guard<std::mutex> guard(mutex_);
+                            auto &job=find(ids[i]); job["status"]="running";
+                            job["stage"]=inspect ? "Checking inputs" : "Generating ground-truth trajectory";
+                            save();
+                        }
+                        nlohmann::json result;
+                        try
+                        {
+                            const int code=runWorkerProcess(commands[i],reports[i]/"worker.log",cancel_);
+                            result=readJson(reports[i]/"progress.json");
+                            if (code==-1) result={{"status","cancelled"},{"stage","Stopped; completed work is available for resume"}};
+                            else if (code!=0) result["status"]="failed";
+                        }
+                        catch (const std::exception &error) { result={{"status","failed"},{"stage",error.what()}}; }
+                        std::lock_guard<std::mutex> guard(mutex_);
+                        find(ids[i]).update(result);
+                        try { save(); } catch (...) {}
+                    }
+                });
+                for (auto &lane:lanes) lane.join();
+                std::lock_guard<std::mutex> guard(mutex_);
+                for (const auto &id:ids) if (find(id).value("status","")=="queued")
+                    find(id).update({{"status","cancelled"},{"stage","Batch stopped before launch"}});
+                running_=false;
+                try { save(); } catch (...) {}
+            });
+            return {{"ok",true},{"ids",ids},{"concurrency",concurrency}};
+        }
+
+        nlohmann::json open(const std::vector<std::string> &paths, const std::string &python)
+        {
+            const auto results=helper({{"operation","open"},{"paths",paths}},python).at("results");
+            std::lock_guard<std::mutex> lock(mutex_);
+            std::vector<std::string> ids;
+            for (const auto &result:results)
+            {
+                std::string existing;
+                for (auto &job:state_["jobs"])
+                    if (!job.value("inspect",false) && job.at("output_directory")==result.at("output_directory") &&
+                        job.value("source_file","")==result.value("source_file","")) existing=job.at("id").get<std::string>();
+                const auto id=existing.empty() ? newId() : existing;
+                if (existing.empty()) state_["jobs"].push_back({{"id",id},{"name",result.at("name")},
+                    {"output_directory",result.at("output_directory")},{"config",nlohmann::json::object()},
+                    {"status","saved"},{"stage","Saved result available"}});
+                auto &job=find(id);
+                if (result.contains("scene"))
+                {
+                    const auto folder=root_/"trajectory_reports"/id;
+                    std::filesystem::create_directories(folder);
+                    writeText(folder/"viewer.json",result.at("scene").dump());
+                    job["viewer_path"]=(folder/"viewer.json").u8string();
+                    job["source_file"]=result.at("source_file");
+                }
+                else
+                {
+                    const auto folder=std::filesystem::u8path(result.at("output_directory").get<std::string>());
+                    if (std::filesystem::is_regular_file(folder/"provenance.json"))
+                        job["config"]=readJson(folder/"provenance.json").at("config");
+                    job["managed_externally"]=std::filesystem::is_regular_file(folder/"job_status.json");
+                }
+                ids.push_back(id);
+            }
             save();
+            return {{"ok",true},{"ids",ids}};
         }
 
         void monitor(const nlohmann::json &config)
@@ -190,19 +261,22 @@ namespace blk_core
         nlohmann::json viewer(const std::string &id)
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            return readJson(std::filesystem::u8path(find(id).at("output_directory").get<std::string>()) / "viewer.json");
+            return readJson(viewerPath(find(id)));
         }
 
         std::string outputDirectory(const std::string &id)
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            return find(id).at("output_directory").get<std::string>();
+            const auto &job=find(id);
+            if (job.contains("config") && job.at("config").contains("sequence_directory"))
+                return job.at("config").at("sequence_directory").get<std::string>();
+            return job.at("output_directory").get<std::string>();
         }
 
         std::filesystem::path map(const std::string &id, const std::string &key)
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            const auto path = std::filesystem::u8path(find(id).at("output_directory").get<std::string>()) / "viewer.json";
+            const auto path = viewerPath(find(id));
             const auto modified = std::filesystem::last_write_time(path);
             if (!map_cache_.count(id) || map_cache_times_[id] != modified)
             {
@@ -210,11 +284,16 @@ namespace blk_core
                 map_cache_times_[id] = modified;
             }
             for (const auto &item : map_cache_.at(id))
-                if (item.at("key") == key) return std::filesystem::u8path(item.at("path").get<std::string>());
+                if (item.at("key") == key) return path.parent_path() / std::filesystem::u8path(item.at("path").get<std::string>());
             throw std::runtime_error("Unknown trajectory map layer");
         }
 
     private:
+        static std::filesystem::path viewerPath(const nlohmann::json &job)
+        {
+            if (job.contains("viewer_path")) return std::filesystem::u8path(job.at("viewer_path").get<std::string>());
+            return std::filesystem::u8path(job.at("output_directory").get<std::string>())/"viewer.json";
+        }
         static nlohmann::json readJson(const std::filesystem::path &path)
         {
             std::ifstream stream(path);

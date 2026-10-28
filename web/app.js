@@ -353,7 +353,7 @@ async function browse(path = '')
     for (const id of ['browser-path', 'browser-go', 'browser-up', 'use-folder', 'new-folder']) element(id).disabled = true;
     try
     {
-        browser_state = await api('browse?path=' + encodeURIComponent(path) + (browser_mode === 'trajectory-file' ? '&type=any' : ['registration-result', 'additional-reference', 'additional-result'].includes(browser_mode) ? '&type=json' : ['ply', 'ply-folder', 'registration-ply', 'registration-folder', 'additional-ply', 'additional-folder'].includes(browser_mode) ? '&type=ply' : ''));
+        browser_state = await api('browse?path=' + encodeURIComponent(path) + (['trajectory-file','trajectory-files'].includes(browser_mode) ? '&type=any' : ['registration-result', 'additional-reference', 'additional-result'].includes(browser_mode) ? '&type=json' : ['ply', 'ply-folder', 'registration-ply', 'registration-folder', 'additional-ply', 'additional-folder'].includes(browser_mode) ? '&type=ply' : ''));
         selected.clear();
         element('browser-path').value = browser_state.path;
         element('browser-up').disabled = browser_state.parent === browser_state.path;
@@ -368,11 +368,19 @@ async function browse(path = '')
         const rows = [];
         for (const entry of browser_state.entries)
         {
-            if (!entry.directory && !['trajectory-file', 'files', 'ply', 'registration-ply', 'registration-result', 'additional-ply', 'additional-reference', 'additional-result'].includes(browser_mode)) continue;
+            if (browser_mode === 'trajectory-files' && !entry.directory && !/\.(tum|txt)$/i.test(entry.name)) continue;
+            if (!entry.directory && !['trajectory-file', 'trajectory-files', 'files', 'ply', 'registration-ply', 'registration-result', 'additional-ply', 'additional-reference', 'additional-result'].includes(browser_mode)) continue;
             const row = document.createElement('div');
             row.className = 'browser-entry';
             if (entry.directory)
             {
+                if (browser_mode === 'trajectory-folders')
+                {
+                    const check = document.createElement('input'); check.type = 'checkbox'; check.dataset.path = entry.path;
+                    check.setAttribute('aria-label', 'Select '+entry.name);
+                    check.onchange = () => { if (check.checked) selected.add(entry.path); else selected.delete(entry.path); updateSelection(); };
+                    row.append(check);
+                }
                 const open = button('▸ ' + entry.name, () => browse(entry.path));
                 open.className = 'directory-entry';
                 row.append(open);
@@ -417,20 +425,20 @@ async function browse(path = '')
 function updateSelection()
 {
     element('use-files').disabled = !selected.size || (['trajectory-file', 'registration-result', 'additional-reference', 'additional-result'].includes(browser_mode) && selected.size !== 1);
-    element('use-files').textContent = `${browser_mode === 'trajectory-file' ? 'Use selected file' : ['registration-result', 'additional-reference', 'additional-result'].includes(browser_mode) ? 'Open selected poses JSON' : ['ply', 'ply-folder', 'registration-ply', 'registration-folder', 'additional-ply', 'additional-folder'].includes(browser_mode) ? 'Open selected PLY files' : 'Add selected files'}${selected.size ? ` (${selected.size})` : ''}`;
+    element('use-files').textContent = `${browser_mode === 'trajectory-folders' ? 'Add selected folders' : browser_mode === 'trajectory-files' ? 'Open selected TUM files' : browser_mode === 'trajectory-file' ? 'Use selected file' : ['registration-result', 'additional-reference', 'additional-result'].includes(browser_mode) ? 'Open selected poses JSON' : ['ply', 'ply-folder', 'registration-ply', 'registration-folder', 'additional-ply', 'additional-folder'].includes(browser_mode) ? 'Open selected PLY files' : 'Add selected files'}${selected.size ? ` (${selected.size})` : ''}`;
 }
 async function openBrowser(mode)
 {
     browser_mode = mode;
     const ply_mode = ['ply', 'ply-folder', 'registration-ply', 'registration-folder', 'additional-ply', 'additional-folder'].includes(mode);
     const output_mode = ['trajectory-folder', 'output', 'map-output', 'additional-output'].includes(mode);
-    element('browser-title').textContent = mode === 'trajectory-file' ? 'Select input file' : mode === 'trajectory-folder' ? 'Select folder' : mode === 'additional-reference' ? 'Open relative_poses.json or partial_chunks.json' : ['registration-result', 'additional-result'].includes(mode) ? 'Open relative_poses.json or partial_chunks.json' : ply_mode ? 'Open existing PLY files' : output_mode ? 'Choose output folder' : mode === 'folder' ? 'Select a scan folder' : 'Select BLK files';
-    element('use-files').hidden = !['trajectory-file', 'files', 'ply', 'registration-ply', 'registration-result', 'additional-ply', 'additional-reference', 'additional-result'].includes(mode);
-    element('select-all').parentElement.hidden = !['files', 'ply', 'registration-ply', 'additional-ply'].includes(mode);
-    element('select-all-label').textContent = ply_mode ? 'Select all PLY files' : 'Select all BLK files';
-    element('use-folder').hidden = ['trajectory-file', 'ply', 'registration-ply', 'registration-result', 'additional-ply', 'additional-reference', 'additional-result'].includes(mode);
+    element('browser-title').textContent = mode === 'trajectory-files' ? 'Open TUM files' : mode === 'trajectory-folders' ? 'Select sequence folders' : mode === 'trajectory-file' ? 'Select input file' : mode === 'trajectory-folder' ? 'Select folder' : mode === 'additional-reference' ? 'Open relative_poses.json or partial_chunks.json' : ['registration-result', 'additional-result'].includes(mode) ? 'Open relative_poses.json or partial_chunks.json' : ply_mode ? 'Open existing PLY files' : output_mode ? 'Choose output folder' : mode === 'folder' ? 'Select a scan folder' : 'Select BLK files';
+    element('use-files').hidden = !['trajectory-folders', 'trajectory-file', 'trajectory-files', 'files', 'ply', 'registration-ply', 'registration-result', 'additional-ply', 'additional-reference', 'additional-result'].includes(mode);
+    element('select-all').parentElement.hidden = !['trajectory-folders', 'trajectory-files', 'files', 'ply', 'registration-ply', 'additional-ply'].includes(mode);
+    element('select-all-label').textContent = mode === 'trajectory-folders' ? 'Select all folders' : mode === 'trajectory-files' ? 'Select all files' : ply_mode ? 'Select all PLY files' : 'Select all BLK files';
+    element('use-folder').hidden = ['trajectory-files', 'trajectory-file', 'ply', 'registration-ply', 'registration-result', 'additional-ply', 'additional-reference', 'additional-result'].includes(mode);
     element('new-folder').hidden = !output_mode;
-    element('use-folder').textContent = output_mode ? 'Use this output folder' : ply_mode ? 'Open PLY files in this folder' : 'Add this folder';
+    element('use-folder').textContent = mode === 'trajectory-folder' ? 'Use this folder' : mode === 'trajectory-folders' ? 'Add this sequence folder' : output_mode ? 'Use this output folder' : ply_mode ? 'Open PLY files in this folder' : 'Add this folder';
     element('browser').showModal();
     let path = '';
     if (mode === 'additional-output') path = element('additional-output').value.trim();
@@ -484,6 +492,7 @@ action('use-files', async () =>
 {
     const paths = [...selected];
     element('browser').close();
+    if (['trajectory-folders','trajectory-files'].includes(browser_mode)) { await trajectoryPicked(paths); return; }
     if (browser_mode === 'trajectory-file') { await trajectoryPicked(paths[0]); return; }
     if (browser_mode === 'additional-reference') { await loadAdditionalReference(paths[0]); return; }
     if (browser_mode === 'additional-ply') { await addAdditionalPaths(paths); return; }
@@ -506,6 +515,7 @@ action('use-folder', async () =>
     if (!browser_state) return;
     const path = browser_state.path;
     element('browser').close();
+    if (browser_mode === 'trajectory-folders') { await trajectoryPicked([path]); return; }
     if (browser_mode === 'trajectory-folder') { await trajectoryPicked(path); return; }
     if (browser_mode === 'additional-output') { element('additional-output').value = path; await loadAdditionalPlacements(); return; }
     if (browser_mode === 'additional-folder') { await addAdditionalPaths([path]); return; }

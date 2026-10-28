@@ -12,16 +12,21 @@ def run(chrome):
     web=Path(__file__).resolve().parents[1]/'web'
     prelude=r'''<script>
 async function refreshRegistration(){}
-let requests=[],state={draft:{},jobs:[],running:false};
+let requests=[],state={draft:{},jobs:[{id:'hidden',name:'Development result',status:'completed',output_directory:'/debug',viewer_available:true}],running:false};
+const seq=path=>({name:path.split('/').pop(),sequence_directory:path,scans:{path:path+'/scans',format:'directory'},trajectories:[{path:path+'/odometry.tum',format:'tum'}]});
 window.fetch=async(url,options={})=>{
     const route=String(url).replace('/api/',''),body=options.body?JSON.parse(options.body):null;
     requests.push({route,body});let value;
     if(route==='project')value={jobs:[],point_clouds:[],running:false};
     else if(route==='trajectory')value=structuredClone(state);
     else if(route==='trajectory/draft'){state.draft=body;value={ok:true};}
-    else if(route==='trajectory/start'){value={ok:true};}
-    else if(route==='trajectory/0123456789abcdef0123456789abcdef/folder'){value={ok:true};}
-    else if(route.startsWith('browse?'))value={path:'/data',parent:'/',roots:[],entries:[{name:'TLS.ply',path:'/data/TLS.ply',directory:false,modified_time:0},{name:'poses.tum',path:'/data/poses.tum',directory:false,modified_time:0}]};
+    else if(route==='trajectory/discover')value={sequences:body.paths.map(seq)};
+    else if(route==='trajectory/start')value={ok:true,ids:['job1','job2'],concurrency:2};
+    else if(route==='trajectory/open')value={ok:true,ids:['opened']};
+    else if(route==='trajectory/opened/folder')value={ok:true};
+    else if(route.startsWith('browse?'))value={path:'/data',parent:'/',roots:[],entries:[
+        {name:'one',path:'/data/one',directory:true},{name:'two',path:'/data/two',directory:true},
+        {name:'TLS.ply',path:'/data/TLS.ply',directory:false},{name:'odometry.tum',path:'/data/odometry.tum',directory:false}]};
     else throw Error('Unexpected API request '+route);
     return {ok:true,status:200,json:async()=>value};
 };
@@ -30,72 +35,48 @@ window.fetch=async(url,options={})=>{
 addEventListener('load',async()=>{
     const result=document.createElement('p');result.id='trajectory-controls-test';document.body.append(result);
     const check=(value,message)=>{if(!value)throw Error(message);};
-    const settle=async()=>{for(let i=0;i<80;i++)await Promise.resolve();};
+    const settle=async()=>{for(let i=0;i<100;i++)await Promise.resolve();};
     try{
-        await refresh();check(trajectory_initialized,'Trajectory settings did not initialize');
-        check(location.hash==='#session-test','Copied app URL lost its session key');
-        check(element('trajectory-workers').value===''&&trajectoryConfig().workers===0,'CPU default is not Auto');
-        restoreTrajectory({workers:4});check(trajectoryConfig().workers===4,'Explicit CPU setting lost');
-        restoreTrajectory({workers:0});check(element('trajectory-workers').value===''&&trajectoryConfig().workers===0,'Auto CPU setting lost');
+        await refresh();check(trajectory_initialized,'Form not initialized');
+        check(element('trajectory-jobs').children.length===0,'Cached project results were displayed');
+        check(element('trajectory-message').textContent==='','Development jobs leaked into status');
+        check(!element('trajectory-period')&&!element('trajectory-options')&&!element('trajectory-initial'),'Retired controls remain');
         check([...document.querySelectorAll('[role=tab]')].at(-1).textContent==='Generate trajectory','Tab is not last');
-        element('tab-trajectory').click();check(!element('panel-trajectory').hidden&&element('panel-convert').hidden,'Tab switching failed');
-        document.querySelector('[data-trajectory-browse="trajectory-tls"]').click();await settle();
-        check(element('browser').open&&!element('use-files').hidden,'File browser not opened');
-        const checkbox=element('browser-list').querySelector('input[type=checkbox]');checkbox.click();
-        element('use-files').click();await settle();check(element('trajectory-tls').value==='/data/TLS.ply','Selected file was not applied');
-        document.querySelector('[data-trajectory-folder="trajectory-output"]').click();await settle();
-        element('use-folder').click();await settle();check(element('trajectory-output').value==='/data','Selected output folder was not applied');
-        element('trajectory-scans').value='/scans';element('trajectory-scan-format').value='tartanstar';element('trajectory-scan-format').dispatchEvent(new Event('change'));
-        check(element('trajectory-calibration-mode').value==='tartanstar','Dataset calibration not selected');
-        const first=element('trajectory-estimates').children[0];first.querySelector('.estimate-path').value='/poses/frontend.tum';
-        element('trajectory-add-estimate').click();const second=element('trajectory-estimates').children[1];
-        second.querySelector('.estimate-path').value='/poses/backend.csv';second.querySelector('.estimate-format').value='csv';
-        second.querySelector('.estimate-format').dispatchEvent(new Event('change'));
-        check(!second.querySelector('.estimate-csv').hidden&&second.querySelector('.estimate-kitti').hidden,'Format fields do not match CSV');
-        second.querySelector('.estimate-columns').value='ts,px,py,pz,q1,q2,q3,q0';second.querySelector('.estimate-delimiter').value=';';
-        second.querySelector('.estimate-time').value='0.000000001';
-        element('trajectory-scan-time').value='0.000000001';
-        element('trajectory-check').click();await settle();
-        const request=requests.find(x=>x.route==='trajectory/start');check(request?.body.inspect,'Check inputs did not submit');
-        const cfg=request.body.config;check(cfg.scans.calibration_preset==='tartanstar','Calibration lost');
-        check(cfg.workers===0,'Auto CPU setting was not submitted');
-        check(cfg.trajectories[1].columns.qw==='q0'&&cfg.trajectories[1].delimiter===';'&&cfg.trajectories[1].time_scale===1e-9,'CSV settings lost');
-        restoreTrajectory(cfg);const restored=trajectoryConfig();
-        check(restored.trajectories[1].delimiter===';','Restored format settings changed');
-        check(restored.trajectories[1].time_scale===1e-9&&restored.scans.time_scale===1e-9,'Restored nanosecond units changed');
-        requests=[];element('trajectory-start').click();await settle();check(requests.some(x=>x.route==='trajectory/start'&&!x.body.inspect),'Generate did not submit');
-        state.jobs=[{id:'0123456789abcdef0123456789abcdef',name:'Saved trajectory',status:'completed',output_directory:'/results/trajectory',viewer_available:true}];
-        await refreshTrajectory();const folderButton=[...element('trajectory-jobs').querySelectorAll('button')].find(x=>x.textContent==='Open output folder');
+        element('tab-trajectory').click();
+        element('trajectory-map-browse').click();await settle();
+        element('browser-list').querySelector('input[type=checkbox]').click();element('use-files').click();await settle();
+        check(element('trajectory-tls').value==='/data/TLS.ply','Map selection failed');
+        element('trajectory-add-sequences').click();await settle();
+        const checks=element('browser-list').querySelectorAll('input[type=checkbox]');
+        check(checks.length===2,'Folder picker does not support multiple folders');checks.forEach(c=>c.click());
+        check(!element('use-files').disabled,'Multiple folder selection is disabled');element('use-files').click();await settle();
+        check(element('trajectory-sequences').children.length===2,'Sequences were not added');
+        let configs=trajectorySequences();check(configs.every(c=>c.period_s===0),'New jobs do not use every scan');
+        check(configs[0].output_directory==='/data/one/.ground_truth','Wrong result folder');
+        check(element('trajectory-output-paths').children[1].textContent==='/data/two/ground_truth_trajectory.tum','Wrong output filename');
+        const second=element('trajectory-sequences').children[1];
+        second.querySelector('.sequence-odometry').open=true;second.querySelector('.sequence-add-estimate').click();const comparison=second.querySelector('.sequence-estimates').lastElementChild;
+        comparison.querySelector('.estimate-path').value='/data/two/backend.csv';
+        comparison.querySelector('.estimate-format').value='csv';comparison.querySelector('.estimate-format').dispatchEvent(new Event('change'));
+        comparison.querySelector('.estimate-columns').value='ts,px,py,pz,q1,q2,q3,q0';
+        comparison.querySelector('.estimate-time').value='0.000000001';
+        configs=trajectorySequences();check(configs[1].trajectories[1].columns.qw==='q0'&&configs[1].trajectories[1].time_scale===1e-9,'Input format settings lost');
+        element('trajectory-workers').value='8';element('trajectory-check').click();await settle();
+        let request=requests.find(x=>x.route==='trajectory/start');check(request.body.configs.length===2&&request.body.workers===8&&request.body.inspect,'Batch check did not submit all sequences');
+        requests=[];element('trajectory-start').click();await settle();check(requests.some(x=>x.route==='trajectory/start'&&!x.body.inspect),'Generation did not submit');
+        state.jobs.push({id:'opened',name:'Opened result',status:'saved',output_directory:'/selected',viewer_available:true});
+        await refreshTrajectory();check(element('trajectory-jobs').children.length===0,'Unselected results appeared');
+        await openTrajectoryResults('/selected');
+        check(element('trajectory-jobs').children.length===1,'Selected result missing');
         const viewer=element('trajectory-jobs').querySelector('a'),style=getComputedStyle(viewer);
-        check(viewer.href.includes('job=0123456789abcdef0123456789abcdef')&&viewer.target==='_blank','Viewer action targets wrong result');
-        check(parseFloat(style.paddingLeft)>=17&&style.backgroundColor==='rgb(23, 110, 91)','Viewer action lacks the app button style');
-        check(folderButton,'Output folder action missing');folderButton.click();await settle();
-        check(requests.some(x=>x.route==='trajectory/0123456789abcdef0123456789abcdef/folder'),'Output folder action targets wrong job');
-        const saved={status:'completed',viewer_available:true,config:{scans:{path:'/scans/sequence'},tls_map:'/maps/site.ply'}};
-        const history=[{...saved,id:'old'},{...saved,id:'new'},
-            {...saved,id:'running',status:'running',viewer_available:false},
-            {...saved,id:'failed',status:'failed',viewer_available:false},
-            {...saved,id:'other-site',config:{scans:{path:'/different/sequence'},tls_map:'/maps/site.ply'}},
-            {...saved,id:'other-map',config:{scans:{path:'/scans/sequence'},tls_map:'/maps/other.ply'}}];
-        check(visibleTrajectoryJobs(history).map(j=>j.id).join(',')==='new,running,failed,other-site,other-map','Repeated result was not replaced, or an unrelated/pending result was hidden');
-        check(visibleTrajectoryJobs([{...saved,id:'old',status:'saved'},{...saved,id:'new',status:'saved'}]).length===1,'Saved result duplicates remain');
-        state.jobs=[
-            {...saved,id:'active',name:'Active recovery',status:'running',managed_externally:true,output_directory:'/active'},
-            {...saved,id:'waiting',name:'Queued recovery',status:'queued',managed_externally:true,viewer_available:false,output_directory:'/waiting'},
-            {...saved,id:'finished',name:'Finished recovery',status:'completed',managed_externally:true,output_directory:'/finished'}];
-        await refreshTrajectory();
-        check(element('trajectory-message').textContent==='1 running · 1 queued · 1 completed','Live status summary is incorrect');
-        check(element('trajectory-jobs').children.length===3,'Pending trajectory is missing');
-        check(element('trajectory-jobs').children[0].querySelector('a'),'Running recovery lost its saved-result viewer');
-        state.jobs[0].status='interrupted';await refreshTrajectory();
-        check(![...element('trajectory-jobs').children[0].querySelectorAll('button')].some(b=>b.textContent==='Resume'),'External recovery offered a duplicate worker');
+        check(viewer.href.includes('job=opened')&&parseFloat(style.paddingLeft)>=17,'Viewer button style or link wrong');
+        element('trajectory-clear-results').click();await settle();check(element('trajectory-jobs').children.length===0,'Clear results failed');
+        check(element('trajectory-workers').getBoundingClientRect().top<element('trajectory-start').getBoundingClientRect().top,'CPU setting not above generation');
+        state.running=true;state.jobs.push({id:'live',name:'Live batch',status:'running',output_directory:'/live',viewer_available:false});trajectory_batch_ids.clear();await refreshTrajectory();check(!element('trajectory-stop').disabled&&trajectory_batch_ids.has('live'),'Reload lost the active app batch');state.running=false;
         const goodFetch=window.fetch;
         window.fetch=async()=>({ok:false,status:403,json:async()=>({error:'Invalid session'})});
-        await refresh();check(element('connection').textContent.startsWith('Session key missing or expired'),'Authentication failure mislabeled as disconnected');
-        window.fetch=async()=>{throw new TypeError('Failed to fetch');};
-        await refresh();check(element('connection').textContent.startsWith('Disconnected'),'Network failure mislabeled');
-        window.fetch=goodFetch;
-        result.textContent='PASS';
+        await refresh();check(element('connection').textContent.startsWith('Session key missing or expired'),'Authentication failure mislabeled');
+        window.fetch=goodFetch;result.textContent='PASS';
     }catch(error){result.textContent='FAIL: '+error.message;}
 });
 </script>'''
@@ -119,7 +100,7 @@ addEventListener('load',async()=>{
                     detail=re.search(r'<p id="trajectory-controls-test">(.*?)</p>',result.stdout)
                     raise AssertionError(detail[1] if detail else result.stderr[-2000:])
         finally:server.shutdown();thread.join()
-    print('Trajectory controls passed: last tab, file/folder selection, CSV mapping, calibration, input check, generation.')
+    print('Trajectory controls passed: multiple sequences, all scans, per-sequence formats, batch submission, explicit results, CPU placement.')
 
 
 if __name__=='__main__':

@@ -185,16 +185,17 @@
 
 ### Generate a dataset trajectory
 
-- **Inputs:** follow the four numbered steps in **Generate trajectory**.
-  - **Scanned GT map:** merged 1 cm PLY from Register, or another registered scanner map.
-  - **Sequence scans:** the dataset's individual LiDAR scans.
-  - **Estimated trajectory:** the sequence's frontend or odometry poses; additional estimates are optional comparisons.
-  - **Save result:** result name and output folder.
-  - Sequences: timestamped PLY/PCD/NPY/NPZ/BIN folder, scan manifest JSON, or TartanStar extracted data.
-  - Trajectories: TUM, CSV with column mapping, or KITTI poses with a timestamp file.
-  - Add frontend, backend, or other available estimates; the first supplies scan motion and deskew.
-  - Choose timestamp units, offsets, pose convention, and sensor-to-body calibration as needed.
-- **Run:** choose a separate output folder → **Check inputs** → **Generate trajectory**.
+- **Inputs:** follow three steps in **Generate trajectory**.
+  - **1. Scanned GT map:** registered scanner map at 1 cm resolution.
+  - **2. Sequence folders:** select several folders for the same map; scans and odometry are detected per sequence.
+    - Scans: timestamped PLY/PCD/NPY/NPZ/BIN, a scan-list JSON, or TartanStar extracted data.
+    - Input odometry: TUM, column-mapped CSV, or KITTI with timestamps; choose files manually when detection is incomplete.
+    - The first estimate supplies motion and deskew; additional estimates are comparisons.
+    - Review sensor calibration and timestamp units in each sequence's settings.
+  - **3. Output trajectory:** `ground_truth_trajectory.tum` in each selected sequence folder.
+- **Run:** **Check inputs** → **Generate trajectories**.
+  - Use every available scan; no fixed 0.1 s selection interval. Unsupported timestamps remain explicitly skipped.
+  - **CPU threads:** total batch budget; Auto adapts parallel sequences and per-sequence threads to CPU and available memory.
   - KISS initialization → 1 cm Open3D point-to-plane + Tukey localization → recovery of rejected intervals.
   - Every accepted pose passes 1 cm fitting and held-out validation; imported baseline poses are initial guesses for the same refinement.
   - Recovery: reuse or initialize the end pose → reverse tracking → local submap fitting for remaining gaps.
@@ -208,18 +209,19 @@
   - Reuse original 1 cm map search indices across scans; CPU and cache budgets adapt to available resources.
   - **Stop / Resume:** retain completed fits; verify input provenance before reusing them.
   - [Staged campaigns](docs/trajectory.md#staged-campaigns): finish initial 1 cm fitting across sequences, then continue recovery from saved baselines.
-  - Optional: supply initial alignment JSON or an existing baseline result to recover.
 - **Viewer:**
   - **Scanned GT map:** scanner reference map, displayed at 10 cm only; the original 1 cm input remains available for registration.
   - Available estimated trajectories and their reconstructed 10 cm maps.
   - **Generated ground-truth trajectory** and **Generated ground-truth trajectory map** at 10 cm; missing poses remain disconnected.
   - Shared TLS coordinate frame; map selection, color palettes, transparency, point styles, and start/end markers.
   - Bounded GPU uploads for large maps; screenshot export retained.
-- **Files:** `recovery/candidate_trajectory.tum`, `recovery/quality.jsonl`, `viewer.json`, and `*_10cm.ply`.
-  - Original TLS map and scans stay in place.
-  - **Open existing result:** select the trajectory result folder.
-  - Each saved result shows its path, **Open output folder**, and **Open trajectory viewer**.
-  - Repeated results for the same scans and reference map show the latest available result.
+- **Files:** `ground_truth_trajectory.tum` beside each sequence's inputs.
+  - `.ground_truth/` stores resumable work, quality records, the viewer, and 10 cm display maps.
+  - Original scanner maps, scans, and odometry files remain unchanged.
+- **View results:** explicitly choose a sequence/result folder, a parent containing several results, or individual TUM files.
+  - Show generated GT and detected odometry; saved results also include their reconstructed maps.
+  - Standalone TUM comparisons use original coordinates unless a saved map alignment is available.
+  - Project history and development runs are not loaded into the result list automatically.
 - **Formats and configuration:** [Trajectory inputs and recovery](docs/trajectory.md).
 
 ### Outputs and recovery

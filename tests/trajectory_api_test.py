@@ -107,6 +107,31 @@ def run(executable):
             launch()
             current=next(j for j in api('trajectory')['jobs'] if j['id']==job['id'])
             assert current['status']=='running' and current['viewer_available']
+            batch=[]
+            for name in ('batch-one','batch-two'):
+                folder=root/name;folder.mkdir();entry=fixture(folder)
+                entry.update(sequence_directory=str(folder),output_directory=str(folder/'.ground_truth'),period_s=0)
+                batch.append(entry)
+            discovered=api('trajectory/discover',{'paths':[c['sequence_directory'] for c in batch]})
+            assert len(discovered['sequences'])==2
+            assert all(x['period_s']==0 and x['trajectories'] for x in discovered['sequences'])
+            started=api('trajectory/start',{'configs':batch,'workers':8})
+            assert len(started['ids'])==2
+            wait(lambda:not api('trajectory')['running'],90)
+            finished=[j for j in api('trajectory')['jobs'] if j['id'] in started['ids']]
+            assert all(j['status']=='completed' for j in finished),finished
+            for entry in batch:
+                out=Path(entry['output_directory']);public=Path(entry['sequence_directory'])/'ground_truth_trajectory.tum'
+                assert public.read_bytes()==(out/'recovery/candidate_trajectory.tum').read_bytes()
+                assert (Path(entry['sequence_directory'])/'estimate.tum').is_file()
+            opened=api('trajectory/open',{'paths':[c['sequence_directory'] for c in batch]})
+            assert len(opened['ids'])==2
+            standalone=root/'standalone';standalone.mkdir()
+            shutil.copy2(Path(batch[0]['sequence_directory'])/'ground_truth_trajectory.tum',standalone/'ground_truth_trajectory.tum')
+            shutil.copy2(Path(batch[0]['sequence_directory'])/'estimate.tum',standalone/'odometry.tum')
+            opened=api('trajectory/open',{'paths':[str(standalone/'ground_truth_trajectory.tum')]})
+            scene=api('trajectory/'+opened['ids'][0]+'/viewer')
+            assert scene['maps']==[] and len(scene['trajectories'])==2
         finally:
             if process and process.poll() is None:
                 api('shutdown',{});process.wait(timeout=15)

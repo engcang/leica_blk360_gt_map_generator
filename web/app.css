@@ -825,7 +825,7 @@ dialog::backdrop
 .trajectory-step h3 { margin: 0; }
 .trajectory-step .registration-settings,
 .trajectory-step .map-output { margin: 14px 0 0; }
-.trajectory-help { margin: 7px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.trajectory-help { margin: 10px 0 0; color: var(--ink); font-size: 15px; line-height: 1.6; }
 .trajectory-step .queue-toolbar { padding: 0; }
 .trajectory-estimate { margin: 14px 0 0; padding: 16px; background: #f6f9f7; border: 1px solid var(--line); border-radius: 8px; }
 .trajectory-estimate > .map-output { margin-top: 0; }
@@ -837,3 +837,19 @@ dialog::backdrop
 .trajectory-frame { display: grid; gap: 7px; margin-top: 14px; font-size: 12px; }
 .trajectory-estimate .estimate-invert { display: flex; align-items: center; }
 #trajectory-message:empty { display: none; }
+.trajectory-sequence { margin-top: 18px; padding: 18px; border: 1px solid var(--line); border-radius: 8px; }
+.trajectory-sequence h4 { margin: 0; font-size: 15px; }
+.sequence-folder { margin: 8px 0; font-size: 13px; }
+.sequence-scan-summary { font-size: 14px; font-weight: 600; margin: 12px 0; }
+.sequence-settings { margin-bottom: 20px; }
+.sequence-odometry-heading { justify-content: flex-end; margin-top: 12px; }
+.sequence-odometry-summary { overflow-wrap: anywhere; }
+.trajectory-empty { padding: 0 20px; color: var(--muted); font-size: 14px; line-height: 1.6; }
+.trajectory-step .trajectory-empty { padding: 0; }
+.trajectory-run-controls { padding: 20px; border-top: 1px solid var(--line); }
+.trajectory-cpu { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; font-size: 18px; font-weight: 700; }
+.trajectory-cpu input { width: 105px; }
+.trajectory-cpu span { font-size: 13px; font-weight: 400; color: var(--muted); }
+.trajectory-run-controls .registration-actions { padding: 20px 0 0; }
+.trajectory-result-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+#trajectory-output-paths { padding-left: 20px; font-size: 13px; line-height: 1.7; }

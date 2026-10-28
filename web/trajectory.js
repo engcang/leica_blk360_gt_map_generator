@@ -1,17 +1,18 @@
 'use strict';
-let trajectory_state = null, trajectory_initialized = false, trajectory_pick = null, trajectory_signature = '', trajectory_save_timer;
+let trajectory_state = null, trajectory_initialized = false, trajectory_pick = null, trajectory_save_timer;
+const trajectory_batch_ids = new Set(), trajectory_result_ids = new Set();
 
-async function trajectoryPicked(path)
+async function trajectoryPicked(value)
 {
-    if (trajectory_pick) await trajectory_pick(path);
-    trajectory_pick = null;
+    const callback = trajectory_pick; trajectory_pick = null;
+    if (callback) await callback(value);
     saveTrajectoryDraft();
 }
 
-function pickTrajectory(target, folder = false)
+function pickTrajectory(target, mode = 'trajectory-file')
 {
-    trajectory_pick = typeof target === 'function' ? target : path => { target.value = path; };
-    return openBrowser(folder ? 'trajectory-folder' : 'trajectory-file');
+    trajectory_pick = typeof target === 'function' ? target : path => { target.value = path; target.dispatchEvent(new Event('change')); };
+    return openBrowser(mode);
 }
 
 function setTrajectoryTimeScale(select, scale = 1)
@@ -21,7 +22,7 @@ function setTrajectoryTimeScale(select, scale = 1)
     select.value = option ? option.value : String(scale);
 }
 
-function addTrajectoryEstimate(value = {})
+function addTrajectoryEstimate(container, value = {})
 {
     const row = document.createElement('div');
     row.className = 'trajectory-estimate';
@@ -50,7 +51,7 @@ function addTrajectoryEstimate(value = {})
             <label class="trajectory-frame">Pose-frame-from-body transform JSON (optional)<textarea class="estimate-transform" rows="2" spellcheck="false"></textarea></label>
         </details>`;
     const get = name => row.querySelector('.estimate-'+name);
-    get('label').value = value.label || (element('trajectory-estimates').children.length ? 'Backend' : 'Frontend');
+    get('label').value = value.label || (container.children.length ? 'Backend' : 'Frontend');
     for (const key of ['path', 'format', 'timestamps']) if (value[key]) get(key).value = value[key];
     setTrajectoryTimeScale(get('time'), value.time_scale);
     get('offset').value = value.time_offset_s || 0;
@@ -69,15 +70,22 @@ function addTrajectoryEstimate(value = {})
     };
     get('format').onchange = showFormat;
     showFormat();
-    get('remove').onclick = () => { row.remove(); updateTrajectoryRoles(); saveTrajectoryDraft(); };
+    get('remove').onclick = () => { row.remove(); updateTrajectoryRoles(container); saveTrajectoryDraft(); };
     row.addEventListener('input', saveTrajectoryDraft);
-    element('trajectory-estimates').append(row);
-    updateTrajectoryRoles();
+    container.append(row);
+    updateTrajectoryRoles(container);
 }
 
-function updateTrajectoryRoles()
+function updateTrajectoryRoles(container)
 {
-    const rows = [...element('trajectory-estimates').children];
+    const rows = [...container.children];
+    const summary = container.closest('.trajectory-sequence')?.querySelector('.sequence-odometry-summary');
+    if (summary)
+    {
+        const path = rows[0]?.querySelector('.estimate-path').value || '';
+        summary.textContent = 'Input odometry / SLAM' + (path ? ' · '+path.split(/[\\/]/).pop() : ' · Select a file')
+            + (rows.length > 1 ? ` + ${rows.length-1} comparison` : '');
+    }
     rows.forEach((row, i) =>
     {
         row.querySelector('.estimate-role').textContent = i ? 'Comparison only · shown with its reconstructed map.' : 'Motion source · used for initialization and scan motion correction.';
@@ -85,75 +93,110 @@ function updateTrajectoryRoles()
     });
 }
 
-function updateTrajectoryScanFormat()
+
+function addTrajectorySequence(value)
 {
-    const format = element('trajectory-scan-format').value;
-    element('trajectory-scans').placeholder = {
-        directory:'Folder containing timestamped scan files',
-        manifest:'Scan manifest JSON file',
-        tartanstar:'Extracted sequence folder, such as 2026-10-12-13-37-16'
-    }[format];
-    element('trajectory-scan-help').textContent = {
-        directory:'Choose the dataset’s individual LiDAR scans. Filenames must be timestamps, such as 1720000000.100.ply.',
-        manifest:'Choose a JSON file listing each scan’s timestamp and file path.',
-        tartanstar:'Choose one extracted sequence folder containing lidar/. Sensor calibration is filled in automatically.'
-    }[format];
+    const row = document.createElement('article'); row.className = 'trajectory-sequence';
+    row.innerHTML = `
+        <div class="queue-toolbar"><h4></h4><button class="sequence-remove quiet">Remove</button></div>
+        <p class="sequence-folder filepath"></p>
+        <div class="sequence-scan-summary"></div>
+        <details class="sequence-settings"><summary>Scan files and sensor frame</summary>
+            <div class="registration-settings"><label>Scan format<select class="sequence-format"><option value="directory">Timestamped scan files</option><option value="manifest">Scan list JSON</option><option value="tartanstar">TartanStar extracted sequence</option></select></label><label>Timestamp units<select class="sequence-time"><option value="1">Seconds</option><option value="0.001">Milliseconds</option><option value="0.000001">Microseconds</option><option value="0.000000001">Nanoseconds</option></select></label></div>
+            <div class="map-output"><input class="sequence-scans" aria-label="Scan files or folder"><button class="sequence-scan-browse secondary">Browse…</button></div>
+            <div class="registration-settings"><label>Scan coordinate frame<select class="sequence-frame"><option value="identity">Same as odometry</option><option value="tartanstar">TartanStar OS-DOME → base_link</option><option value="file">Select sensor-to-body calibration</option></select></label></div>
+            <div class="sequence-calibration-row map-output" hidden><input class="sequence-calibration" aria-label="Sensor-to-body calibration"><button class="sequence-calibration-browse secondary">Browse…</button></div>
+        </details>
+        <details class="sequence-odometry"><summary class="sequence-odometry-summary">Input odometry / SLAM</summary>
+            <div class="queue-toolbar sequence-odometry-heading"><button class="sequence-add-estimate secondary">Add comparison</button></div>
+            <div class="sequence-estimates"></div>
+        </details>`;
+    row.sequenceDirectory = value.sequence_directory;
+    row.querySelector('h4').textContent = value.name || value.sequence_directory.split(/[\\/]/).pop();
+    row.querySelector('.sequence-folder').textContent = value.sequence_directory;
+    const get = name => row.querySelector('.sequence-'+name), scans = value.scans || {};
+    get('scans').value = scans.path || '';
+    get('format').value = scans.format || 'directory';
+    setTrajectoryTimeScale(get('time'), scans.time_scale);
+    get('frame').value = scans.calibration_preset ? 'tartanstar' : scans.calibration ? 'file' : 'identity';
+    get('calibration').value = scans.calibration?.path || '';
+    const update = () =>
+    {
+        get('calibration-row').hidden = get('frame').value !== 'file';
+        get('scan-summary').textContent = get('scans').value
+            ? `${get('format').selectedOptions[0].textContent} · All scans`
+            : 'Select the scan folder or scan list below.';
+        get('settings').open = !get('scans').value;
+    };
+    get('frame').onchange = update;
+    get('format').onchange = () =>
+    {
+        if (get('format').value === 'tartanstar') get('frame').value = 'tartanstar';
+        else if (get('frame').value === 'tartanstar') get('frame').value = 'identity';
+        update();
+    };
+    get('scans').onchange = update;
+    get('scan-browse').onclick = () => pickTrajectory(get('scans'), get('format').value === 'manifest' ? 'trajectory-file' : 'trajectory-folder');
+    get('calibration-browse').onclick = () => pickTrajectory(get('calibration'));
+    const container = get('estimates');
+    for (const estimate of value.trajectories?.length ? value.trajectories : [{}]) addTrajectoryEstimate(container, estimate);
+    get('odometry').open = !value.trajectories?.[0]?.path;
+    get('add-estimate').onclick = () => { addTrajectoryEstimate(container); saveTrajectoryDraft(); };
+    get('remove').onclick = () => { row.remove(); updateTrajectoryOutputs(); saveTrajectoryDraft(); };
+    row.addEventListener('input', () => { updateTrajectoryRoles(container); saveTrajectoryDraft(); });
+    element('trajectory-sequences').append(row); update(); updateTrajectoryOutputs();
 }
 
-function trajectoryConfig()
+function trajectorySequences()
 {
-    const scans = {path:element('trajectory-scans').value.trim(), format:element('trajectory-scan-format').value, time_scale:Number(element('trajectory-scan-time').value)};
-    const calibration = element('trajectory-calibration-mode').value;
-    if (calibration === 'tartanstar') scans.calibration_preset = 'tartanstar';
-    if (calibration === 'file' && element('trajectory-calibration').value.trim()) scans.calibration = {path:element('trajectory-calibration').value.trim()};
-    const trajectories = [...element('trajectory-estimates').children].map(row =>
+    return [...element('trajectory-sequences').children].map(row =>
     {
-        const get = name => row.querySelector('.estimate-'+name);
-        const value = {label:get('label').value, path:get('path').value.trim(), format:get('format').value,
-            time_scale:Number(get('time').value), time_offset_s:Number(get('offset').value), position_scale:Number(get('scale').value), inverse:get('inverse').checked};
-        if (value.format === 'kitti') value.timestamps = get('timestamps').value.trim();
-        if (value.format === 'csv')
+        const get = name => row.querySelector('.sequence-'+name);
+        const scans = {path:get('scans').value.trim(), format:get('format').value, time_scale:Number(get('time').value)};
+        if (get('frame').value === 'tartanstar') scans.calibration_preset = 'tartanstar';
+        if (get('frame').value === 'file') scans.calibration = {path:get('calibration').value.trim()};
+        const trajectories = [...get('estimates').children].map(estimate =>
         {
-            value.delimiter = get('delimiter').value;
-            const names = get('columns').value.split(',').map(x => x.trim());
-            if (names.length !== 8 || names.some(x => !x)) throw Error('Enter eight CSV column names in the displayed order.');
-            value.columns = Object.fromEntries(['t', 'x', 'y', 'z', 'qx', 'qy', 'qz', 'qw'].map((k, i) => [k, names[i]]));
-        }
-        if (get('transform').value.trim()) value.T_pose_from_body = JSON.parse(get('transform').value);
-        return value;
+            const field = name => estimate.querySelector('.estimate-'+name);
+            const value = {label:field('label').value, path:field('path').value.trim(), format:field('format').value,
+                time_scale:Number(field('time').value), time_offset_s:Number(field('offset').value),
+                position_scale:Number(field('scale').value), inverse:field('inverse').checked};
+            if (value.format === 'kitti') value.timestamps = field('timestamps').value.trim();
+            if (value.format === 'csv')
+            {
+                const names = field('columns').value.split(',').map(x => x.trim());
+                if (names.length !== 8 || names.some(x => !x)) throw Error('Enter eight CSV column names.');
+                value.columns = Object.fromEntries(['t','x','y','z','qx','qy','qz','qw'].map((k,i) => [k,names[i]]));
+                value.delimiter = field('delimiter').value;
+            }
+            if (field('transform').value.trim()) value.T_pose_from_body = JSON.parse(field('transform').value);
+            return value;
+        });
+        const folder = row.sequenceDirectory.replace(/[\\/]+$/, '');
+        return {name:row.querySelector('h4').textContent, sequence_directory:row.sequenceDirectory, scans, trajectories,
+            output_directory:folder+'/.ground_truth', period_s:0, tls_map:element('trajectory-tls').value.trim()};
     });
-    const options = JSON.parse(element('trajectory-options').value || '{}');
-    const config = {name:element('trajectory-name').value.trim() || 'tls_trajectory', tls_map:element('trajectory-tls').value.trim(),
-        output_directory:element('trajectory-output').value.trim(), scans, trajectories,
-        period_s:Number(element('trajectory-period').value), workers:Number(element('trajectory-workers').value), ...options};
-    config.scans = {...scans, ...(options.scans || {})};
-    for (const [field, key] of [['initial','initial_alignment'], ['baseline','baseline_directory'], ['cache','cache_directory']])
-        if (element('trajectory-'+field).value.trim()) config[key] = element('trajectory-'+field).value.trim();
-    return config;
+}
+
+function updateTrajectoryOutputs()
+{
+    const folders = [...element('trajectory-sequences').children].map(row => row.sequenceDirectory.replace(/[\\/]+$/, ''));
+    element('trajectory-output-paths').replaceChildren(...folders.map(folder =>
+    {
+        const item = document.createElement('li'); item.className = 'filepath'; item.textContent = folder+'/ground_truth_trajectory.tum'; return item;
+    }));
+    element('trajectory-sequences-empty').hidden = folders.length > 0;
 }
 
 function restoreTrajectory(config)
 {
-    for (const [field,key] of [['name','name'], ['tls','tls_map'], ['output','output_directory'], ['period','period_s'], ['workers','workers'], ['initial','initial_alignment'], ['baseline','baseline_directory'], ['cache','cache_directory']])
-        if (typeof config[key] !== 'undefined' && typeof config[key] !== 'object') element('trajectory-'+field).value = config[key];
+    // Only restore the public batch form; internal development job configs stay out of it.
+    if (config.version !== 2) return;
+    element('trajectory-tls').value = config.tls_map || '';
     element('trajectory-workers').value = config.workers || '';
-    if (config.scans)
-    {
-        element('trajectory-scans').value = config.scans.path || '';
-        element('trajectory-scan-format').value = config.scans.format || 'directory';
-        setTrajectoryTimeScale(element('trajectory-scan-time'), config.scans.time_scale);
-        element('trajectory-calibration-mode').value = config.scans.calibration_preset ? 'tartanstar' : config.scans.calibration ? 'file' : 'identity';
-        element('trajectory-calibration').value = config.scans.calibration?.path || '';
-    }
-    element('trajectory-estimates').replaceChildren();
-    for (const value of config.trajectories?.length ? config.trajectories : [{}]) addTrajectoryEstimate(value);
-    const extra = {...config}, scanExtra = {...(config.scans || {})};
-    for (const key of ['name','tls_map','output_directory','period_s','workers','initial_alignment','baseline_directory','cache_directory','scans','trajectories']) delete extra[key];
-    for (const key of ['path','format','time_scale','calibration','calibration_preset']) delete scanExtra[key];
-    if (Object.keys(scanExtra).length) extra.scans = scanExtra;
-    element('trajectory-options').value = Object.keys(extra).length ? JSON.stringify(extra, null, 2) : '';
-    element('trajectory-calibration-row').hidden = element('trajectory-calibration-mode').value !== 'file';
-    updateTrajectoryScanFormat();
+    element('trajectory-sequences').replaceChildren();
+    for (const sequence of config.sequences || []) addTrajectorySequence(sequence);
+    updateTrajectoryOutputs();
 }
 
 function saveTrajectoryDraft()
@@ -161,90 +204,97 @@ function saveTrajectoryDraft()
     clearTimeout(trajectory_save_timer);
     trajectory_save_timer = setTimeout(async () =>
     {
-        try { await api('trajectory/draft', trajectoryConfig()); }
-        catch (_) { /* An unfinished JSON field is saved after it becomes valid. */ }
+        try { await api('trajectory/draft', {version:2, tls_map:element('trajectory-tls').value.trim(),
+            workers:Number(element('trajectory-workers').value), sequences:trajectorySequences()}); }
+        catch (_) { /* Save complete settings on the next edit. */ }
     }, 600);
 }
 
-function visibleTrajectoryJobs(jobs)
+function trajectoryJobRow(job)
 {
-    const latest = new Map();
-    const identity = job =>
+    const row = document.createElement('article'); row.className = 'registration-job';
+    const name = document.createElement('h3'); name.textContent = job.name;
+    const state = document.createElement('p'); state.className = 'state'; state.textContent = `${job.status} · ${job.stage || ''}`;
+    const path = document.createElement('p'); path.className = 'detail filepath';
+    path.textContent = job.config?.sequence_directory ? job.config.sequence_directory+'/ground_truth_trajectory.tum' : job.source_file || job.output_directory;
+    row.append(name,state,path);
+    const actions = document.createElement('div'); actions.className = 'registration-actions result-actions';
+    if (job.viewer_available)
     {
-        const config = job.config || {};
-        return config.scans?.path && config.tls_map
-            ? JSON.stringify([config.scans.path.replace(/[\\/]+$/, ''), config.tls_map]) : job.id;
-    };
-    for (const job of jobs)
-        if (!job.inspect) latest.set(identity(job), job.id);
-    return jobs.filter(job => !job.inspect && latest.get(identity(job)) === job.id);
+        const link = document.createElement('a'); link.className = 'button primary review-result'; link.textContent = 'Open trajectory viewer';
+        link.href = `/trajectory-viewer.html?job=${encodeURIComponent(job.id)}#${token}`; link.target = '_blank'; link.rel = 'noopener'; actions.append(link);
+    }
+    actions.append(button('Open folder', () => api(`trajectory/${job.id}/folder`, {})));
+    if (!job.managed_externally && job.config?.scans && ['failed','cancelled','interrupted'].includes(job.status))
+    {
+        const resume = button('Resume', async () =>
+        {
+            const result = await api('trajectory/start',{resume_id:job.id});
+            for (const id of result.ids) trajectory_batch_ids.add(id);
+            await refreshTrajectory();
+        });
+        resume.disabled = trajectory_state.running; actions.append(resume);
+    }
+    row.append(actions); return row;
 }
 
 async function refreshTrajectory()
 {
     trajectory_state = await api('trajectory');
-    if (!trajectory_initialized)
-    {
-        restoreTrajectory(trajectory_state.draft || {});
-        trajectory_initialized = true;
-    }
+    if (!trajectory_initialized) { restoreTrajectory(trajectory_state.draft || {}); trajectory_initialized = true; }
+    if (trajectory_state.running)
+        for (const job of trajectory_state.jobs)
+            if (!job.managed_externally && ['running','queued'].includes(job.status)) trajectory_batch_ids.add(job.id);
     for (const id of ['trajectory-start','trajectory-check']) element(id).disabled = trajectory_state.running;
-    element('trajectory-stop').disabled = !trajectory_state.running;
-    const latest = trajectory_state.jobs.at(-1);
-    const monitored = trajectory_state.jobs.filter(job => job.managed_externally);
-    element('trajectory-message').textContent = monitored.length
-        ? ['running','queued','auditing','completed','failed','cancelled','interrupted'].map(status => [status,monitored.filter(job => job.status === status).length])
-            .filter(([,count]) => count).map(([status,count]) => `${count} ${status}`).join(' · ')
-        : latest?.stage || '';
-    const log = element('trajectory-log');
-    if (latest?.log_tail && log.textContent !== latest.log_tail) { log.textContent = latest.log_tail; log.scrollTop = log.scrollHeight; }
-    const jobs = visibleTrajectoryJobs(trajectory_state.jobs);
-    const signature = JSON.stringify(jobs.map(({log_tail, ...job}) => job));
-    if (signature === trajectory_signature) return;
-    trajectory_signature = signature;
-    element('trajectory-jobs').replaceChildren(...jobs.map(job =>
+    const batch = trajectory_state.jobs.filter(job => trajectory_batch_ids.has(job.id));
+    const selected = trajectory_state.jobs.filter(job => trajectory_result_ids.has(job.id));
+    element('trajectory-stop').disabled = !trajectory_state.running || !batch.length;
+    element('trajectory-message').textContent = batch.length ? ['running','queued','ready','completed','failed','cancelled','interrupted']
+        .map(status => [status,batch.filter(job => job.status === status).length]).filter(([,n]) => n).map(([s,n]) => `${n} ${s}`).join(' · ') : '';
+    element('trajectory-batch').hidden = !batch.length;
+    for (const [id,jobs] of [['trajectory-batch-jobs',batch],['trajectory-jobs',selected]])
     {
-        const row = document.createElement('article'); row.className = `registration-job ${job.viewer_available ? 'result-ready' : 'result-pending'}`;
-        const name = document.createElement('h3'); name.textContent = job.name;
-        const status = document.createElement('p'); status.className = 'state'; status.textContent = `${job.status} · ${job.stage || ''}`;
-        const path = document.createElement('p'); path.className = 'detail filepath'; path.textContent = job.output_directory;
-        row.append(name, status, path);
-        const actions = document.createElement('div'); actions.className = 'registration-actions result-actions';
-        if (job.viewer_available)
-        {
-            const link = document.createElement('a'); link.className = 'button primary review-result'; link.textContent = 'Open trajectory viewer';
-            link.href = `/trajectory-viewer.html?job=${encodeURIComponent(job.id)}#${token}`; link.target = '_blank'; link.rel = 'noopener'; actions.append(link);
-        }
-        actions.append(button('Open output folder', async () => { await api(`trajectory/${job.id}/folder`, {}); }));
-        if (!job.managed_externally && ['failed','cancelled','interrupted'].includes(job.status))
-        {
-            const resume = button('Resume', async () => { await api('trajectory/start', {resume_id:job.id}); await refreshTrajectory(); });
-            resume.disabled = trajectory_state.running; actions.append(resume);
-        }
-        row.append(actions);
-        return row;
-    }));
+        const host = element(id), signature = JSON.stringify(jobs.map(({log_tail,...job}) => job));
+        if (host.dataset.signature !== signature) { host.replaceChildren(...jobs.map(trajectoryJobRow)); host.dataset.signature = signature; }
+    }
+    element('trajectory-results-empty').hidden = selected.length > 0;
+    const latest = batch.find(job => job.status === 'running') || batch.at(-1);
+    element('trajectory-log').textContent = latest?.log_tail || 'No active trajectory generation in this batch.';
 }
 
-for (const node of document.querySelectorAll('[data-trajectory-browse]')) node.onclick = () => pickTrajectory(element(node.dataset.trajectoryBrowse));
-for (const node of document.querySelectorAll('[data-trajectory-folder]')) node.onclick = () => pickTrajectory(element(node.dataset.trajectoryFolder), true);
-action('trajectory-scan-browse', () => pickTrajectory(element('trajectory-scans'), element('trajectory-scan-format').value !== 'manifest'));
-action('trajectory-add-estimate', () => { addTrajectoryEstimate(); saveTrajectoryDraft(); });
-action('trajectory-open', () => pickTrajectory(async path => { await api('trajectory/open', {path}); await refreshTrajectory(); }, true));
-element('trajectory-calibration-mode').onchange = () => { element('trajectory-calibration-row').hidden = element('trajectory-calibration-mode').value !== 'file'; saveTrajectoryDraft(); };
-element('trajectory-scan-format').onchange = () =>
+async function openTrajectoryResults(paths)
 {
-    if (element('trajectory-scan-format').value === 'tartanstar') element('trajectory-calibration-mode').value = 'tartanstar';
-    else if (element('trajectory-calibration-mode').value === 'tartanstar') element('trajectory-calibration-mode').value = 'identity';
-    updateTrajectoryScanFormat();
-    element('trajectory-calibration-row').hidden = element('trajectory-calibration-mode').value !== 'file'; saveTrajectoryDraft();
-};
+    const result = await api('trajectory/open', {paths:Array.isArray(paths) ? paths : [paths]});
+    trajectory_result_ids.clear();
+    for (const id of result.ids) trajectory_result_ids.add(id);
+    await refreshTrajectory();
+}
+
+action('trajectory-map-browse', () => pickTrajectory(element('trajectory-tls')));
+action('trajectory-add-sequences', () => pickTrajectory(async paths =>
+{
+    const response = await api('trajectory/discover', {paths:Array.isArray(paths) ? paths : [paths]});
+    const existing = new Set([...element('trajectory-sequences').children].map(row => row.sequenceDirectory));
+    for (const sequence of response.sequences) if (!existing.has(sequence.sequence_directory))
+    { addTrajectorySequence(sequence); existing.add(sequence.sequence_directory); }
+}, 'trajectory-folders'));
+action('trajectory-open', () => pickTrajectory(openTrajectoryResults,'trajectory-folder'));
+action('trajectory-open-files', () => pickTrajectory(openTrajectoryResults,'trajectory-files'));
+action('trajectory-clear-results', () => { trajectory_result_ids.clear(); return refreshTrajectory(); });
 element('panel-trajectory').addEventListener('input', saveTrajectoryDraft);
-for (const [id, inspect] of [['trajectory-check',true], ['trajectory-start',false]]) action(id, async () =>
+for (const [id,inspect] of [['trajectory-check',true],['trajectory-start',false]]) action(id, async () =>
 {
-    const config = trajectoryConfig();
-    if (!config.tls_map || !config.scans.path || !config.output_directory || !config.trajectories.length || config.trajectories.some(t => !t.path)) throw Error('Complete steps 1–4: scanned GT map, sequence scans, estimated trajectory, and output folder.');
-    if (element('trajectory-calibration-mode').value === 'file' && !config.scans.calibration?.path) throw Error('Choose the sensor-to-body calibration file in step 2.');
-    await api('trajectory/start', {config, inspect}); await refreshTrajectory();
+    const configs = trajectorySequences(), workers = Number(element('trajectory-workers').value);
+    if (!element('trajectory-tls').value.trim() || !configs.length) throw Error('Choose a scanned GT map and add sequence folders.');
+    if (!Number.isInteger(workers) || workers < 0 || workers > 256) throw Error('CPU threads: Auto or an integer from 1 to 256.');
+    for (const config of configs)
+    {
+        if (!config.scans.path || !config.trajectories.length || config.trajectories.some(t => !t.path))
+            throw Error(`Select scan files and input odometry for ${config.name}.`);
+        if (config.scans.calibration && !config.scans.calibration.path) throw Error(`Choose the sensor calibration for ${config.name}.`);
+    }
+    const result = await api('trajectory/start', {configs,workers,inspect});
+    trajectory_batch_ids.clear(); for (const id of result.ids) trajectory_batch_ids.add(id);
+    await refreshTrajectory();
 });
-action('trajectory-stop', async () => { await api('trajectory/cancel', {}); await refreshTrajectory(); });
+action('trajectory-stop', async () => { await api('trajectory/cancel',{}); await refreshTrajectory(); });

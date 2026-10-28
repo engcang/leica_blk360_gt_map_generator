@@ -3,7 +3,9 @@
 - **Workflow:** last app tab, **Generate trajectory**.
   - Fixed reference: an already merged TLS PLY, in its original map frame.
   - Output poses: TLS-map-from-body, using the first estimate's body frame.
-  - Input files are opened read-only; result/cache directories must be separate from scan inputs.
+  - Select several sequence folders for one scanned map; review detected scans and odometry per sequence.
+  - Input files remain read-only; write `ground_truth_trajectory.tum` in each sequence folder and supporting files under `.ground_truth/`.
+  - Use every scan by default (`period_s: 0`); positive intervals remain available for explicit CLI configurations and existing runs.
   - No ROS or TartanStar SDK installation required.
 
 ## Estimated trajectories
@@ -56,8 +58,8 @@
 - **Scan calibration:** `T_body_from_sensor`, applied before deskew.
   - JSON: a 4 × 4 matrix or `{"T_body_from_sensor": [[...], ...]}`.
   - URDF: defaults `sensor_frame: "os_dome_lidar"`, `body_frame: "base_link"`.
-  - Change frame names through `scans.calibration` in additional settings.
-- **Additional settings:** merged with the form's scan settings.
+  - CLI configurations can specify frame names through `scans.calibration`.
+- **CLI scan settings:** for custom formats beyond the form controls.
   - Per-point timestamps are absolute by default; set `point_times_relative` for offsets from the scan timestamp.
   - `point_scale`: source XYZ units to metres; default `1`.
   - Deskew: interpolated translation and quaternion SLERP from the first estimate, anchored at each scan timestamp; TartanStar anchors at its last valid column.
@@ -149,7 +151,9 @@
 
 ## Outputs and viewer
 
-- **Trajectory:** `recovery/candidate_trajectory.tum`.
+- **Public trajectory:** `ground_truth_trajectory.tum` in the sequence folder.
+  - Supporting files under `.ground_truth/`; CLI jobs without `sequence_directory` publish in their chosen output directory.
+  - Internal `candidate_trajectory.tum` files remain resumable checkpoints.
 - **Diagnostics:** `baseline/`, `recovery/quality.jsonl`, `recovery/attempts.jsonl`, `input_quality.json`, `provenance.json`.
 - **Reusable tracking:** `tracking/quality.jsonl`, `tracking/candidate_trajectory.tum`, and their hashed completion receipt.
 - **Live job state:** monitored jobs read `job_status.json`; a saved viewer can remain available while recovery is running or queued.
@@ -182,3 +186,15 @@
 
   - Add `--inspect` to validate inputs without generating a result.
   - Use the native executable installed by the launcher, or set `BLK_REGISTRATION_EXECUTABLE`.
+
+## Batch form and result browsing
+
+- **Batch:** one scanned map, several independently configured sequence folders.
+  - Automatically detect timestamped scans and conventional odometry filenames/folders.
+  - Review each sequence; select missing files or change TUM/CSV/KITTI, timestamp units, and sensor frame.
+  - Share the CPU budget across concurrent workers; bound concurrency using available memory.
+  - Stop cancels active workers and queued sequences; completed checkpoints remain resumable.
+- **Results:** choose a folder or individual TUM files explicitly; never populate the list from project history.
+  - A parent result folder opens its immediate sequence results.
+  - A complete saved result restores maps and the common scanner coordinate frame.
+  - TUM-only inputs display trajectories; detected odometry uses a saved alignment when available, otherwise its original coordinates.

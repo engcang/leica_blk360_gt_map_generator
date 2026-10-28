@@ -108,6 +108,13 @@ def inputs(config):
     output = Path(config['output_directory']).expanduser().resolve()
     cache = Path(config.get('cache_directory') or output/'map_cache').expanduser().resolve()
     roots = [source.path if source.path.is_dir() else source.path.parent]
+    sequence = Path(config['sequence_directory']).expanduser().resolve(strict=True) if config.get('sequence_directory') else None
+    public_trajectory = (sequence if sequence is not None else output)/'ground_truth_trajectory.tum'
+    if public_trajectory.is_symlink() or public_trajectory in source.files+[tls]:
+        raise ValueError('Ground-truth output must not replace an input file or symbolic link')
+    sequence_output = sequence is not None and output == sequence/'.ground_truth' and cache == output/'map_cache'
+    if sequence_output and (sequence == source.path or sequence in source.path.parents):
+        roots = []  # Only the dedicated result subfolder is writable; inputs stay read-only.
     for target in (output, cache):
         if any(target == root or target.is_relative_to(root) for root in roots):
             raise ValueError('Choose an output and cache folder outside the scan input folder')
@@ -115,7 +122,7 @@ def inputs(config):
             raise ValueError('Output/cache folder must not contain any input files')
     if output == cache or output.is_relative_to(cache):
         raise ValueError('Map cache must not contain the result folder')
-    period = float(config.get('period_s', .1))
+    period = float(config.get('period_s', 0))
     indices = source.selection(period)
     if len(indices) < 3:
         raise ValueError('Fewer than three scans overlap the estimated trajectory')
@@ -277,8 +284,8 @@ def export_viewer(config, source, trajectories, output, cache, A, progress, reco
     if temporal_errors:
         raise ValueError('Result still contains inconsistent temporal motion; recover it before map export')
     layers = [dict(key='tls_gt', label='Generated ground-truth trajectory', color='#FF9B54', rows=rows.tolist(),
-                   gap_s=max(float(config.get('max_pose_gap_s', .5)), 1.5*float(config.get('period_s', .1))))]
-    indices = source.selection(float(config.get('period_s', .1)))
+                   gap_s=max(float(config.get('max_pose_gap_s', .5)), 1.5*float(config.get('period_s', 0))))]
+    indices = source.selection(float(config.get('period_s', 0)))
     colors = ['#5EC8DE', '#CB8CFF', '#FFB75E', '#8CDB9B']
     for n, trajectory in enumerate(trajectories):
         key = f'estimate_{n}'
@@ -300,6 +307,7 @@ def export_viewer(config, source, trajectories, output, cache, A, progress, reco
     for item in maps:
         item.setdefault('points', len(ply_vertices(Path(item['path']))))
         item.setdefault('bounds', bounds)
+        item['path'] = os.path.relpath(item['path'], output)
     input_quality = json.loads((output/'baseline/input_quality.json' if preview else result/'input_quality.json').read_text())
     input_quality['skipped_scan_intervals'] = input_gaps
     input_quality['checked_selected_scans'] = len(indices)
@@ -311,6 +319,20 @@ def export_viewer(config, source, trajectories, output, cache, A, progress, reco
         T_map_from_estimate=A.tolist(), trajectory_sha256=digest(result/'candidate_trajectory.tum')))
     if not preview:
         save_json(output/'products.json', products)
+        publish_trajectory(config, result/'candidate_trajectory.tum', output)
+
+
+def publish_trajectory(config, source, output):
+    destination = (Path(config['sequence_directory']).expanduser().resolve()
+                   if config.get('sequence_directory') else output)/'ground_truth_trajectory.tum'
+    for estimate in config.get('trajectories', []):
+        if Path(estimate['path']).expanduser().resolve() == destination:
+            raise ValueError('The output ground-truth trajectory must not replace an input trajectory')
+    if destination.is_symlink():
+        raise ValueError('Ground-truth output must not be a symbolic link')
+    temporary = destination.with_suffix('.tum.pending')
+    shutil.copyfile(source, temporary)
+    temporary.replace(destination)
 
 
 def pending_job_status(path):

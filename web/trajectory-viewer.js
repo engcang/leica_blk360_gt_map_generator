@@ -75,6 +75,16 @@ window.blkTrajectoryScene = async function()
         mapSelect.add(new Option(label, item.key));
     }
     mapSelect.add(new Option('Hide map', 'none'));
+    if (!Object.keys(cfg.maps).length)
+    {
+        const points = scene.trajectories.flatMap(layer => layer.rows.map(row => row.slice(1,4)));
+        const bounds = [[Infinity,Infinity,Infinity],[-Infinity,-Infinity,-Infinity]];
+        for (const point of points) for (let k=0;k<3;k++)
+        { bounds[0][k] = Math.min(bounds[0][k],point[k]); bounds[1][k] = Math.max(bounds[1][k],point[k]); }
+        if (!points.length) { bounds[0] = [-1,-1,-1]; bounds[1] = [1,1,1]; }
+        cfg.maps.none = {count:0,bounds,color_bounds:bounds};
+        cfg.default_map = 'none';
+    }
     document.getElementById('color-by').value = 'solid';
     document.getElementById('solid').value = '#ffffff';
     for (const layer of scene.trajectories)

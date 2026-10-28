@@ -277,9 +277,11 @@ class ScanSource:
     def pose(self, stamps):
         return self.frontend.pose(stamps)
 
-    def selection(self, period=.1):
-        if period <= 0:
-            raise ValueError('Scan period must be positive')
+    def selection(self, period=0):
+        if not np.isfinite(period) or period < 0:
+            raise ValueError('Scan period must be zero (all scans) or positive')
+        if period == 0:
+            return np.arange(len(self.timestamps))
         lo, hi = self.frontend.times[[0, -1]]
         ids = np.unique(np.searchsorted(self.timestamps, np.arange(max(lo, self.timestamps[0]), min(hi, self.timestamps[-1])+period*.001, period)))
         return ids[ids < len(self.timestamps)]
@@ -336,7 +338,7 @@ class ScanSource:
             raise PoseGap('Fewer than 80 usable scan points')
         return Scan(index, stamp, points, anchor)
 
-    def iter_scans(self, period_s=.1, scan_indices=None, after_index=-1):
+    def iter_scans(self, period_s=0, scan_indices=None, after_index=-1):
         indices = self.selection(period_s) if scan_indices is None else scan_indices
         for i in indices:
             if i <= after_index:

@@ -185,6 +185,11 @@ namespace blk_core
             {
                 reply(response, trajectory_.snapshot());
             });
+            server_.Post("/api/trajectory/discover", [this](const httplib::Request &request, httplib::Response &response)
+            {
+                auto body=nlohmann::json::parse(request.body); body["operation"]="discover";
+                reply(response, trajectory_.helper(body, registration_.snapshot().at("python").get<std::string>()));
+            });
             server_.Post("/api/trajectory/draft", [this](const httplib::Request &request, httplib::Response &response)
             {
                 trajectory_.draft(nlohmann::json::parse(request.body));
@@ -192,8 +197,7 @@ namespace blk_core
             });
             server_.Post("/api/trajectory/start", [this](const httplib::Request &request, httplib::Response &response)
             {
-                trajectory_.start(nlohmann::json::parse(request.body), registration_.snapshot().at("python").get<std::string>());
-                reply(response, {{"ok", true}});
+                reply(response, trajectory_.start(nlohmann::json::parse(request.body), registration_.snapshot().at("python").get<std::string>()));
             });
             server_.Post("/api/trajectory/cancel", [this](const httplib::Request &, httplib::Response &response)
             {
@@ -202,8 +206,8 @@ namespace blk_core
             });
             server_.Post("/api/trajectory/open", [this](const httplib::Request &request, httplib::Response &response)
             {
-                trajectory_.open(nlohmann::json::parse(request.body).at("path").get<std::string>());
-                reply(response, {{"ok", true}});
+                const auto body = nlohmann::json::parse(request.body);
+                reply(response, trajectory_.open(body.contains("paths") ? body.at("paths").get<std::vector<std::string>>() : std::vector<std::string>{body.at("path").get<std::string>()}, registration_.snapshot().at("python").get<std::string>()));
             });
             server_.Post("/api/trajectory/monitor", [this](const httplib::Request &request, httplib::Response &response)
             {

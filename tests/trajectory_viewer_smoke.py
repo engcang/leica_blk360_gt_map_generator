@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 
 
-def run(chrome):
+def run(chrome, standalone=False):
     web = Path(__file__).resolve().parents[1]/'web'
     prelude = r'''<script>
 const uploads=[];let failMapRead=false;
@@ -30,6 +30,7 @@ window.fetch=async(url,options={})=>{
     return new Response(bytes.slice(Number(match[1]),Number(match[2])+1),{status:206});
 };
 </script>'''
+    if standalone: prelude = prelude.replace('</script>', 'scene.maps=[];</script>')
     checks = r'''<script>
 addEventListener('load',async()=>{
     const result=document.createElement('p');result.id='trajectory-test';document.body.append(result);
@@ -63,6 +64,22 @@ addEventListener('load',async()=>{
     }catch(error){result.textContent='FAIL: '+error.message;}
 });
 </script>'''
+    if standalone:
+        checks = r'''<script>
+addEventListener('load',async()=>{
+ const result=document.createElement('p');result.id='trajectory-test';document.body.append(result);
+ try {
+  for(let n=0;n<200&&!window.blkTrajectoryViewer;n++)await new Promise(r=>setTimeout(r,25));
+  const viewer=window.blkTrajectoryViewer;if(!viewer)throw Error('Viewer did not initialize');
+  viewer.render();const state=viewer.stats();
+  if(state.loading||state.error||state.displayed||state.visibleTrajectories.length!==2)throw Error(JSON.stringify(state));
+  if(document.getElementById('map').value!=='none')throw Error('Missing map should default to trajectories only');
+  document.getElementById('fit').click();viewer.render();
+  if(!viewer.camera().center.every(Number.isFinite))throw Error('Invalid camera for TUM-only inputs');
+  result.textContent='PASS';
+ }catch(error){result.textContent='FAIL: '+error.message;}
+});
+</script>'''
     html = (web/'trajectory-viewer.html').read_text()
     html = html.replace('<link rel="stylesheet" href="trajectory-viewer.css">', '<style>'+(web/'trajectory-viewer.css').read_text()+'</style>'+prelude)
     for name in ('trajectory-viewer.js','trajectory-renderer.js'):
@@ -82,4 +99,6 @@ addEventListener('load',async()=>{
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--chrome',required=True)
-    run(parser.parse_args().chrome)
+    chrome=parser.parse_args().chrome
+    run(chrome)
+    run(chrome, standalone=True)

@@ -9,6 +9,20 @@ from parallel_runtime import cacheBudget
 
 
 class LocalSubmaps:
+    def seed_context(self, anchor):
+        """The same close temporal anchors used by final seed validation."""
+        result = []
+        for before, ids in ((True, [i for i in self.poses if i < anchor.index]),
+                            (False, [i for i in self.poses if i > anchor.index])):
+            if not ids:
+                continue
+            i = max(ids) if before else min(ids)
+            stamp = self.rows_by_index[i]['timestamp']
+            if abs(stamp-anchor.timestamp) <= 3:
+                F = self.source.pose([stamp])[0]
+                result.append(self.poses[i]@np.linalg.inv(F)@anchor.frontend_T)
+        return result
+
     def submap_seed(self,index,allow_global=True):
         key = (index, allow_global)
         if key in self.seed_cache:
@@ -116,44 +130,59 @@ class LocalSubmaps:
             self.log(dict(stage='submap_seed_failed', index=anchor.index, scope=scope,
                           radius_s=radius, resolution_m=resolution, reason=str(exc)))
             return None
+        context = [difference(T, expected) for expected in self.seed_context(anchor)]
+        def reject(reason, **measurements):
+            self.log(dict(stage='submap_seed', index=anchor.index, scope=scope,
+                radius_s=radius, resolution_m=resolution, T_map_from_base=T.tolist(),
+                accepted=False, fine=info, checks=[], heldout_capped_costs=[],
+                nearby_anchor_disagreement_m_deg=context, reason=reason,
+                short_circuited=True, elapsed_s=time.perf_counter()-started, **measurements))
+            return None
+        # These conditions cannot be repaired by later validation. In particular,
+        # do not fit independent witnesses after the shared proposal has failed.
+        if not info.get('converged'):
+            return reject('shared_fit_not_converged')
+        if any(dm > .5 or da > 10 for dm, da in context):
+            return reject('nearby_anchor_disagreement')
+        optimizer_information = info.get('optimizer_information', {})
+        if optimizer_information.get('observable_directions') != 6:
+            return reject('shared_fit_weak_geometry')
         # Convergence alone does not mean the shared fit determined every DOF.
         # Check actual training geometry separately from independent validation:
         # a floor-only fit must never inherit lateral coordinates from SLAM.
         training_quality = self.fine.quality(voxel(train, .1), T)
-        optimizer_information = info.get('optimizer_information', {})
         training_supported = (training_quality.get('geometry_supported')
                               and training_quality.get('observable_directions') == 6
                               and optimizer_information.get('observable_directions') == 6)
+        if not training_supported:
+            return reject('shared_fit_weak_geometry', training_quality=training_quality)
         _, held = self.prepared_scan(anchor)
         aq = self.fine.quality(held, T)
+        if not aq.get('geometry_supported'):
+            return reject('insufficient_anchor_geometry', training_quality=training_quality,
+                          anchor_quality=aq)
         costs = [capped_distance_cost(aq)]
-        context = []
-        for label, ids in (('before', [i for i in self.poses if i < anchor.index]),
-                           ('after', [i for i in self.poses if i > anchor.index])):
-            if not ids:
-                continue
-            i = max(ids) if label == 'before' else min(ids)
-            stamp = self.rows_by_index[i]['timestamp']
-            if abs(stamp-anchor.timestamp) <= 3:
-                F = self.source.pose([stamp])[0]
-                context.append(difference(T, self.poses[i]@np.linalg.inv(F)@anchor.frontend_T))
-        consistent = all(dm <= .5 and da <= 10 for dm, da in context)
         checks = []
-        if training_supported and aq.get('geometry_supported') and consistent and info.get('converged'):
-            for s in validators[::max(1, len(validators)//3)][:3]:
-                guess = T @ np.linalg.inv(anchor.frontend_T) @ s.frontend_T
-                predicted = self.fine.quality(self.prepared_scan(s)[1], guess)
-                costs.append(capped_distance_cost(predicted))
-                fitted, q = self.fit(s, guess, 'submap_heldout')
-                checks.append(dict(q, agreement_m_deg=difference(fitted, guess),
-                                   shared_transform_quality=predicted, shared_transform_pose=guess.tolist()))
-        valid = [q for q in checks if q.get('geometry_supported') and q.get('fine', {}).get('converged')
-                 and q['shared_transform_quality'].get('geometry_supported')
-                 and q['agreement_m_deg'][0] <= .15 and q['agreement_m_deg'][1] <= 3]
+        selected = validators[::max(1, len(validators)//3)][:3]
+        valid = []
+        for s in selected:
+            guess = T @ np.linalg.inv(anchor.frontend_T) @ s.frontend_T
+            predicted = self.fine.quality(self.prepared_scan(s)[1], guess)
+            costs.append(capped_distance_cost(predicted))
+            # Even a failed seed's independently fitted scan can later support
+            # partial-view tracking through latest_attempt. Preserve those fits.
+            fitted, q = self.fit(s, guess, 'submap_heldout')
+            check = dict(q, agreement_m_deg=difference(fitted, guess),
+                         shared_transform_quality=predicted, shared_transform_pose=guess.tolist())
+            if (predicted.get('geometry_supported') and q.get('geometry_supported')
+                    and q.get('fine', {}).get('converged')
+                    and check['agreement_m_deg'][0] <= .15 and check['agreement_m_deg'][1] <= 3):
+                valid.append(check)
+            checks.append(check)
         joint = jointly_observable([aq]+[q['shared_transform_quality'] for q in valid],
             [T]+[np.asarray(q['shared_transform_pose']) for q in valid], T,
             shared_transform_fitted=bool(info.get('converged')))
-        plausible = bool(training_supported and len(valid) >= 2 and consistent and joint['accepted'])
+        plausible = bool(training_supported and len(valid) >= 2 and joint['accepted'])
         ok = bool(info.get('converged') and plausible)
         certificate = dict(protocol='local-submap-v1', anchor_timestamp=anchor.timestamp, joint=joint, training_quality=training_quality,
             optimizer_information=optimizer_information,
@@ -176,7 +205,19 @@ class LocalSubmaps:
 
     def _submap_seed(self, index, allow_global=True):
         # Exhaust both local windows; no feature-search fallback follows.
-        from trajectory_recovery import choose_seed
+        from trajectory_recovery import choose_seed, difference
+        anchor = self.scan(index)
+        if anchor is None:
+            return None
+        context = self.seed_context(anchor)
+        if len(context) == 2:
+            dm, da = difference(*context)
+            # Triangle inequalities: no pose can be within 50 cm / 10 degrees
+            # of both anchors when their two feasible regions are disjoint.
+            if dm > 1.+1e-9 or da > 20.+1e-9:
+                self.log(dict(stage='submap_skipped', index=index,
+                    reason='incompatible_nearby_anchors', disagreement_m_deg=[dm, da]))
+                return None
         if self.matcher is None:
             from trajectory_geometry import Matcher
             self.matcher = Matcher(self.cache, self.fine.workers)

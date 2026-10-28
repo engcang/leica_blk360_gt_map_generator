@@ -66,6 +66,21 @@ class NativeMapTests(reference.PersistentMapTests):
         self.assertEqual(np.asarray(target.cloud.points).ctypes.data, before)
         self.assertEqual(np.asarray(target.cloud.normals).ctypes.data, normal_before)
 
+    def test_streamed_dense_queries_preserve_neighbors_and_selection(self):
+        rng = np.random.default_rng(52)
+        points = np.concatenate([rng.uniform(.1, 7.9, (6000,3))+[x,0,0] for x in (0,16,32)])
+        index = self.index(points)
+        query = points+.002
+        expected = index.query(query, k=2, distance_upper_bound=.8)
+        index._clear_native()
+        index.cache_limit = 6000*80+1024  # one tile fits, the whole submap does not
+        selected = np.arange(0, len(query), 2)
+        actual = index.query(query, k=2, distance_upper_bound=.8, selected=selected)
+        for a,b in zip(actual,expected):
+            np.testing.assert_array_equal(a[selected],b[selected])
+        self.assertTrue(np.isinf(actual[0][1::2]).all())
+        self.assertLessEqual(index.native_bytes, index.cache_limit)
+
 
 if __name__ == '__main__':
     unittest.main()

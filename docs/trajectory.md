@@ -107,6 +107,7 @@
   - Local submaps use 2 / 6 s windows, up to 11 / 21 scans, and the preceding/following accepted poses plus the original alignment as initial guesses.
     - Try the supplied guess and its 10 cm coarse refinement; fit the submap at 1 cm with up to 180 iterations per gate.
     - Withhold the anchor and complete validation scans; require independent geometry and consistent temporal motion.
+    - Stop dependent validation once convergence, nearby-anchor agreement, or shared geometric support fails. Skip dense fitting when nearby-anchor constraints cannot both be satisfied.
     - Refine each accepted scan individually at 1 cm and propagate from verified anchors in both directions.
     - Weak individual directions require full-rank shared fitting and independent joint geometry; agreement within 15 cm / 3° and weak-direction departure within 1 cm using the 5 m rotation scale.
     - Mark support-dependent acceptance only when the individual scan did not already pass.
@@ -114,6 +115,8 @@
   - Exact scan/timestamp matching, competing-candidate checks, and temporal auditing apply before export.
   - CPU/memory-aware caches reuse original TLS tiles, normals, exact correspondence indices, partitions, and identical fitting requests.
   - C++/OpenMP correspondence queries use persistent nanoflann indices and reusable buffers; optimizer reductions remain ordered.
+    - Balance query work dynamically; split oversized query batches without removing source/map points or changing search radii.
+    - Account for allocated index memory and reserve normals before evicting reusable tiles.
 
 ## Staged campaigns
 

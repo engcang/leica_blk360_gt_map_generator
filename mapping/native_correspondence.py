@@ -49,6 +49,9 @@ def loadLibrary():
     for name, (result, args) in signatures.items():
         function = getattr(lib, name)
         function.restype, function.argtypes = result, args
+    if hasattr(lib, 'blk_index_bytes'):
+        lib.blk_index_bytes.restype = ct.c_uint64
+        lib.blk_index_bytes.argtypes = [pointer, integer]
     if lib.blk_correspondence_abi() != 1:
         raise RuntimeError('Incompatible native correspondence library')
     return lib
@@ -73,6 +76,7 @@ def nativeIndexClass(base):
                 raise MemoryError(self.lib.blk_correspondence_error().decode())
             self._release = weakref.finalize(self, self.lib.blk_index_destroy, self.handle)
             self.native_tiles = {}  # Own every array referenced by C++ until eviction.
+            self.tile_sizes = {}
             self.native_bytes = 0
 
         def check(self, result):
@@ -103,21 +107,26 @@ def nativeIndexClass(base):
             needed = set(map(int, tiles))
             # Include point mappings, tree nodes/permutation and optional normals.
             limit = min(self.cache_limit, cacheBudget(.2)) - self.cache_bytes
-            estimate = sum(int(self.offsets[t+1]-self.offsets[t])*80 for t in needed)
-            additional = sum(int(self.offsets[t+1]-self.offsets[t])*80 for t in needed if t not in self.native_tiles)
+            estimate = sum(self.tile_sizes.get(t, int(self.offsets[t+1]-self.offsets[t])*80)
+                           for t in needed)
+            if estimate > limit:
+                return False  # Split queries before evicting useful native trees.
+            additional = sum(self.tile_sizes.get(t, int(self.offsets[t+1]-self.offsets[t])*80)
+                             for t in needed if t not in self.native_tiles)
             for tile in list(self.native_tiles):
-                if estimate > limit or (self.native_bytes+additional > limit and tile not in needed):
+                if self.native_bytes+additional > limit and tile not in needed:
                     self.lib.blk_index_remove(self.handle, tile)
                     self.native_bytes -= self.native_tiles.pop(tile)[2]
                     self.statistics['tree_evictions'] += 1
-            if estimate > limit:
-                return False  # Reference path streams tiles when RAM is tight.
             for tile in sorted(needed):
                 if tile not in self.native_tiles:
                     started = time.perf_counter()
                     raw = np.memmap(self.matcher.folder/(self.keys[tile]+'.bin'), mode='r', dtype='<f4').reshape(-1, 3)
                     self.check(self.lib.blk_index_add(self.handle, tile, pointer(raw)))
                     size = len(raw)*80
+                    if hasattr(self.lib, 'blk_index_bytes'):
+                        size = int(self.lib.blk_index_bytes(self.handle, tile))
+                    self.tile_sizes[tile] = size
                     self.native_tiles[tile] = [raw, None, size]
                     self.native_bytes += size
                     self.statistics['tree_builds'] += 1
@@ -133,6 +142,52 @@ def nativeIndexClass(base):
                     self.statistics['normal_preparation_s'] += time.perf_counter()-started
             return True
 
+        def _stream_query(self, points, k, cap, selected):
+            """Keep dense submaps in C++ when their whole tile plan exceeds RAM.
+
+            Split query rows, never map points or search radii. Each batch loads
+            every tile its original exact query can visit. Source order is
+            restored before the unchanged Open3D reduction.
+            """
+            distances = np.full((len(points), k+1), np.inf)
+            ids = np.full((len(points), k+1), self.n, dtype=np.int64)
+            rows = np.arange(len(points)) if selected is None else np.asarray(selected)
+            if not len(rows):
+                return distances, ids
+            cells = np.floor(points[rows]/self.tile_m)
+            rows = rows[np.lexsort((cells[:, 2], cells[:, 1], cells[:, 0]))]
+            saved_plan = self.query_plan
+            # Do not let a previous reference fallback consume the native budget.
+            self.trees.clear(); self.normal_maps.clear(); self.cache_bytes = 0
+            def visit(rows):
+                query = np.ascontiguousarray(points[rows])
+                started = time.perf_counter()
+                plan = self._tile_queries(query, cap)
+                self.statistics['query_plan_s'] += time.perf_counter()-started
+                if self._native_prepare(plan):
+                    d = np.empty((len(rows), k+1)); i = np.empty((len(rows), k+1), dtype=np.int64)
+                    started = time.perf_counter()
+                    self.check(self.lib.blk_index_query(self.handle, pointer(query), len(rows), k+1, cap,
+                                                       None, pointer(d), pointer(i)))
+                    self.statistics['tree_query_s'] += time.perf_counter()-started
+                    self.statistics['queried_tile_points'] += len(rows)
+                    distances[rows], ids[rows] = d, i
+                elif len(rows) > 4096 and len(plan) > 1:
+                    middle = len(rows)//2
+                    visit(rows[:middle]); visit(rows[middle:])
+                else:
+                    # A single tile can exceed the budget. Preserve the exact
+                    # reference path for that batch, without retaining two trees.
+                    self._clear_native()
+                    d, i = super(NativeTiledMapIndex, self).query(query, k+1, cap)
+                    distances[rows], ids[rows] = d, i
+                    self.trees.clear(); self.normal_maps.clear(); self.cache_bytes = 0
+            try:
+                visit(rows)
+            finally:
+                self.query_plan = saved_plan
+            return distances, ids
+
         def query(self, points, k=1, distance_upper_bound=np.inf, workers=None, selected=None):
             points = np.ascontiguousarray(points, dtype=np.float64)
             cap = float(distance_upper_bound)
@@ -147,21 +202,23 @@ def nativeIndexClass(base):
             started = time.perf_counter()
             plan = self._plan(points, cap)
             self.statistics['query_plan_s'] += time.perf_counter()-started
-            if not self._native_prepare(plan):
-                return super().query(points, k, cap, workers, selected)
+            streamed = not self._native_prepare(plan)
             # These arrays belong to this query result; callers may retain them.
             # One extra neighbor detects ties crossing the requested boundary.
-            distances = np.empty((len(points), k+1))
-            ids = np.empty((len(points), k+1), dtype=np.int64)
-            mask = None
-            if selected is not None:
-                mask = np.zeros(len(points), dtype=np.uint8)
-                mask[selected] = 1
-            started = time.perf_counter()
-            self.check(self.lib.blk_index_query(self.handle, pointer(points), len(points), k+1, cap,
-                                                pointer(mask), pointer(distances), pointer(ids)))
-            self.statistics['tree_query_s'] += time.perf_counter()-started
-            self.statistics['queried_tile_points'] += len(points) if mask is None else int(mask.sum())
+            if streamed:
+                distances, ids = self._stream_query(points, k, cap, selected)
+            else:
+                distances = np.empty((len(points), k+1))
+                ids = np.empty((len(points), k+1), dtype=np.int64)
+                mask = None
+                if selected is not None:
+                    mask = np.zeros(len(points), dtype=np.uint8)
+                    mask[selected] = 1
+                started = time.perf_counter()
+                self.check(self.lib.blk_index_query(self.handle, pointer(points), len(points), k+1, cap,
+                                                    pointer(mask), pointer(distances), pointer(ids)))
+                self.statistics['tree_query_s'] += time.perf_counter()-started
+                self.statistics['queried_tile_points'] += len(points) if mask is None else int(mask.sum())
             # Preserve SciPy's established choice for exact ties, including the
             # kth-neighbor boundary. Ties are uncommon in real floating scans.
             tied = np.any(np.isfinite(distances[:, 1:]) & (distances[:, 1:] == distances[:, :-1]), axis=1)
@@ -180,6 +237,7 @@ def nativeIndexClass(base):
             valid = ids < self.n
             tiles = np.unique(np.searchsorted(self.offsets[1:], ids[valid], side='right'))
             if not self._native_prepare(tiles, normals is not None):
+                self._clear_native()
                 values = super().gather(ids[valid], normals=normals is not None)
                 if normals is None:
                     xyz[valid] = values

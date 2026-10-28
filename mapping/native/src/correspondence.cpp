@@ -101,6 +101,11 @@ BLK_EXPORT int blk_index_add(void *handle, Id tile, const float *points) {
     });
 }
 BLK_EXPORT void blk_index_remove(void *handle, Id tile) { static_cast<Index *>(handle)->tiles[tile].reset(); }
+BLK_EXPORT std::uint64_t blk_index_bytes(void *handle, Id tile) {
+    auto &data = static_cast<Index *>(handle)->tiles.at(tile);
+    // Reserve normals even before they are loaded; include mapped input points.
+    return data->tree.usedMemory(data->tree) + data->count*(3*sizeof(float)+3*sizeof(double));
+}
 BLK_EXPORT void blk_index_normals(void *handle, Id tile, const double *normals) {
     static_cast<Index *>(handle)->tiles[tile]->normals = normals;
 }
@@ -109,7 +114,9 @@ BLK_EXPORT int blk_index_query(void *handle, const double *points, Id n, int k, 
     return guarded([&] {
         const auto &index = *static_cast<Index *>(handle);
         const double cap2 = cap*cap;
-        #pragma omp parallel for num_threads(index.workers) schedule(static)
+        // Spatially ordered submaps contain regions with very different query
+        // costs. Work stealing changes only scheduling, never row results.
+        #pragma omp parallel for num_threads(index.workers) schedule(dynamic, 256)
         for (Id row = 0; row < n; ++row) {
             double *d = distances + row*k;
             Id *out = ids + row*k;

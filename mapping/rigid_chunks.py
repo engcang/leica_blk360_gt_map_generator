@@ -10,7 +10,7 @@ import open3d as o3d
 
 from automatic_connections import componentPoses, transformError
 from chunk_connections import aggregate, componentKey
-from fine_registration import cloudFingerprint, refinePair
+from fine_registration import FineTargetCache, cloudFingerprint, refinePair
 from json_io import saveJson
 from manual_placement import placementMatrix
 from native_backend import PIPELINE_ID, align, backendInfo
@@ -229,13 +229,15 @@ def runRigidChunks(config, records, report, progress, publish):
         edges.append(edge)
     poses, coarse = optimizeChunks(edges, len(groups), directory, "coarse")
     fine = []
+    target_cache = FineTargetCache()
     for number, edge in enumerate(coarse, 1):
         i, j = edge["source"], edge["target"]
         progress(f"Refining rigid chunks at 1 cm: {number}/{len(coarse)} (chunks {i + 1}:{j + 1})")
         initial = np.linalg.inv(poses[j]) @ poses[i]
         source, source_key = chunkFine(i)
         target, target_key = chunkFine(j)
-        match, reused = refinePair(source, target, initial, directory / f"fine_{keys[i]}_{keys[j]}.json", source_key, target_key)
+        match, reused = refinePair(source, target, initial, directory / f"fine_{keys[i]}_{keys[j]}.json",
+                                  source_key, target_key, target_cache)
         transform = np.asarray(match["transform"])
         correction = transformError(initial, transform)
         if correction[0] > .05 or correction[1] > .5 or match["correspondences"] < 20 or match["fitness"] < .05:
@@ -247,6 +249,7 @@ def runRigidChunks(config, records, report, progress, publish):
         fine.append({**edge, "transform_target_from_source": match["transform"],
                      "information": match["information"], "verification_pairs": verified,
                      "verification_audit": audit, "fine_cached": reused})
+    target_cache.clear()
     chunk_poses, retained = optimizeChunks(fine, len(groups), directory, "fine")
     # PGO can adjust a bridge: validate the actual final transform, not only the ICP proposal.
     while True:

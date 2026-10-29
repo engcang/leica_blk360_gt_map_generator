@@ -3,8 +3,10 @@
 import hashlib
 import json
 import time
+import threading
+from collections import OrderedDict
 
-from parallel_runtime import configureThreads, cpuCount
+from parallel_runtime import configureThreads, cpuCount, availableMemory
 
 configureThreads()
 
@@ -49,7 +51,37 @@ def informationFromCorrespondences(_target, _correspondences):
     return information
 
 
-def refinePair(_source, _target, _initial, _cache, _source_key, _target_key):
+class FineTargetCache:
+    """Per-registration target indices; bounded retention, safe concurrent fits."""
+    def __init__(self):
+        self.targets = OrderedDict()
+        self.lock = threading.Lock()
+
+    def get(self, cloud, key):
+        workers = cpuCount()
+        identity = (key,workers)
+        with self.lock:
+            if identity in self.targets:
+                target,cost = self.targets.pop(identity)
+                self.targets[identity] = (target,cost)
+                return target
+            cost = len(cloud.points)*96  # Retained cloud, index and possible tie index.
+            available = availableMemory()
+            budget = available*.15 if available else 0
+            while self.targets and (len(self.targets) >= 2 or
+                    cost+sum(item[1] for item in self.targets.values()) > budget):
+                self.targets.popitem(last=False)
+            target = PointToPlaneTarget(cloud,workers,native=True)
+            if cost <= budget:
+                self.targets[identity] = (target,cost)
+            return target
+
+    def clear(self):
+        with self.lock:
+            self.targets.clear()
+
+
+def refinePair(_source, _target, _initial, _cache, _source_key, _target_key, target_cache=None):
     identity = {"source": _source_key, "target": _target_key,
                 "initial": np.asarray(_initial).tolist(), "settings": FINE_SETTINGS,
                 "open3d": o3d.__version__}
@@ -70,10 +102,15 @@ def refinePair(_source, _target, _initial, _cache, _source_key, _target_key):
         except (OSError, ValueError, KeyError, TypeError):
             pass
     start = time.perf_counter()
-    target = PointToPlaneTarget(_target, cpuCount())
-    match = target.align(_source, _initial, [FINE_SETTINGS["distance_m"]], [FINE_SETTINGS["tukey_m"]],
-                         iterations=FINE_SETTINGS["iterations"], relative_fitness=FINE_SETTINGS["relative_fitness"],
-                         relative_rmse=FINE_SETTINGS["relative_rmse"])
+    target = (target_cache.get(_target,_target_key) if target_cache is not None
+              else PointToPlaneTarget(_target,cpuCount(),native=True))
+    try:
+        match = target.align(_source, _initial, [FINE_SETTINGS["distance_m"]], [FINE_SETTINGS["tukey_m"]],
+                             iterations=FINE_SETTINGS["iterations"], relative_fitness=FINE_SETTINGS["relative_fitness"],
+                             relative_rmse=FINE_SETTINGS["relative_rmse"])
+    finally:
+        # Keep the target index, not the previous source's per-iteration buffers.
+        target._query_state.__dict__.clear()
     icp_seconds = time.perf_counter() - start
     # Keep repeated target indices: each correspondence contributes to the graph weight.
     information = informationFromCorrespondences(_target, match.correspondence_set)

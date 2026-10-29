@@ -257,6 +257,8 @@
   - Completed result viewing and product generation do not require these caches.
 - **Fine ICP recovery:**
   - Completed pairs saved for **Resume**; final correspondences reused for graph weights.
+  - PLY and chunk registration: exact C++ nearest-neighbor queries, reusable correspondence buffers, and memory-bounded target-index reuse.
+    - Preserve double-precision coordinates, normals, and source-order solver reductions.
   - Changed clouds, initial poses, or ICP settings invalidate the corresponding checkpoint.
   - Point density, robust loss, and convergence criteria preserved.
 - **CPU usage:**

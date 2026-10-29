@@ -41,10 +41,10 @@
 #include <stdexcept>
 #include <vector>
 
-template<class Tree> class PackedKdTree {
+template<class Tree, class Scalar = float> class PackedKdTree {
     struct Node {
         std::uint32_t first, second;  // Children, or the half-open leaf range.
-        float low, high;              // Exact extrema of original float32 XYZ.
+        Scalar low, high;             // Preserve the input coordinate precision.
         std::uint32_t axis;           // 3 marks a leaf.
     };
     Tree &builder;
@@ -61,7 +61,7 @@ template<class Tree> class PackedKdTree {
                          std::uint32_t(source->node_type.lr.right),0,0,3};
         } else {
             const auto &split = source->node_type.sub;
-            const float low = float(split.divlow), high = float(split.divhigh);
+            const Scalar low = Scalar(split.divlow), high = Scalar(split.divhigh);
             if (double(low) != split.divlow || double(high) != split.divhigh)
                 throw std::runtime_error("Packed map bounds must preserve original coordinates exactly");
             const auto left = pack(source->child1), right = pack(source->child2);

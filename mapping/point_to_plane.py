@@ -20,7 +20,7 @@ _estimator_lock = threading.Lock()
 
 
 class PointToPlaneTarget:
-    def __init__(self, target, workers=None):
+    def __init__(self, target, workers=None, *, native=False):
         self.workers = threadBudget(workers)
         count = len(target.points) if isinstance(target, o3d.geometry.PointCloud) else len(target)
         existing_normals = isinstance(target, o3d.geometry.PointCloud) and target.has_normals()
@@ -36,7 +36,11 @@ class PointToPlaneTarget:
         if not self.cloud.has_normals():
             o3d.utility.set_max_threads(self.workers)
             self.cloud.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=.04, max_nn=40))
-        self.tree = cKDTree(np.asarray(self.cloud.points))
+        self._native = None
+        if native:
+            from native_correspondence import ResidentIndex
+            self._native = ResidentIndex.create(np.asarray(self.cloud.points),self.workers)
+        self.tree = None if self._native else cKDTree(np.asarray(self.cloud.points))
         self._query_state = threading.local()
         self._bound_tree = None
         self._queries = ThreadPoolExecutor(max_workers=self.workers)
@@ -92,6 +96,20 @@ class PointToPlaneTarget:
     def correspondences(self, source, cap):
         points = np.asarray(source.points)
         previous = getattr(self._query_state, 'bounds', None)
+        if self._native is not None:
+            from native_correspondence import ResidentMatches
+            state = getattr(self._query_state,'resident_matches',None)
+            if state is None or state.count != len(points):
+                state = ResidentMatches(self._native,len(points))
+                self._query_state.resident_matches = state
+                previous = None
+            pairs,fitness,rmse,counts = state.match(points,cap,reset=previous is None)
+            self._query_state.bounds = True
+            stats = getattr(self._query_state,'stats',None)
+            if stats is not None:
+                for key,value in counts.items():
+                    stats[key] = stats.get(key,0)+value
+            return o3d.utility.Vector2iVector(pairs),fitness,rmse
         if previous is None or len(previous[0]) != len(points):
             reference = points.copy()
             lower = np.zeros(len(points))

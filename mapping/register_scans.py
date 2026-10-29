@@ -12,7 +12,7 @@ configureThreads()
 import numpy as np
 import open3d as o3d
 
-from fine_registration import cloudFingerprint, refinePair
+from fine_registration import FineTargetCache, cloudFingerprint, refinePair
 from json_io import saveJson
 from native_backend import PIPELINE_ID, align, backendInfo
 from registration_quality import evaluatePair, qualityDocument
@@ -343,11 +343,13 @@ def refineGraph(_result, _output, _progress=None):
         _progress(f"Refining 1 cm connections: 0/{len(retained)}; {workers} concurrent pairs, {cpuCount()} available CPU threads")
     print(f"Fine ICP parallelism: {workers} pairs; CPU budget {cpuCount()}", flush=True)
 
+    target_cache = FineTargetCache()
+
     def refineEdge(_edge):
         i, j = _edge["source"], _edge["target"]
         initial = np.linalg.inv(poses[j]) @ poses[i]
         return refinePair(clouds[i], clouds[j], initial,
-                          _output / "fine_pairs" / f"{i:02d}_{j:02d}.json", cloud_keys[i], cloud_keys[j])
+                          _output / "fine_pairs" / f"{i:02d}_{j:02d}.json", cloud_keys[i], cloud_keys[j], target_cache)
 
     for number, (edge, (match, reused)) in enumerate(zip(retained, orderedParallel(refineEdge, retained, workers))):
         i, j = edge["source"], edge["target"]
@@ -370,6 +372,7 @@ def refineGraph(_result, _output, _progress=None):
         edges.append(refined)
         graph.edges.append(registration.PoseGraphEdge(i, j, transform, information, uncertain=not edge["tree_edge"]))
         print(f"Fine pair {i:02d}:{j:02d}: correction {translation:.4f} m / {rotation:.4f} deg", flush=True)
+    target_cache.clear()
     if _progress:
         _progress("Optimizing the final 1 cm pose graph")
     registration.global_optimization(graph,

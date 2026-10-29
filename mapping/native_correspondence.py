@@ -57,6 +57,7 @@ def loadLibrary(path=None):
         lib.blk_matches_search_halo.restype = ct.c_double
         lib.blk_matches_search_halo.argtypes = []
     optional = dict(
+        blk_points_finite=[pointer, integer, ct.c_int],
         blk_index_plan=[pointer, pointer, integer, ct.c_double, pointer],
         blk_plan_reusable=[pointer, pointer, pointer, integer, ct.c_double, ct.c_double],
         blk_index_gather_plan=[pointer, pointer, integer, pointer],
@@ -74,6 +75,12 @@ def loadLibrary(path=None):
             function = getattr(lib, name)
             function.restype, function.argtypes = None, args
     fused = dict(
+        blk_resident_create=(pointer, [pointer, integer, ct.c_int]),
+        blk_resident_destroy=(None, [pointer]),
+        blk_resident_matches_create=(pointer, [pointer, integer]),
+        blk_resident_matches_destroy=(None, [pointer]),
+        blk_resident_matches_run=(ct.c_int, [pointer, pointer, ct.c_double, ct.c_int,
+                                           pointer, pointer, pointer, pointer]),
         blk_matches_create=(pointer, [pointer, integer]),
         blk_matches_destroy=(None, [pointer]),
         blk_matches_set_search_halo=(ct.c_int, [pointer, ct.c_double]),
@@ -92,6 +99,12 @@ def loadLibrary(path=None):
 
 def pointer(array):
     return None if array is None else array.ctypes.data
+
+
+def finitePoints(lib, points, workers):
+    if hasattr(lib,'blk_points_finite'):
+        return bool(lib.blk_points_finite(pointer(points),len(points),workers))
+    return bool(np.isfinite(points).all())
 
 
 @lru_cache(maxsize=4)
@@ -119,6 +132,72 @@ def voxelIndices(points, size, workers=None):
     return ids[:used[0]] if used[0]>=0 else None
 
 
+class ResidentIndex:
+    """Zero-copy float64 target index; each fitting thread owns its match state."""
+    def __init__(self, points, workers, lib):
+        self.points, self.workers, self.lib = points, workers, lib
+        self.handle = lib.blk_resident_create(pointer(points),len(points),workers)
+        if not self.handle:
+            raise MemoryError(lib.blk_correspondence_error().decode())
+        self._release = weakref.finalize(self,lib.blk_resident_destroy,self.handle)
+        self.reference = None
+        # Ties are uncommon; do not build or retain a second index unless needed.
+        import threading
+        self._reference_lock = threading.Lock()
+
+    def resolve_ties(self, points, cap):
+        from scipy.spatial import cKDTree
+        with self._reference_lock:
+            if self.reference is None:
+                self.reference = cKDTree(self.points)
+        return self.reference.query(points,distance_upper_bound=cap,workers=self.workers)
+
+    @classmethod
+    def create(cls, points, workers):
+        if not enabled():
+            return None
+        lib = loadLibrary()
+        if not hasattr(lib,'blk_resident_matches_run'):
+            return None  # Installed older libraries retain the SciPy path.
+        if len(points) >= np.iinfo(np.int32).max or not finitePoints(lib,points,workers):
+            raise ValueError('Finite PLY target within Open3D correspondence capacity required')
+        return cls(points,workers,lib)
+
+
+class ResidentMatches:
+    def __init__(self, index, count):
+        self.index, self.count = index, count
+        self.handle = index.lib.blk_resident_matches_create(index.handle,count)
+        if not self.handle:
+            raise MemoryError(index.lib.blk_correspondence_error().decode())
+        self._release = weakref.finalize(self,index.lib.blk_resident_matches_destroy,self.handle)
+        self.distances = np.empty(count,dtype=np.float64)
+        self.ids = np.empty(count,dtype=np.int32)
+        self.ties = np.empty(count,dtype=np.uint8)
+        self.statistics = np.empty(4,dtype=np.int64)
+
+    def match(self, points, cap, reset):
+        if (points.shape != (self.count,3) or points.dtype != np.float64
+                or not points.flags.c_contiguous or not finitePoints(self.index.lib,points,self.index.workers)
+                or not np.isfinite(cap) or cap <= 0):
+            raise ValueError('Finite contiguous XYZ points and positive distance required')
+        index = self.index
+        result = index.lib.blk_resident_matches_run(self.handle,pointer(points),cap,int(reset),
+            pointer(self.distances),pointer(self.ids),pointer(self.ties),pointer(self.statistics))
+        if result:
+            raise RuntimeError(index.lib.blk_correspondence_error().decode())
+        if self.statistics[3]:
+            rows = np.flatnonzero(self.ties)
+            self.distances[rows], self.ids[rows] = index.resolve_ties(points[rows],cap)
+        valid = self.distances < cap
+        pairs = np.column_stack((np.flatnonzero(valid),self.ids[valid])).astype(np.int32)
+        rmse = float(np.sqrt(np.mean(self.distances[valid]**2))) if len(pairs) else 0.
+        queried,reused,absent,ties = map(int,self.statistics)
+        return pairs,len(pairs)/self.count if self.count else 0.,rmse,dict(
+            queried_points=queried+ties,exact_correspondences_reused=reused,
+            excluded_by_bound=absent,tie_queries=ties)
+
+
 class NativeMatches:
     """Own correspondence scratch buffers across iterations, with exact tie fallback."""
     def __init__(self, index, count):
@@ -142,7 +221,7 @@ class NativeMatches:
         if not self._release.alive:
             raise RuntimeError('Native correspondence state is closed')
         if (points.shape != (self.count,3) or not points.flags.c_contiguous
-                or points.dtype != np.float64 or not np.isfinite(points).all()
+                or points.dtype != np.float64 or not finitePoints(index.lib,points,index.workers)
                 or not np.isfinite(cap) or cap <= 0):
             raise ValueError('Finite contiguous XYZ points and positive distance required')
         started = time.perf_counter()

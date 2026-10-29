@@ -1,4 +1,4 @@
-// Exact tiled nearest-neighbor queries. Python owns immutable point/normal buffers.
+// Exact nearest-neighbor queries. Python owns immutable point/normal buffers.
 #include <cstdint>
 #include <nanoflann.hpp>
 #include "packed_kdtree.hpp"
@@ -222,6 +222,12 @@ template<class F> int guarded(F fn) {
 
 BLK_EXPORT const char *blk_correspondence_error() { return error.c_str(); }
 BLK_EXPORT int blk_correspondence_abi() { return 1; }
+BLK_EXPORT int blk_points_finite(const double *points, Id count, int workers) {
+    int invalid = 0;
+    #pragma omp parallel for num_threads(count < 32768 ? 1 : workers) schedule(static) reduction(|:invalid)
+    for (Id i = 0; i < 3*count; ++i) invalid |= !std::isfinite(points[i]);
+    return !invalid;
+}
 BLK_EXPORT double blk_matches_search_halo() { return match_halo; }
 BLK_EXPORT int blk_voxel_rows(const void *points, Id count, int float32, double size,
                               int workers, Id *chosen, Id *used) {
@@ -575,3 +581,5 @@ BLK_EXPORT int blk_matches_patch_ties(void *handle, const Id *rows, const Id *id
         }
     });
 }
+
+#include "resident_correspondence.hpp"

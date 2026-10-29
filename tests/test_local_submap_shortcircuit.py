@@ -70,6 +70,19 @@ class SubmapShortCircuitTests(unittest.TestCase):
         np.testing.assert_array_equal(self.validate(parts), np.eye(4))
         self.assertEqual(parts[0].fit.call_count, 3)
         self.assertEqual(len(parts[0].seed_hypotheses[0]['certificate']['members']), 4)
+        self.assertEqual(parts[0].fine.align.call_args.kwargs['distances'], (.1,))
+        self.assertEqual(parts[0].fine.align.call_args.kwargs['iterations'], 60)
+
+    def test_only_supported_unfinished_final_gate_gets_continuation(self):
+        parts = self.setup_seed()
+        recovery = parts[0]
+        converged = dict(converged=True, optimizer_information=dict(observable_directions=6))
+        unfinished = dict(converged=False, convergence_reason='iteration_limit',
+                          optimizer_information=dict(observable_directions=6))
+        recovery.fine.align.side_effect = [(np.eye(4),unfinished),(np.eye(4),converged)]
+        np.testing.assert_array_equal(self.validate(parts),np.eye(4))
+        self.assertEqual([c.kwargs['iterations'] for c in recovery.fine.align.call_args_list],[60,180])
+        self.assertTrue(all(c.kwargs['distances']==(.1,) for c in recovery.fine.align.call_args_list))
 
     def test_disjoint_anchor_constraints_skip_dense_submap_work(self):
         recovery, anchor, *_ = self.setup_seed()
@@ -79,6 +92,20 @@ class SubmapShortCircuitTests(unittest.TestCase):
         recovery.seed_window = Mock(side_effect=AssertionError('Impossible seed built a dense window'))
         self.assertIsNone(recovery._submap_seed(anchor.index))
         recovery.seed_window.assert_not_called()
+
+    def test_failed_seed_cache_is_invalidated_when_map_anchors_change(self):
+        recovery, anchor, *_ = self.setup_seed()
+        recovery.scan = Mock(return_value=anchor)
+        recovery.seed_cache = {}; recovery.seed_certificates = {}
+        recovery._submap_seed = Mock(return_value=None)
+        recovery.seed_context.return_value = [np.eye(4)]
+        recovery.submap_seed(anchor.index)
+        recovery.submap_seed(anchor.index)
+        self.assertEqual(recovery._submap_seed.call_count, 1)
+        shifted = np.eye(4); shifted[0,3] = .5
+        recovery.seed_context.return_value = [shifted]
+        recovery.submap_seed(anchor.index)
+        self.assertEqual(recovery._submap_seed.call_count, 2)
 
 
 if __name__ == '__main__':

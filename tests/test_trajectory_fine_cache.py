@@ -106,6 +106,14 @@ class FineCacheTests(unittest.TestCase):
         np.testing.assert_array_equal(restored[0], T)
         self.assertEqual(json.loads(path.read_text())['fine']['converged'], False)
 
+    def test_changed_correspondence_gates_cannot_reuse_old_fit(self):
+        matcher = self.matcher()
+        matcher.align(self.source, np.eye(4))
+        _, info = matcher.align(self.source, np.eye(4), distances=(.1,))
+        self.assertFalse(info['result_reused'])
+        _, cached = matcher.align(self.source, np.eye(4), distances=(.1,))
+        self.assertTrue(cached['result_reused'])
+
     def test_information_capture_is_bound_into_request_cache(self):
         plain = self.matcher().align(self.source,np.eye(4))
         actual = self.matcher().align(self.source,np.eye(4),capture_information=True)

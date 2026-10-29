@@ -1,37 +1,58 @@
 """Local submap fitting after forward/reverse tracking; no feature-search fallback."""
 import numpy as np
 import time
+import hashlib
+import copy
 from scipy.spatial.transform import Rotation
 from trajectory_geometry import voxel
 from trajectory_io import transform
 from trajectory_validation import jointly_observable, VALIDATION_PROTOCOL
 from parallel_runtime import cacheBudget
+from trajectory_temporal import bridge_limits, continuous_estimate
 
 
 class LocalSubmaps:
     def seed_context(self, anchor):
-        """The same close temporal anchors used by final seed validation."""
+        """Connect both sides even when fitted GT is missing between them."""
         result = []
+        self.seed_context_limits = []
         for before, ids in ((True, [i for i in self.poses if i < anchor.index]),
                             (False, [i for i in self.poses if i > anchor.index])):
             if not ids:
                 continue
             i = max(ids) if before else min(ids)
             stamp = self.rows_by_index[i]['timestamp']
-            if abs(stamp-anchor.timestamp) <= 3:
+            if continuous_estimate(self.source, stamp, anchor.timestamp):
                 F = self.source.pose([stamp])[0]
                 result.append(self.poses[i]@np.linalg.inv(F)@anchor.frontend_T)
+                limits = bridge_limits(self.source, stamp, anchor.timestamp)
+                self.seed_context_limits.append((max(.5,limits[0]), max(10.,limits[1])))
         return result
 
+    def context_limits(self, count):
+        limits = getattr(self, 'seed_context_limits', [])
+        return limits if len(limits) == count else [(.5,10.)]*count
+
     def submap_seed(self,index,allow_global=True):
-        key = (index, allow_global)
+        anchor = self.scan(index)
+        if anchor is None:
+            return None
+        context = self.seed_context(anchor)
+        signature = hashlib.sha256(np.asarray(context, dtype='<f8').tobytes()+
+            np.asarray(self.context_limits(len(context)), dtype='<f8').tobytes()).hexdigest()
+        key = (index, allow_global, signature)
         if key in self.seed_cache:
             value = self.seed_cache[key]
-            return np.asarray(value) if value is not None else None
+            if value['certificate']:
+                self.remember_certificate(index, copy.deepcopy(value['certificate']))
+            return np.asarray(value['T']) if value['T'] is not None else None
         result = self._submap_seed(index,allow_global)
-        self.seed_cache[key] = result.tolist() if result is not None else None
+        value = dict(T=result.tolist() if result is not None else None,
+                     certificate=copy.deepcopy(self.seed_certificates.get(index)) if result is not None else None)
+        self.seed_cache[key] = value
         self.log(dict(stage='seed_complete', index=index, allow_global=allow_global,
-                      T_map_from_base=self.seed_cache[key], certificate=self.seed_certificates.get(index)))
+                      anchor_signature=signature,
+                      T_map_from_base=value['T'], certificate=value['certificate']))
         return result
 
     def seed_window(self, index, radius):
@@ -125,7 +146,20 @@ class LocalSubmaps:
         self.log(dict(stage='submap_seed_started', index=anchor.index, scope=scope,
                       radius_s=radius, resolution_m=resolution, started_unix=time.time()))
         try:
-            T, info = self.fine.align(train, initial, iterations=180, capture_information=True)
+            # Broad capture happens on the 10 cm submap. Keep the full 1 cm
+            # source for the final 10 cm correspondence gate, not for three
+            # repeated broad-to-fine searches over millions of points.
+            T, info = self.fine.align(train, initial, iterations=60,
+                                      distances=(.1,), capture_information=True)
+            context = [difference(T, expected) for expected in self.seed_context(anchor)]
+            if (not info.get('converged') and info.get('convergence_reason') == 'iteration_limit'
+                    and all(dm <= lm and da <= la for (dm,da),(lm,la) in zip(context,self.context_limits(len(context))))
+                    and info.get('optimizer_information', {}).get('observable_directions') == 6
+                    and self.fine.quality(voxel(train, .1), T).get('geometry_supported')):
+                first = info
+                T, info = self.fine.align(train, T, iterations=180,
+                                          distances=(.1,), capture_information=True)
+                info = dict(info, continuation_from=first)
         except (RuntimeError, ValueError) as exc:
             self.log(dict(stage='submap_seed_failed', index=anchor.index, scope=scope,
                           radius_s=radius, resolution_m=resolution, reason=str(exc)))
@@ -142,7 +176,7 @@ class LocalSubmaps:
         # do not fit independent witnesses after the shared proposal has failed.
         if not info.get('converged'):
             return reject('shared_fit_not_converged')
-        if any(dm > .5 or da > 10 for dm, da in context):
+        if any(dm > lm or da > la for (dm,da),(lm,la) in zip(context,self.context_limits(len(context)))):
             return reject('nearby_anchor_disagreement')
         optimizer_information = info.get('optimizer_information', {})
         if optimizer_information.get('observable_directions') != 6:
@@ -212,9 +246,10 @@ class LocalSubmaps:
         context = self.seed_context(anchor)
         if len(context) == 2:
             dm, da = difference(*context)
-            # Triangle inequalities: no pose can be within 50 cm / 10 degrees
-            # of both anchors when their two feasible regions are disjoint.
-            if dm > 1.+1e-9 or da > 20.+1e-9:
+            # Triangle inequalities: no pose can satisfy both temporal anchor
+            # bounds when their feasible regions are disjoint.
+            limits = self.context_limits(len(context))
+            if dm > sum(v[0] for v in limits)+1e-9 or da > sum(v[1] for v in limits)+1e-9:
                 self.log(dict(stage='submap_skipped', index=index,
                     reason='incompatible_nearby_anchors', disagreement_m_deg=[dm, da]))
                 return None
@@ -231,28 +266,30 @@ class LocalSubmaps:
             self.seed_hypotheses = []
             held = self.prepared_scan(anchor)[1]
             coarse_source = voxel(train, .1)
-            seen = set()
-            # A drifted global alignment must not replace a nearby trusted end
-            # anchor. Try both ends independently.
-            for label, initial in guesses:
-                key = np.asarray(initial, dtype='<f8').tobytes()
-                if key in seen:
-                    continue
-                seen.add(key)
-                q = self.matcher.quality(held, initial)
-                if not q.get('geometry_supported'):
-                    continue
-                self.validate_seed(anchor, train, validators, initial, label, radius)
+            proposals = []
+            context = self.seed_context(anchor)
+            # Compare the cheap proposals first. Do not repeat dense fitting
+            # for the supplied guess and all its almost-identical refinements.
             for label, initial in guesses:
                 coarse = self.matcher.icp(coarse_source, initial)
-                key = np.asarray(coarse, dtype='<f8').tobytes()
-                if key in seen:
+                for name, T in ((label, initial), (label+'_coarse', coarse)):
+                    if any(dm > lm+.2 or da > la+3 for (dm,da),(lm,la) in zip(
+                           (difference(T, expected) for expected in context), self.context_limits(len(context)))):
+                        self.log(dict(stage='submap_proposal_rejected', index=index,
+                            scope=name, radius_s=radius, reason='coarse_anchor_disagreement'))
+                        continue
+                    q = self.matcher.quality(held, T)
+                    if q.get('geometry_supported'):
+                        from trajectory_recovery import capped_distance_cost
+                        proposals.append((capped_distance_cost(q), name, T))
+            seen = []
+            for _, name, T in sorted(proposals, key=lambda p:p[0]):
+                if any(dm <= .01 and da <= .1 for dm, da in (difference(T, old) for old in seen)):
+                    self.log(dict(stage='submap_proposal_reused', index=index, scope=name,
+                                  radius_s=radius, reason='same_coarse_basin'))
                     continue
-                seen.add(key)
-                q = self.matcher.quality(held, coarse)
-                if not q.get('geometry_supported'):
-                    continue
-                self.validate_seed(anchor, train, validators, coarse, label+'_coarse', radius)
+                seen.append(T)
+                self.validate_seed(anchor, train, validators, T, name, radius)
             selected = choose_seed(self.seed_hypotheses)
             if selected is not None:
                 selected_hypothesis = next(h for h in self.seed_hypotheses if h['T'] is selected)

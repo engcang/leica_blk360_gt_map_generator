@@ -442,7 +442,8 @@ class FineMatcher:
             temporary.replace(path)
         return np.load(path, mmap_mode='r')
 
-    def align(self,points,initial,iterations=RECOVERY_ITERATIONS,capture_information=False):
+    def align(self,points,initial,iterations=RECOVERY_ITERATIONS,capture_information=False,
+              distances=RECOVERY_DISTANCES):
         started = time.perf_counter()
         if len(points)<80:
             return initial.copy(),dict(converged=False,reason='insufficient_source')
@@ -454,7 +455,7 @@ class FineMatcher:
         if self.result_cache is not None:
             request = dict(version=2, engine=FINE_ENGINE, target=self.target_digest,
                 source_and_initial=array_digest(source, initial), iterations=iterations,
-                distances=list(RECOVERY_DISTANCES), relative_fitness=1e-6, relative_rmse=1e-6,
+                distances=list(distances), relative_fitness=1e-6, relative_rmse=1e-6,
                 capture_information=bool(capture_information),
                 solver_threads=1, numpy=np.__version__, scipy=scipy.__version__, open3d=o3d.__version__)
             request_key = hashlib.sha256(json.dumps(request,sort_keys=True).encode()).hexdigest()
@@ -476,7 +477,7 @@ class FineMatcher:
                             target_preparation_s=prepared-started, fitting_s=time.perf_counter()-prepared)
                 except (OSError, ValueError, KeyError, TypeError):
                     pass  # Incomplete/corrupt regenerable cache entries are recomputed.
-        result = self.target.align(source, initial, RECOVERY_DISTANCES,
+        result = self.target.align(source, initial, distances,
                                    iterations=iterations, capture_information=capture_information)
         self.target_uses += 1
         T = result.transformation

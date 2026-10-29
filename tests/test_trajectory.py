@@ -355,7 +355,7 @@ class NativeTests(unittest.TestCase):
             # Unmapped distant surfaces cannot be ICP inliers or validation support.
             rng = np.random.default_rng(701)
             outside = rng.uniform([20, 20, 20], [30, 30, 30], (22000, 3)).astype(np.float32)
-            for path in (root/'scans').glob('*.npy'):
+            for path in sorted((root/'scans').glob('*.npy'))[1:]:
                 np.save(path, np.r_[np.load(path), outside])
             original = FineMatcher.align; calls = []
             def recorded(matcher, points, initial, **kwargs):
@@ -367,6 +367,9 @@ class NativeTests(unittest.TestCase):
             self.assertEqual(len(calls), 8)
             for q in quality:
                 self.assertTrue(q['accepted'], q)
+                if q['index'] == 0:
+                    self.assertEqual(q['reason'], 'geometry_pass')
+                    continue
                 self.assertLess(q['coverage_20cm'], .65)
                 self.assertEqual(q['acceptance_scope'], 'independent-full-rank-scans')
                 self.assertEqual(len(q['context_validation']['witness_indices']), 2)
@@ -414,7 +417,8 @@ class NativeTests(unittest.TestCase):
             seeds = [q for q in attempts if q['stage'] == 'submap_seed']
             self.assertTrue(seeds)
             self.assertTrue(all(not q['accepted'] for q in seeds))
-            self.assertTrue(all(q['training_quality']['observable_directions'] == 3 for q in seeds))
+            self.assertTrue(all(q.get('training_quality', {}).get('observable_directions',
+                q['fine']['optimizer_information']['observable_directions']) == 3 for q in seeds))
 
     def test_weak_shared_training_fit_cannot_borrow_rank_from_heldout_walls(self):
         from trajectory_worker import baseline
@@ -448,7 +452,8 @@ class NativeTests(unittest.TestCase):
             attempts = [json.loads(line) for line in (root/'training-rank-check/attempts.jsonl').read_text().splitlines()]
             result = next(q for q in attempts if q['stage'] == 'submap_seed')
             self.assertTrue(result['fine']['converged'])
-            self.assertEqual(result['training_quality']['observable_directions'], 3)
+            self.assertEqual(result.get('training_quality', {}).get('observable_directions',
+                result['fine']['optimizer_information']['observable_directions']), 3)
             self.assertEqual(result['fine']['optimizer_information']['observable_directions'], 3)
             self.assertEqual(result['reason'], 'shared_fit_weak_geometry')
             self.assertEqual(result['checks'], [])

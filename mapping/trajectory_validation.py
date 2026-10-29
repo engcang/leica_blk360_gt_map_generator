@@ -5,10 +5,11 @@ Relative SLAM motion only tests agreement; it never contributes information to
 an observability matrix or supplies a missing fitted degree of freedom.
 """
 import itertools
+import bisect
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from trajectory_temporal import motion_limits
+from trajectory_temporal import motion_limits, continuous_estimate
 from trajectory_io import PoseGap
 
 VALIDATION_PROTOCOL = 'independent-map-context-v2'
@@ -38,12 +39,14 @@ def raw_geometry_supported(q):
                     'temporal_inconsistency', 'fine_registration_failed',
                     'seed_disagreement', 'scan_timestamp_mismatch', 'tracking_motion_inconsistent',
                     'unconstrained_submap_departure', 'isolated_large_correction_quarantined',
-                    'scan_timestamp_unavailable'))
+                    'scan_timestamp_unavailable', 'unanchored_partial_view'))
 
 
 def motion_agrees(a, b, source):
     stamps = [a['timestamp'], b['timestamp']]
     if stamps[0] == stamps[1] or a['index'] == b['index']:
+        return False
+    if not continuous_estimate(source, *stamps):
         return False
     F = source.pose(stamps)
     A, B = np.asarray(a['T_map_from_base']), np.asarray(b['T_map_from_base'])
@@ -54,11 +57,21 @@ def motion_agrees(a, b, source):
     return distance <= limit[0] and angle <= limit[1]
 
 
-def confirm_partial_views(rows, source):
+def map_rooted(q):
+    context = q.get('context_validation', {})
+    return bool(q.get('accepted') and (q.get('reason') == 'geometry_pass'
+                or context.get('shared_transform_fitted')
+                or context.get('map_anchor_index') is not None))
+
+
+def confirm_partial_views(rows, source, reference=None):
     """Confirm low-coverage full-rank fits using two independent nearby fits.
 
     Each witness has full-rank raw map geometry itself. Contextually promoted
-    rank-deficient poses cannot serve as witnesses. No refitting is performed.
+    rank-deficient poses cannot serve as witnesses. Low-overlap neighbors do
+    not establish a new location by voting for the same wrong local minimum:
+    a separately accepted map anchor must also support their relative motion.
+    No refitting is performed.
     """
     changed = []
     if hasattr(source, 'timestamps'):
@@ -81,9 +94,20 @@ def confirm_partial_views(rows, source):
                 and q.get('observable_directions') == 6]
     eligible.sort(key=lambda q: q['timestamp'])
     stamps = np.array([q['timestamp'] for q in eligible])
+    roots = [q for q in eligible if map_rooted(q)]
+    if reference is not None and map_rooted(reference):
+        roots.append(reference)
+    roots.sort(key=lambda q:q['timestamp'])
+    root_stamps = [q['timestamp'] for q in roots]
     for q in eligible:
         if q.get('accepted') or q.get('reason') != 'partial_view_needs_context':
             continue
+        mid = bisect.bisect_left(root_stamps, q['timestamp'])
+        nearby_roots = roots[max(0,mid-4):mid+4]
+        anchors = [r for r in nearby_roots if r['index'] != q['index'] and motion_agrees(q, r, source)]
+        if not anchors:
+            continue
+        anchor = min(anchors, key=lambda r: abs(r['timestamp']-q['timestamp']))
         lo, hi = np.searchsorted(stamps, [q['timestamp']-CONTEXT_RADIUS_S,
                                           q['timestamp']+CONTEXT_RADIUS_S], side='left')
         witnesses = [r for r in eligible[lo:hi+1] if r['index'] != q['index']
@@ -98,8 +122,10 @@ def confirm_partial_views(rows, source):
                      context_validation=dict(protocol=VALIDATION_PROTOCOL,
                          witness_indices=[a['index'], b['index']],
                          witness_timestamps=[a['timestamp'], b['timestamp']],
-                         shared_transform_fitted=False))
+                         shared_transform_fitted=False, map_anchor_index=anchor['index']))
             changed.append(q['index'])
+            at = bisect.bisect_left(root_stamps, q['timestamp'])
+            roots.insert(at, q); root_stamps.insert(at, q['timestamp'])
             break
     return changed
 

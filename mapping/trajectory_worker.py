@@ -24,7 +24,7 @@ from point_to_plane import FINE_ENGINE
 from trajectory_validation import (confirm_partial_views, jointly_observable, VALIDATION_PROTOCOL)
 from trajectory_recovery import Recovery, difference, pose, fit_scan
 from trajectory_fine import FineMatcher
-from trajectory_temporal import screen_temporal
+from trajectory_temporal import screen_temporal, motion_limits
 
 
 def record_execution(output, workers):
@@ -211,6 +211,7 @@ def baseline(config, source, cache, output, indices, workers, progress):
     accepted_count = len(accepted)
     last_T = np.asarray(accepted[-1]['T_map_from_base']) if accepted else None
     last_F = source.pose([accepted[-1]['timestamp']])[0] if accepted else None
+    last_quality = accepted[-1] if accepted else None
     with ExitStack() as resources:
         stream = resources.enter_context(path.open('a', buffering=1))
         fine = FineMatcher(cache, workers, result_cache=output/'fine_requests')
@@ -222,6 +223,10 @@ def baseline(config, source, cache, output, indices, workers, progress):
             q['stage'] = 'forward_fine'
             if correction[0] > .5 or correction[1] > 10:
                 q.update(accepted=False, reason='unverified_large_correction')
+            elif last_quality is not None:
+                limits = motion_limits(last_F, scan.frontend_T, scan.timestamp-last_quality['timestamp'])
+                if correction[0] > limits[0] or correction[1] > limits[1]:
+                    q.update(accepted=False, reason='tracking_motion_inconsistent')
             accepted_count += int(q['accepted'])
             rows.append(q)
             # Existing independent fits are enough for partial-view context;
@@ -231,11 +236,12 @@ def baseline(config, source, cache, output, indices, workers, progress):
                 if scan.timestamp-candidate['timestamp'] > 2:
                     break
                 recent.append(candidate)
-            accepted_count += len(confirm_partial_views(recent, source))
+            accepted_count += len(confirm_partial_views(recent, source, reference=last_quality))
             latest = next((r for r in recent if r['accepted']), None)
             if latest is not None:
                 last_T = np.asarray(latest['T_map_from_base'])
                 last_F = source.pose([latest['timestamp']])[0]
+                last_quality = latest
             stream.write(json.dumps(q, allow_nan=False)+'\n')
             if len(rows) % 50 == 0:
                 checkpoint_baseline(output, rows)
@@ -280,7 +286,8 @@ def export_viewer(config, source, trajectories, output, cache, A, progress, reco
     if any(abs(q['timestamp']-row[0]) > 1e-6 for q, row in zip(accepted, rows)):
         raise ValueError('Result scan/pose timestamps disagree')
     selections = {'tls_gt': {q['index']: pose(row) for q, row in zip(accepted, rows)}}
-    _, temporal_errors = screen_temporal(selections['tls_gt'], {q['index']:q['timestamp'] for q in accepted}, source)
+    _, temporal_errors = screen_temporal(selections['tls_gt'], {q['index']:q['timestamp'] for q in accepted}, source,
+                                        qualities={q['index']:q for q in accepted})
     if temporal_errors:
         raise ValueError('Result still contains inconsistent temporal motion; recover it before map export')
     layers = [dict(key='tls_gt', label='Generated ground-truth trajectory', color='#FF9B54', rows=rows.tolist(),
@@ -349,9 +356,11 @@ def pending_job_status(path):
         return False
 
 
-def run(config, report, inspect_only=False, baseline_only=False, recovery_only=False, recovery_name='recovery'):
+def run(config, report, inspect_only=False, baseline_only=False, recovery_only=False, recovery_name='recovery', revalidate_from=None):
     if not recovery_name.startswith('recovery') or Path(recovery_name).name != recovery_name or '\\' in recovery_name:
         raise ValueError('Recovery name must be a single directory name starting with recovery')
+    if revalidate_from is not None and (Path(revalidate_from).name != revalidate_from or not revalidate_from.startswith('recovery') or '\\' in revalidate_from):
+        raise ValueError('Revalidation source must be a recovery directory name')
     def progress(stage, status='running', **values):
         save_json(report, dict(status=status, stage=stage, **values))
         print(stage, flush=True)
@@ -431,11 +440,14 @@ def run(config, report, inspect_only=False, baseline_only=False, recovery_only=F
         progress('Preparing 1 cm point-to-plane / Tukey recovery')
         last_preview = [0.]
         def preview():
+            progress(f'Recovery checkpoint: {len(recovery.poses)}/{len(recovery.rows)} poses',
+                     accepted=len(recovery.poses), processed=len(recovery.rows), selected=len(indices))
             if time.monotonic()-last_preview[0] >= 60:
                 export_viewer(config, source, trajectories, output, cache, A, progress, recovery_name, preview=True)
                 last_preview[0] = time.monotonic()
         recovery = Recovery(output/'baseline', output/recovery_name, cache, source, workers, progress,
-                            baseline_is_fine=not bool(config.get('baseline_directory')), tracking_directory=output/'tracking', on_checkpoint=preview)
+                            baseline_is_fine=not bool(config.get('baseline_directory')), tracking_directory=output/'tracking_connected_v2', on_checkpoint=preview,
+                            revalidate_from=output/revalidate_from if revalidate_from is not None else None)
         try:
             recovery.run()
         finally:
@@ -460,9 +472,10 @@ def main():
     stage.add_argument('--baseline-only', action='store_true', help='Finish initial 1 cm fitting and preserve it for later recovery')
     stage.add_argument('--recovery-only', action='store_true', help='Resume recovery from a verified completed 1 cm baseline')
     parser.add_argument('--recovery-name', default='recovery', help='Separate recovery directory; preserves earlier recovery attempts')
+    parser.add_argument('--revalidate-from', help='Reuse verified 1 cm fits from this recovery folder, after new validation')
     args = parser.parse_args()
     try:
-        run(json.loads(args.config.read_text(encoding='utf-8')), args.report, args.inspect, args.baseline_only, args.recovery_only, args.recovery_name)
+        run(json.loads(args.config.read_text(encoding='utf-8')), args.report, args.inspect, args.baseline_only, args.recovery_only, args.recovery_name, args.revalidate_from)
     except Exception as error:
         save_json(args.report, dict(status='failed', stage=str(error)))
         raise

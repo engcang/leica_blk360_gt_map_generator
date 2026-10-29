@@ -59,6 +59,25 @@ class FinalRecoveryTests(unittest.TestCase):
             finally:
                 recovery.close()
 
+    def test_revalidation_preserves_previous_result_and_reuses_fits(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = fixture(root, count=8)
+            run(config, root/'first-report.json')
+            previous = root/'output/recovery'
+            saved = {p:p.read_bytes() for p in previous.iterdir() if p.is_file()}
+            with patch('trajectory_fine.FineMatcher.align', side_effect=AssertionError('Verified fits repeated')):
+                run(config, root/'second-report.json', recovery_only=True,
+                    recovery_name='recovery_connected_v2', revalidate_from='recovery')
+            self.assertEqual(saved, {p:p.read_bytes() for p in saved})
+            new = root/'output/recovery_connected_v2'
+            self.assertEqual((new/'candidate_trajectory.tum').read_bytes(), saved[previous/'candidate_trajectory.tum'])
+            self.assertIn('revalidated_source', json.loads((new/'provenance.json').read_text()))
+            (previous/'candidate_trajectory.tum').write_text('modified')
+            with self.assertRaisesRegex(ValueError,'changed'):
+                run(config, root/'third-report.json', recovery_only=True,
+                    recovery_name='recovery_connected_v2', revalidate_from='recovery')
+
     def prepare(self, root, missing):
         config = fixture(root, count=12)
         run(config, root/'report.json', baseline_only=True)

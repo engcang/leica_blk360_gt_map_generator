@@ -50,7 +50,9 @@ class ContextValidationTests(unittest.TestCase):
         self.assertEqual(q['observable_directions'], 6)
         rows = [candidate(i, q) for i in range(3)]
         self.assertEqual(confirm_partial_views(rows[:2], source()), [])
-        self.assertEqual(set(confirm_partial_views(rows, source())), {0, 1, 2})
+        self.assertEqual(confirm_partial_views(rows, source()), [])
+        anchor = candidate(3, plane_quality())
+        self.assertEqual(set(confirm_partial_views(rows, source(), reference=anchor)), {0, 1, 2})
         for row in rows:
             self.assertTrue(row['accepted'])
             self.assertEqual(row['acceptance_scope'], 'independent-full-rank-scans')
@@ -141,13 +143,15 @@ class ContextValidationTests(unittest.TestCase):
             def rows():
                 return [dict(plane_quality(coverage=.5), index=s.index, timestamp=s.timestamp,
                              T_map_from_base=s.frontend_T.tolist(), fine=dict(converged=True)) for s in scans]
+            anchor = dict(plane_quality(), index=4, timestamp=10.39,
+                          T_map_from_base=np.eye(4).tolist(), fine=dict(converged=True))
             with patch.object(scan_source, '_decode', side_effect=AssertionError('Decoded anchors should be cached')):
-                self.assertEqual(set(confirm_partial_views(rows(), scan_source)), {0, 1, 2})
+                self.assertEqual(set(confirm_partial_views(rows(), scan_source, reference=anchor)), {0, 1, 2})
             resumed = ScanSource(config, estimate)
             with patch.object(resumed, '_decode', wraps=resumed._decode) as decoder:
-                self.assertEqual(set(confirm_partial_views(rows(), resumed)), {0, 1, 2})
+                self.assertEqual(set(confirm_partial_views(rows(), resumed, reference=anchor)), {0, 1, 2})
                 self.assertEqual([call.args[0] for call in decoder.call_args_list], ['tcol']*3)
-                confirm_partial_views(rows(), resumed)
+                confirm_partial_views(rows(), resumed, reference=anchor)
                 self.assertEqual(decoder.call_count, 3)
             shifted = rows(); shifted[1]['timestamp'] = float(start[1])
             self.assertEqual(confirm_partial_views(shifted, scan_source), [])
@@ -174,7 +178,8 @@ class ContextValidationTests(unittest.TestCase):
                 raise PoseGap('No valid LiDAR column timestamps')
             return scan_source.timestamps[index]
         scan_source.anchor_timestamp = anchor
-        self.assertEqual(set(confirm_partial_views(rows, scan_source)), {0, 1, 2})
+        self.assertEqual(set(confirm_partial_views(rows, scan_source,
+            reference=candidate(5, plane_quality()))), {0, 1, 2})
         self.assertEqual(rows[3]['reason'], 'scan_timestamp_unavailable')
         self.assertFalse(rows[3]['accepted'])
         # Rejected rows without any fitted geometric evidence do not require

@@ -81,6 +81,62 @@ class NativeMapTests(reference.PersistentMapTests):
         self.assertTrue(np.isinf(actual[0][1::2]).all())
         self.assertLessEqual(index.native_bytes, index.cache_limit)
 
+    def test_streamed_correspondence_buffers_keep_rows_and_missing_matches(self):
+        rng = np.random.default_rng(53)
+        points = np.concatenate([rng.uniform(.1,7.9,(6000,3))+[x,0,0] for x in (0,16,32)])
+        index = self.index(points, np.tile([0.,0.,1.],(len(points),1)))
+        source = reference.o3d.geometry.PointCloud(reference.o3d.utility.Vector3dVector(
+            np.vstack((points+.002, [[100.,0.,0.]]))))
+        results = []
+        for budget in (1024**3, 6000*80+1024):
+            index._clear_native(); index.cache_limit = budget
+            target = reference.IndexedPointToPlaneTarget(index,2)
+            for _ in range(2):
+                pairs,fitness,rmse = target.correspondences(source,.8)
+                pairs = np.asarray(pairs).copy()
+                results.append((pairs, np.asarray(target.cloud.points)[pairs[:,1]].copy(),fitness,rmse))
+        for actual in results[1:]:
+            for a,b in zip(actual,results[0]):
+                np.testing.assert_array_equal(a,b)
+
+    def test_live_memory_changes_and_new_source_sizes_reset_fused_state(self):
+        rng = np.random.default_rng(54)
+        points = np.concatenate([rng.uniform(.1,7.9,(6000,3))+[x,0,0] for x in (0,16,32)])
+        index = self.index(points, np.tile([0.,0.,1.],(len(points),1)))
+        xyz = index.gather(np.arange(index.n))
+        tree = reference.cKDTree(xyz)
+        target = reference.IndexedPointToPlaneTarget(index,2)
+        # Switch between native and streamed paths on the same target, then
+        # replace the source. Stale buffers must never certify a wrong neighbor.
+        for budget,shift,stride in ((1024**3,.002,1),(6000*80+1024,.03,1),
+                                   (1024**3,.04,1),(1024**3,.002,3)):
+            index.cache_limit = budget
+            moved = np.vstack((points[::stride]+[shift,0,0],[[100.,0.,0.]]))
+            source = reference.o3d.geometry.PointCloud(reference.o3d.utility.Vector3dVector(moved))
+            pairs,fitness,rmse = target.correspondences(source,.8)
+            d,ids = tree.query(moved,distance_upper_bound=.8)
+            valid = d < .8
+            pairs = np.asarray(pairs)
+            np.testing.assert_array_equal(pairs[:,0],np.flatnonzero(valid))
+            np.testing.assert_array_equal(np.asarray(target.cloud.points)[pairs[:,1]],xyz[ids[valid]])
+            self.assertEqual(fitness,float(valid.mean()))
+            self.assertEqual(rmse,float(np.sqrt(np.mean(d[valid]**2))))
+
+    def test_seeded_search_updates_neighbors_across_ties_and_tile_boundaries(self):
+        points = np.array([[7.5,1,1],[8.0,1,1],[8.5,1,1],[9.,1,1]])
+        index = self.index(points,np.tile([0.,0.,1.],(len(points),1)))
+        target = reference.IndexedPointToPlaneTarget(index,2)
+        for x,cap in ((7.75,.8),(8.25,.8),(8.3,.8),(9.1,.05),(8.8,.3),(7.9,.8)):
+            moved = np.array([[x,1,1]])
+            source = reference.o3d.geometry.PointCloud(reference.o3d.utility.Vector3dVector(moved))
+            pairs,fitness,rmse = target.correspondences(source,cap)
+            d,ids = index.query(moved,distance_upper_bound=cap)
+            valid = d < cap
+            pairs = np.asarray(pairs)
+            np.testing.assert_array_equal(pairs[:,0],np.flatnonzero(valid))
+            np.testing.assert_array_equal(np.asarray(target.cloud.points)[pairs[:,1]],index.gather(ids[valid]))
+            self.assertEqual(rmse,float(d[0]) if valid[0] else 0.)
+
 
 if __name__ == '__main__':
     unittest.main()

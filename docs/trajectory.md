@@ -94,6 +94,7 @@
   - Geometric support: at least 80 planar correspondences, plane RMS < 8 cm, at least six occupied 50 cm support cells, and at least 50 cm span along two principal directions.
   - Coverage below 65% requests additional context; it is not an overlap rejection threshold. No minimum coverage fraction is imposed on independently supported poses.
   - Partial views with six observable directions require two distinct neighboring scans within 1 s, each with its own converged full-rank map fit and consistent pairwise relative motion. Reuse existing fits rather than running extra ICP.
+    - Require a motion-consistent link to a separately accepted map anchor; low-overlap neighbors cannot establish a location by certifying one another.
   - A weak single-scan direction remains provisional until an actual shared submap fit and independent withheld geometry jointly constrain all six directions. SLAM relative motion contributes no geometric information to the rank test.
   - These support and information thresholds are engineering defaults, not sensor-noise-calibrated accuracy bounds.
   - Rotation/translation information scaled with a 5 m lever arm; weak eigenvectors retained in `quality.jsonl`.
@@ -102,10 +103,13 @@
   - Correspondence gates: 80 / 30 / 10 cm; Tukey scales: 10 / 10 / 3.33 cm.
   - Individual fits: 60 iterations per gate; geometrically supported iteration-limit results can continue for 180 iterations per gate.
   - Reverse tracking reuses an accepted end pose. Otherwise, independently initialize end windows with KISS, then track backwards; try earlier windows if the last window fails.
+    - Forward/reverse tracking predicts from the last accepted pose and the SLAM relative transform. KISS is not called for every scan.
     - End initialization uses 2 / 4 / 6 s windows and 30 / 50 / 8 cm KISS resolutions, nearby regions before the whole map.
     - Its independent scan checks and conditional leave-one-scan-out stability checks are retained.
   - Local submaps use 2 / 6 s windows, up to 11 / 21 scans, and the preceding/following accepted poses plus the original alignment as initial guesses.
-    - Try the supplied guess and its 10 cm coarse refinement; fit the submap at 1 cm with up to 180 iterations per gate.
+    - Rank supplied guesses and 10 cm coarse refinements before dense fitting; merge proposals within 1 cm / 0.1°.
+    - Refine the full 1 cm submap at the final 10 cm correspondence gate for up to 60 iterations. Continue for up to 180 additional iterations only when map geometry and anchor agreement support the unfinished fit.
+    - Reject coarse proposals outside the temporal anchor bounds plus a 20 cm / 3° capture margin before dense fitting.
     - Withhold the anchor and complete validation scans; require independent geometry and consistent temporal motion.
     - Stop dependent validation once convergence, nearby-anchor agreement, or shared geometric support fails. Skip dense fitting when nearby-anchor constraints cannot both be satisfied.
     - Refine each accepted scan individually at 1 cm and propagate from verified anchors in both directions.
@@ -113,8 +117,14 @@
     - Mark support-dependent acceptance only when the individual scan did not already pass.
     - Stop after local submap recovery; no subsequent KISS search.
   - Exact scan/timestamp matching, competing-candidate checks, and temporal auditing apply before export.
+    - Missing GT samples do not disconnect continuous odometry. Check relative motion across those gaps; only actual input-trajectory gaps split the audit.
+    - Allow accumulated gap drift using measured path length and elapsed time; rank conflicting chains by held-out capped-distance support.
+    - Revalidate saved poses before using them as anchors, including poses accepted during forward/reverse tracking.
   - CPU/memory-aware caches reuse original TLS tiles, normals, exact correspondence indices, partitions, and identical fitting requests.
   - C++/OpenMP correspondence queries use persistent nanoflann indices and reusable buffers; optimizer reductions remain ordered.
+    - Build independent map tile indices in parallel; reuse exact previous neighbors as search bounds.
+    - Fuse correspondence reuse, search, normal gathering, and ordered pair construction in C++.
+    - Parallel voxel selection preserves the same original points and voxel order.
     - Balance query work dynamically; split oversized query batches without removing source/map points or changing search radii.
     - Account for allocated index memory and reserve normals before evicting reusable tiles.
 
@@ -123,9 +133,13 @@
 - **Initial fitting only:** `trajectory_worker.py --config CONFIG --report REPORT --baseline-only`.
   - Saves a completed, hashed `baseline/status.json`; reports `baseline_ready`, with recovery pending.
 - **Continue recovery:** same config with `--recovery-only`.
-  - Verify the completed baseline and reuse the hashed `tracking/` checkpoint when available.
+  - Verify the completed baseline and reuse the hashed tracking checkpoint when available; recheck its acceptance decisions.
+  - Preserve legacy `tracking/`; write updated connected-motion tracking to `tracking_connected_v2/`.
   - Finish missing reverse work before local submaps; save the tracking checkpoint separately.
   - Publish a trajectory preview against the scanned map during recovery; reconstruct the generated map after recovery finishes.
+- **Revalidate previous results:** `--recovery-only --recovery-name recovery_connected_v2 --revalidate-from recovery_final`.
+  - Verify scan, map, pose, and source hashes; preserve the previous result folder.
+  - Reuse completed 1 cm geometric fits and exact request caches; recompute acceptance and recover newly rejected intervals.
 - **Batch scheduling:** `scripts/run_trajectory_campaign.py --batch BATCH_DIRECTORY`.
   - Read `plan.json`; finish initial fitting before launching recovery.
   - Require `recovery_ready.json` with `validated: true` and matching source hashes.

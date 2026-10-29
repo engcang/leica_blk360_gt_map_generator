@@ -197,14 +197,16 @@
   - Use every available scan; no fixed 0.1 s selection interval. Unsupported timestamps remain explicitly skipped.
   - **CPU threads:** total batch budget; Auto adapts parallel sequences and per-sequence threads to CPU and available memory.
   - KISS initialization → 1 cm Open3D point-to-plane + Tukey localization → recovery of rejected intervals.
+    - Track from the last accepted pose using SLAM relative motion; KISS is not repeated for every scan.
   - Every accepted pose passes 1 cm fitting and held-out validation; imported baseline poses are initial guesses for the same refinement.
   - Recovery: reuse or initialize the end pose → reverse tracking → local submap fitting for remaining gaps.
   - Continue geometrically supported iteration-limited fits before trying submaps; preserve the same validation.
   - Local submaps: 2 / 6 s windows, initialized from nearby accepted poses and the original map alignment.
-  - Fit the submap at 1 cm, then refine and validate each recovered scan at 1 cm. Stop when local submap recovery fails.
+  - Screen submap proposals at 10 cm, refine the full submap at 1 cm, then refine and validate each recovered scan at 1 cm. Stop when local submap recovery fails.
   - KISS remains part of initial map alignment and independent end initialization; it is not a fallback after local recovery.
   - Save completed forward/reverse checkpoints for reuse before local submaps.
   - Validate recovered poses on the original 1 cm map; check existing and recovered poses against chronological relative motion.
+    - Check across missing GT intervals when input odometry remains continuous; revalidate saved anchors before reuse.
   - Seed checks withhold the anchor scan and require agreement from at least two other scans.
   - Reuse original 1 cm map search indices across scans; CPU and cache budgets adapt to available resources.
   - **Stop / Resume:** retain completed fits; verify input provenance before reusing them.
@@ -260,6 +262,7 @@
 - **CPU usage:**
   - Automatic thread detection for native engines, Open3D, and quality queries.
   - Generate trajectory: **CPU threads → Auto** uses available logical CPUs; an explicit count sets a limit.
+    - C++/OpenMP map-index construction, correspondence processing, and deterministic voxel selection.
     - Parallel queries, normals, and map layers; ordered trajectory propagation and serial Open3D solver reductions.
     - Reuse exact distance bounds to skip points still outside the correspondence gate; unchanged fitting points and thresholds.
   - CPU affinity/container limits and available RAM detected per machine.

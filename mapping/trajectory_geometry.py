@@ -9,6 +9,11 @@ from trajectory_validation import (observability, LOW_OVERLAP_CONTEXT, MIN_SUPPO
 
 def voxel(points: np.ndarray, size: float) -> np.ndarray:
     """Keep actual points in deterministic voxel order."""
+    if len(points) >= 32768:
+        from native_correspondence import voxelIndices
+        ids = voxelIndices(points,size)
+        if ids is not None:
+            return points[ids].astype(np.float32)
     points = points[np.isfinite(points).all(axis=1)]
     cells = np.floor(points / size).astype(np.int64)
     if not len(cells):

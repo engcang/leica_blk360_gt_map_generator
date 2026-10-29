@@ -250,6 +250,30 @@ class IndexedPointToPlaneTarget(PointToPlaneTarget):
         points = np.asarray(source.points)
         count = len(points)
         previous = getattr(self._query_state, 'bounds', None)
+        if getattr(self.index, 'fused_correspondences', False):
+            state = getattr(self._query_state, 'native_matches', None)
+            if state is None or state.count != count:
+                if state is not None:
+                    state.close()
+                state = self.index.new_match_state(count)
+                self._query_state.native_matches = state
+                previous = None
+            if len(self.cloud.points) != count:
+                self.cloud.points = o3d.utility.Vector3dVector(np.zeros((count,3)))
+                self.cloud.normals = o3d.utility.Vector3dVector(np.zeros((count,3)))
+            result = state.match(points, cap, np.asarray(self.cloud.points), np.asarray(self.cloud.normals),
+                                 reset=not isinstance(previous, str))
+            if result is not None:
+                pairs, fitness, rmse, measurements = result
+                self._query_state.bounds = 'native'
+                stats = getattr(self._query_state, 'stats', None)
+                if stats is not None:
+                    for key, value in measurements.items():
+                        stats[key] = stats.get(key,0)+value
+                    stats['query_and_gather_s'] = stats.get('query_and_gather_s',0.)+time.perf_counter()-started
+                return o3d.utility.Vector2iVector(pairs), fitness, rmse
+            if isinstance(previous, str):
+                previous = None
         distances = np.full(count, np.inf)
         indices = np.full(count, self.index.n, dtype=np.int64)
         certified = np.zeros(count, dtype=bool)
@@ -276,25 +300,32 @@ class IndexedPointToPlaneTarget(PointToPlaneTarget):
                 distances[keep], indices[keep] = candidate_distance[keep], candidate_ids[keep]
                 missing = ~present & (second_lower-movement > cap+margin)
         selected = np.flatnonzero(~certified & ~missing)
+        inplace = getattr(self.index, 'inplace_correspondences', False)
         tie_count = 0
         if len(selected):
             # Retain full source row identities for the reusable tile plan;
             # querying a differently sized subset would rebuild it each step.
             all_distances, all_ids = self.index.query(points, k=2, distance_upper_bound=cap, selected=selected)
-            d, ids = all_distances[selected], all_ids[selected]
+            # Native buffers include unselected rows as infinities. Keep their
+            # original row identities and update state directly in C++.
+            d, ids = (all_distances, all_ids) if inplace else (all_distances[selected], all_ids[selected])
             tied = np.isfinite(d[:, 1]) & (d[:, 0] == d[:, 1])
             if tied.any():
                 # cKDTree may order equal neighbors differently for k=1/k=2.
                 # Keep the established k=1 choice; ties are never certified.
-                tied_rows = selected[tied]
+                tied_rows = np.flatnonzero(tied) if inplace else selected[tied]
                 tie_distances, tie_ids = self.index.query(points, distance_upper_bound=cap, selected=tied_rows)
                 d[tied, 0], ids[tied, 0] = tie_distances[tied_rows], tie_ids[tied_rows]
                 tie_count = int(tied.sum())
-            distances[selected], indices[selected] = d[:, 0], ids[:, 0]
-            reference[selected] = points[selected]
-            candidate_ids[selected] = ids[:, 0]
-            candidates[selected] = np.nan
-            second_lower[selected] = np.minimum(d[:, 1], cap)
+            if inplace:
+                self.index.update_correspondences(points, selected, d, ids, cap,
+                    (reference, candidates, candidate_ids, second_lower), distances, indices)
+            else:
+                distances[selected], indices[selected] = d[:, 0], ids[:, 0]
+                reference[selected] = points[selected]
+                candidate_ids[selected] = ids[:, 0]
+                candidates[selected] = np.nan
+                second_lower[selected] = np.minimum(d[:, 1], cap)
         valid = distances < cap
         rows = np.flatnonzero(valid)
         if hasattr(self.index, 'gather_into'):
@@ -305,8 +336,11 @@ class IndexedPointToPlaneTarget(PointToPlaneTarget):
                 self.cloud.normals = o3d.utility.Vector3dVector(np.zeros((count, 3)))
             xyz, normals = np.asarray(self.cloud.points), np.asarray(self.cloud.normals)
             self.index.gather_into(indices, xyz, normals)
-            candidates[valid] = xyz[valid]
-            pairs = np.column_stack((rows, rows)).astype(np.int32)
+            if inplace:
+                pairs = self.index.pack_correspondences(rows, xyz, candidates)
+            else:
+                candidates[valid] = xyz[valid]
+                pairs = np.column_stack((rows, rows)).astype(np.int32)
         else:
             xyz, normals = self.index.gather(indices[valid], normals=True)
             candidates[valid] = xyz

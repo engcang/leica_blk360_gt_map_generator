@@ -107,7 +107,8 @@ def choose_seed(hypotheses):
 
 
 class Recovery(LocalSubmaps, TailInitializer):
-    def __init__(self, baseline, output, cache, source, workers, progress, *, baseline_is_fine=False, tracking_directory=None, on_checkpoint=None):
+    def __init__(self, baseline, output, cache, source, workers, progress, *, baseline_is_fine=False,
+                 tracking_directory=None, on_checkpoint=None, revalidate_from=None):
         self.baseline, self.output = Path(baseline), Path(output)
         self.cache, self.source, self.progress = Path(cache), source, progress
         self.baseline_is_fine = baseline_is_fine
@@ -139,13 +140,16 @@ class Recovery(LocalSubmaps, TailInitializer):
         self.seed_hypotheses = []
         self.seed_certificates, self.context_certificates = {}, {}
         self.conflicted = set()
-        self.provenance = dict(protocol='studio-recovery-final-local-v1', input=self.source.provenance,
+        self.revalidate_from = Path(revalidate_from) if revalidate_from is not None else None
+        self.provenance = dict(protocol='studio-recovery-connected-local-v2', input=self.source.provenance,
             baseline_policy='verified-1cm' if baseline_is_fine else 'refit-imported-at-1cm',
             baseline_trajectory_sha256=digest(self.baseline/'candidate_trajectory.tum'),
             baseline_quality_sha256=digest(self.baseline/'quality.jsonl'),
             map=json.loads((cache/'map.json').read_text()),
             registration='Forward/reverse 1cm; local submap 1cm; individual 1cm validation', fine_engine=FINE_ENGINE,
-            seeds=dict(window_radii_s=[1.,3.], iterations_per_stage=180,
+            seeds=dict(window_radii_s=[1.,3.], iterations_per_stage=60,
+                       fine_distances=[.1], supported_continuation_iterations=180,
+                       proposal_merge_m_deg=[.01,.1], coarse_anchor_capture_margin_m_deg=[.2,3.],
                        initial_guesses=['initial_alignment','before_anchor','after_anchor'],
                        local_coarse_voxel_m=.1, post_reverse_kiss=False,
                        tail_initialization='shared-kiss-selective-support-v1',
@@ -153,6 +157,7 @@ class Recovery(LocalSubmaps, TailInitializer):
                        iteration_limit_continuation=180,
                        schedule='forward-then-reverse-then-local-submaps'),
             validation=dict(context_protocol=VALIDATION_PROTOCOL, independent_witness_scans=2,
+                            temporal_protocol='continuous-estimate-bridge-v2', partial_views_require_map_anchor=True,
                             shared_training_observable_directions=6,
                             shared_training_information='actual-final-Tukey-weighted-fit',
                             shared_agreement_m_deg=[.15,3.], weak_departure_m=.01),
@@ -170,8 +175,20 @@ class Recovery(LocalSubmaps, TailInitializer):
         correspondence = correspondenceInfo()
         if correspondence['backend'] == 'native-tiled-map-v1':
             self.provenance['correspondence'] = correspondence
+        if self.revalidate_from is not None:
+            if self.revalidate_from.resolve() == self.output.resolve():
+                raise ValueError('Revalidation must preserve the previous result in a different folder')
+            previous = json.loads((self.revalidate_from/'provenance.json').read_text())
+            for key in ('input','map','fine_engine','target_normals','baseline_trajectory_sha256','baseline_quality_sha256'):
+                if previous.get(key) != self.provenance.get(key):
+                    raise ValueError(f'Revalidation source changed: {key}')
+            self.provenance['revalidated_source'] = dict(path=str(self.revalidate_from.resolve()),
+                files={name:digest(self.revalidate_from/name) for name in
+                       ('provenance.json','candidate_trajectory.tum','quality.jsonl')})
         save_recovery_provenance(self.output, self.provenance)
         self.fine = FineMatcher(self.cache, workers, result_cache=self.output/'fine_requests')
+        if self.revalidate_from is not None:
+            self.fine.result_sources = (self.revalidate_from/'fine_requests', self.baseline/'fine_requests')
         # Read-only acceleration: source points, target, initial pose, solver and
         # iteration settings must match the full request hash. Validation is new.
         attempts = self.output/'attempts.jsonl'
@@ -191,7 +208,9 @@ class Recovery(LocalSubmaps, TailInitializer):
                 if 'fit_key' in q:
                     self.fit_cache[q['fit_key']] = q
                 if q.get('stage') == 'seed_complete':
-                    self.seed_cache[(q['index'], q.get('allow_global', True))] = q.get('T_map_from_base')
+                    if q.get('anchor_signature'):
+                        self.seed_cache[(q['index'], q.get('allow_global', True), q['anchor_signature'])] = dict(
+                            T=q.get('T_map_from_base'), certificate=q.get('certificate'))
                     if q.get('certificate'):
                         self.remember_certificate(q['index'], q['certificate'])
                     if q.get('fit') and q.get('T_map_from_base'):
@@ -323,15 +342,32 @@ class Recovery(LocalSubmaps, TailInitializer):
         # Pose membership must never override that rejection at checkpoint.
         self.poses = {i:T for i,T in self.poses.items() if self.quality.get(i, {}).get('accepted', False)}
         times = {q['index']: q['timestamp'] for q in self.rows}
-        screened, edges = screen_temporal(self.poses, times, self.source)
+        screened, edges = screen_temporal(self.poses, times, self.source, qualities=self.quality)
         all_edges = list(edges)
         while edges:
-            screened, edges = screen_temporal(screened, times, self.source)
+            screened, edges = screen_temporal(screened, times, self.source, qualities=self.quality)
             all_edges.extend(edges)
         removed = set(self.poses)-set(screened)
+        # Old low-overlap votes are not immutable anchors. Rebuild their link
+        # to the surviving map-supported chain, including on checkpoint reuse.
+        contextual = []
+        unanchored = set()
+        for index in screened:
+            q = self.quality[index]
+            if q.get('reason') == 'independent_neighbor_geometry':
+                q.update(accepted=False, reason='partial_view_needs_context')
+                q.pop('context_validation', None)
+                contextual.append(index)
+        confirm_partial_views([self.quality[i] for i in screened], self.source)
+        for index in contextual:
+            if not self.quality[index].get('accepted'):
+                screened.pop(index)
+                removed.add(index)
+                unanchored.add(index)
         for index in sorted(removed):
             self.quality[index] = dict(self.quality.get(index, {}), index=index,
-                timestamp=times[index], accepted=False, reason='temporal_inconsistency', stage=stage)
+                timestamp=times[index], accepted=False,
+                reason='unanchored_partial_view' if index in unanchored else 'temporal_inconsistency', stage=stage)
         self.poses = screened
         if hasattr(self, 'attempt_file'):
             self.log(dict(stage=stage, rejected_indices=sorted(removed), edges=all_edges))
@@ -417,6 +453,8 @@ class Recovery(LocalSubmaps, TailInitializer):
         if seed is None:return result
         last_T,last_F,last_time=seed_T,seed.frontend_T,seed.timestamp
         seed_quality = self.quality.get(seed_index, self.seed_fits.get(seed_index, (None, {}))[1])
+        last_quality = dict(seed_quality, index=seed_index, timestamp=seed.timestamp,
+                            T_map_from_base=seed_T.tolist())
         support_ancestors = set(seed_quality.get('support_ancestors', []))
         if seed_quality.get('submap_support_only'):
             support_ancestors.add(seed_index)
@@ -452,13 +490,14 @@ class Recovery(LocalSubmaps, TailInitializer):
                     nearby = {i:r for i,r in nearby.items() if i not in blocked}
                     if s.index not in blocked:
                         nearby[s.index] = q
-                    promoted = confirm_partial_views(list(nearby.values()), self.source)
+                    promoted = confirm_partial_views(list(nearby.values()), self.source, reference=last_quality)
                     for i in promoted:
                         if i in pending:
                             result[i] = pending[i]
             supported=q['accepted'] and within_motion
             if supported:
                 last_T,last_F,last_time=T,s.frontend_T,s.timestamp
+                last_quality = q
                 result[index]=(T,q)
                 if q.get('submap_support_only'):
                     support_ancestors.add(index)
@@ -514,11 +553,46 @@ class Recovery(LocalSubmaps, TailInitializer):
             self.quality[index] = q
         self.screen_poses('resumed_temporal_audit')
 
+    def revalidate_previous(self):
+        if self.revalidate_from is None or (self.output/'quality.jsonl').exists():
+            return False
+        receipt = self.provenance['revalidated_source']
+        if any(digest(self.revalidate_from/name) != value for name,value in receipt['files'].items()):
+            raise ValueError('Previous result changed during revalidation')
+        rows = [json.loads(line) for line in (self.revalidate_from/'quality.jsonl').read_text().splitlines()]
+        if [q['index'] for q in rows] != [q['index'] for q in self.rows]:
+            raise ValueError('Previous result has different scan selection')
+        accepted = [q for q in rows if q.get('accepted')]
+        values = np.loadtxt(self.revalidate_from/'candidate_trajectory.tum', ndmin=2) if accepted else np.empty((0,8))
+        if len(values) != len(accepted):
+            raise ValueError('Previous result pose count does not match its quality record')
+        for q,row in zip(accepted,values):
+            if (abs(q['timestamp']-row[0]) > 1e-6
+                    or abs(q['timestamp']-self.source.anchor_timestamp(q['index'])) > 1e-6
+                    or not np.allclose(pose(row),q['T_map_from_base'],atol=2e-8,rtol=0)
+                    or q.get('validation_map_voxel_m') != .01
+                    or q.get('fine',{}).get('engine') != FINE_ENGINE
+                    or not q.get('fine',{}).get('converged')):
+                raise ValueError('Previous result contains an unverified scan fit')
+        self.quality = {q['index']:q for q in rows}
+        self.poses = {q['index']:np.asarray(q['T_map_from_base']) for q in accepted}
+        self.conflicted.clear(); self.quarantined.clear()
+        removed = self.screen_poses('previous_result_revalidated')
+        self.baseline_temporal_removed = sorted(set(self.baseline_temporal_removed)|removed)
+        self.log(dict(stage='previous_result_revalidated', previous=len(accepted),
+                      retained=len(self.poses), rejected_indices=sorted(removed)))
+        return bool(removed)
+
     def restore_tracking(self):
         folder = self.tracking_directory
         receipt = folder/'tracking_complete.json'
         if not receipt.exists():
-            return False
+            # Import old geometric fits read-only; write new tracking decisions
+            # to the new protocol's directory after connected-motion screening.
+            folder = self.baseline.parent/'tracking'
+            receipt = folder/'tracking_complete.json'
+            if not receipt.exists():
+                return False
         saved = json.loads(receipt.read_text())
         keys = ('input', 'map', 'baseline_trajectory_sha256', 'baseline_quality_sha256',
                 'fine_engine', 'correspondence_distances', 'iterations_per_stage', 'thresholds')
@@ -536,6 +610,9 @@ class Recovery(LocalSubmaps, TailInitializer):
         if len(accepted) != saved['accepted'] or len(values) != len(accepted):
             raise ValueError('Forward/reverse checkpoint pose count mismatch')
         allowed = {'baseline_retained', 'baseline_fine', 'forward_fine', 'reverse_fine', 'tail_seed', 'tail_forward'}
+        if (saved['provenance'].get('protocol') == 'studio-recovery-connected-local-v2'
+                and saved['provenance'].get('revalidated_source') == self.provenance.get('revalidated_source')):
+            allowed.update(('verified_submap_seed','submap_forward','submap_reverse'))
         for q, row in zip(accepted, values):
             if (q.get('stage') not in allowed or abs(q['timestamp']-row[0]) > 1e-6
                     or abs(q['timestamp']-self.source.anchor_timestamp(q['index'])) > 1e-6
@@ -546,8 +623,10 @@ class Recovery(LocalSubmaps, TailInitializer):
         self.quarantined = saved['quarantined']
         self.conflicted = set(saved['conflicted'])
         self.baseline_temporal_removed = saved['baseline_temporal_removed']
-        self.log(dict(stage='tracking_checkpoint_reused', accepted=len(accepted)))
-        return True
+        removed = self.screen_poses('tracking_checkpoint_temporal_audit')
+        self.baseline_temporal_removed = sorted(set(self.baseline_temporal_removed)|removed)
+        self.log(dict(stage='tracking_checkpoint_reused', accepted=len(self.poses), rejected_on_revalidation=len(removed)))
+        return not removed
 
     def save_tracking(self):
         self.checkpoint()
@@ -589,6 +668,8 @@ class Recovery(LocalSubmaps, TailInitializer):
     def run(self, tracking_only=False):
         started=time.monotonic();self.keep_baseline();baseline_count=len(self.poses)
         tracking_ready = self.restore_tracking()
+        if self.revalidate_previous():
+            tracking_ready = False
         self.restore_accepted_checkpoint()
         self.checkpoint()
         phases = ('tracking',) if tracking_only else ('tracking', 'local')
@@ -674,6 +755,7 @@ class Recovery(LocalSubmaps, TailInitializer):
                         self.certify_submap_pose(T, q)
                         if not q['accepted']:continue
                         q.update(index=s.index,timestamp=s.timestamp,stage='verified_submap_seed')
+                        self.seed_fits[seed_index] = (T, q)
                         new_forward={seed_index:(T,q),**self.propagate([i for i in indices if i>seed_index and (i not in forward and i not in backward or i in disputed)],seed_index,T,'submap_forward')}
                         new_backward={seed_index:(T,q),**self.propagate([i for i in reversed(indices) if i<seed_index and (i not in forward and i not in backward or i in disputed)],seed_index,T,'submap_reverse')}
                         covered=set(new_forward)|set(new_backward)
@@ -711,7 +793,7 @@ class Recovery(LocalSubmaps, TailInitializer):
         # Preserve baseline skipped-input facts; recovery does not invent deskew.
         save_json(self.output/'input_quality.json',json.loads((self.baseline/'input_quality.json').read_text()))
         save_json(self.output/'status.json',dict(status='candidate_complete',processed=len(self.rows),
-            pending_global_search=False, recovery_method='local-submap-final-v1',
+            pending_global_search=False, recovery_method='connected-local-submap-v2',
             accepted=len(self.poses),rejected=len(self.rows)-len(self.poses),baseline_retained=baseline_count,
             recovered=len(self.poses)-baseline_count,quarantined_indices=self.quarantined,
             baseline_temporal_rejected=self.baseline_temporal_removed,

@@ -5,10 +5,11 @@ import os
 from pathlib import Path
 import time
 import weakref
+from functools import lru_cache
 
 import numpy as np
 
-from parallel_runtime import cacheBudget
+from parallel_runtime import cacheBudget, threadBudget
 
 
 def libraryPath():
@@ -31,8 +32,8 @@ def backendInfo():
     return dict(backend='native-tiled-map-v1', sha256=hashlib.sha256(libraryPath().read_bytes()).hexdigest())
 
 
-def loadLibrary():
-    lib = ct.CDLL(str(libraryPath().resolve()))
+def loadLibrary(path=None):
+    lib = ct.CDLL(str(Path(path or libraryPath()).resolve()))
     pointer, integer = ct.c_void_p, ct.c_int64
     signatures = dict(
         blk_correspondence_abi=(ct.c_int, []),
@@ -52,6 +53,34 @@ def loadLibrary():
     if hasattr(lib, 'blk_index_bytes'):
         lib.blk_index_bytes.restype = ct.c_uint64
         lib.blk_index_bytes.argtypes = [pointer, integer]
+    optional = dict(
+        blk_index_plan=[pointer, pointer, integer, ct.c_double, pointer],
+        blk_plan_reusable=[pointer, pointer, pointer, integer, ct.c_double, ct.c_double],
+        blk_index_gather_plan=[pointer, pointer, integer, pointer],
+        blk_index_add_batch=[pointer, pointer, pointer, integer],
+        blk_voxel_rows=[pointer, integer, ct.c_int, ct.c_double, ct.c_int, pointer, pointer])
+    for name, args in optional.items():
+        if hasattr(lib, name):
+            function = getattr(lib, name)
+            function.restype, function.argtypes = ct.c_int, args
+    for name, args in dict(
+        blk_correspondence_update=[pointer, pointer, pointer, integer, pointer, pointer, integer,
+                                   ct.c_double, pointer, pointer, pointer, pointer, pointer, pointer],
+        blk_correspondence_pack=[pointer, pointer, integer, pointer, pointer, pointer]).items():
+        if hasattr(lib, name):
+            function = getattr(lib, name)
+            function.restype, function.argtypes = None, args
+    fused = dict(
+        blk_matches_create=(pointer, [pointer, integer]),
+        blk_matches_destroy=(None, [pointer]),
+        blk_matches_run=(ct.c_int, [pointer, pointer, ct.c_double, ct.c_int,
+                                   pointer, pointer, pointer, pointer, pointer, pointer]),
+        blk_matches_patch_ties=(ct.c_int, [pointer, pointer, pointer, pointer, integer,
+                                          pointer, pointer, pointer]))
+    for name, (result, args) in fused.items():
+        if hasattr(lib, name):
+            function = getattr(lib, name)
+            function.restype, function.argtypes = result, args
     if lib.blk_correspondence_abi() != 1:
         raise RuntimeError('Incompatible native correspondence library')
     return lib
@@ -59,6 +88,83 @@ def loadLibrary():
 
 def pointer(array):
     return None if array is None else array.ctypes.data
+
+
+@lru_cache(maxsize=4)
+def voxelLibrary(path):
+    return loadLibrary(path)
+
+
+def voxelIndices(points, size, workers=None):
+    if (points.dtype not in (np.dtype('float32'),np.dtype('float64'))
+            or points.ndim != 2 or points.shape[1] != 3 or not np.isfinite(size) or size <= 0
+            or not enabled()):
+        return None
+    if (np.empty(0,dtype=points.dtype)/size).dtype != points.dtype:
+        return None
+    lib = voxelLibrary(str(libraryPath().resolve()))
+    if not hasattr(lib,'blk_voxel_rows'):
+        return None
+    data = np.ascontiguousarray(points)
+    ids = np.empty(len(data),dtype=np.int64)
+    used = np.empty(1,dtype=np.int64)
+    result = lib.blk_voxel_rows(pointer(data),len(data),int(data.dtype==np.float32),size,
+                                threadBudget(workers),pointer(ids),pointer(used))
+    if result:
+        raise RuntimeError(lib.blk_correspondence_error().decode())
+    return ids[:used[0]] if used[0]>=0 else None
+
+
+class NativeMatches:
+    """Own correspondence scratch buffers across iterations, with exact tie fallback."""
+    def __init__(self, index, count):
+        self.index, self.count = index, count
+        self.handle = index.lib.blk_matches_create(index.handle, count)
+        if not self.handle:
+            raise MemoryError(index.lib.blk_correspondence_error().decode())
+        self._release = weakref.finalize(self, index.lib.blk_matches_destroy, self.handle)
+        self.distances = np.empty(count, dtype=np.float64)
+        self.pairs = np.empty((count,2), dtype=np.int32)
+        self.ties = np.empty(count, dtype=np.uint8)
+        self.statistics = np.empty(5, dtype=np.int64)
+
+    def close(self):
+        self._release()
+
+    def match(self, points, cap, xyz, normals, reset):
+        index = self.index
+        if not self._release.alive:
+            raise RuntimeError('Native correspondence state is closed')
+        if (points.shape != (self.count,3) or not points.flags.c_contiguous
+                or points.dtype != np.float64 or not np.isfinite(points).all()
+                or not np.isfinite(cap) or cap <= 0):
+            raise ValueError('Finite contiguous XYZ points and positive distance required')
+        started = time.perf_counter()
+        if cap >= 2*index.tile_m:
+            return None
+        plan = index._native_plan(points, cap)
+        index.statistics['query_plan_s'] += time.perf_counter()-started
+        if not index._native_prepare(plan, normals=True):
+            return None  # The streamed reference path remains available under low RAM.
+        started = time.perf_counter()
+        index.check(index.lib.blk_matches_run(self.handle, pointer(points), cap, int(reset),
+            pointer(xyz), pointer(normals), pointer(self.distances), pointer(self.pairs),
+            pointer(self.ties), pointer(self.statistics)))
+        index.statistics['tree_query_s'] += time.perf_counter()-started
+        valid, queried, reused, absent, ties = map(int, self.statistics)
+        index.statistics['queried_tile_points'] += queried
+        if ties:
+            rows = np.flatnonzero(self.ties)
+            d, ids = index.reference_query(points, cap, rows)
+            d, ids = np.ascontiguousarray(d[rows]), np.ascontiguousarray(ids[rows])
+            index.check(index.lib.blk_matches_patch_ties(self.handle, pointer(rows), pointer(ids), pointer(d),
+                len(rows), pointer(xyz), pointer(normals), pointer(self.distances)))
+        pairs = self.pairs[:valid]
+        # Preserve NumPy's reduction order and convergence metrics exactly.
+        rmse = float(np.sqrt(np.mean(self.distances[pairs[:,0]]**2))) if valid else 0.
+        return pairs, valid/self.count if self.count else 0., rmse, dict(
+            queried_points=queried+ties, exact_correspondences_reused=reused,
+            absent_correspondences_reused=absent, tie_queries=ties)
 
 
 def nativeIndexClass(base):
@@ -78,6 +184,22 @@ def nativeIndexClass(base):
             self.native_tiles = {}  # Own every array referenced by C++ until eviction.
             self.tile_sizes = {}
             self.native_bytes = 0
+            self.native_plan = None
+            self.inplace_correspondences = (hasattr(self.lib, 'blk_correspondence_update')
+                                           and hasattr(self.lib, 'blk_correspondence_pack'))
+            self.fused_correspondences = all(hasattr(self.lib, name) for name in (
+                'blk_matches_create','blk_matches_destroy','blk_matches_run','blk_matches_patch_ties'))
+            self.match_states = weakref.WeakSet()
+
+        def new_match_state(self, count):
+            state = NativeMatches(self, count)
+            self.match_states.add(state)
+            return state
+
+        def reference_query(self, points, cap, rows):
+            result = super().query(points, 1, cap, selected=rows)
+            self.trees.clear(); self.normal_maps.clear(); self.cache_bytes = 0
+            return result
 
         def check(self, result):
             if result:
@@ -89,12 +211,52 @@ def nativeIndexClass(base):
                                 pointer(candidate_ids), pointer(second), len(points), cap,
                                 pointer(distances), pointer(indices), pointer(certified), pointer(missing))
 
+        def update_correspondences(self, points, selected, query_distances, query_ids, cap,
+                                   previous, distances, indices):
+            reference, candidates, candidate_ids, second = previous
+            stride = query_distances.strides[0]//query_distances.itemsize
+            if (query_distances.shape != query_ids.shape or query_distances.shape[1] != 2
+                    or query_distances.strides[1] != 8 or query_ids.strides != query_distances.strides):
+                raise ValueError('Two-neighbor query buffers with matching strides required')
+            self.lib.blk_correspondence_update(self.handle, pointer(points), pointer(selected), len(selected),
+                pointer(query_distances), pointer(query_ids), stride, cap,
+                pointer(reference), pointer(candidates), pointer(candidate_ids), pointer(second),
+                pointer(distances), pointer(indices))
+
+        def pack_correspondences(self, rows, xyz, candidates):
+            pairs = np.empty((len(rows),2), dtype=np.int32)
+            self.lib.blk_correspondence_pack(self.handle, pointer(rows), len(rows),
+                                             pointer(xyz), pointer(candidates), pointer(pairs))
+            return pairs
+
         def close(self):
             if hasattr(self, '_release'):
+                for state in self.match_states:
+                    state.close()
+                self.match_states.clear()
                 self._release()
                 self.native_tiles.clear()
                 self.native_bytes = 0
+                self.native_plan = None
             super().close()
+
+        def _native_plan(self, points, cap):
+            if not (hasattr(self.lib, 'blk_index_plan') and hasattr(self.lib, 'blk_plan_reusable')):
+                return self._plan(points, cap)
+            previous = self.native_plan
+            if previous is not None and len(previous[0]) == len(points) and cap <= previous[1]:
+                reference, radius, tiles = previous
+                if self.lib.blk_plan_reusable(self.handle, pointer(points), pointer(reference),
+                                              len(points), cap, radius):
+                    self.statistics['plan_reuses'] += 1
+                    return tiles
+            radius = cap+.2
+            needed = np.empty(len(self.keys), dtype=np.uint8)
+            self.check(self.lib.blk_index_plan(self.handle, pointer(points), len(points), radius, pointer(needed)))
+            tiles = np.flatnonzero(needed)
+            self.native_plan = points.copy(), radius, tiles
+            self.statistics['plan_builds'] += 1
+            return tiles
 
         def _clear_native(self):
             for tile in list(self.native_tiles):
@@ -118,6 +280,21 @@ def nativeIndexClass(base):
                     self.lib.blk_index_remove(self.handle, tile)
                     self.native_bytes -= self.native_tiles.pop(tile)[2]
                     self.statistics['tree_evictions'] += 1
+            missing = sorted(needed-set(self.native_tiles))
+            if len(missing) > 1 and hasattr(self.lib, 'blk_index_add_batch'):
+                started = time.perf_counter()
+                buffers = [np.memmap(self.matcher.folder/(self.keys[t]+'.bin'), mode='r',
+                                     dtype='<f4').reshape(-1,3) for t in missing]
+                tiles = np.asarray(missing,dtype=np.int64)
+                addresses = np.asarray([p.ctypes.data for p in buffers],dtype=np.uintp)
+                self.check(self.lib.blk_index_add_batch(self.handle,pointer(tiles),pointer(addresses),len(tiles)))
+                for tile,raw in zip(missing,buffers):
+                    size = int(self.lib.blk_index_bytes(self.handle,tile)) if hasattr(self.lib,'blk_index_bytes') else len(raw)*80
+                    self.tile_sizes[tile] = size
+                    self.native_tiles[tile] = [raw,None,size]
+                    self.native_bytes += size
+                self.statistics['tree_builds'] += len(missing)
+                self.statistics['tree_preparation_s'] += time.perf_counter()-started
             for tile in sorted(needed):
                 if tile not in self.native_tiles:
                     started = time.perf_counter()
@@ -131,7 +308,7 @@ def nativeIndexClass(base):
                     self.native_bytes += size
                     self.statistics['tree_builds'] += 1
                     self.statistics['tree_preparation_s'] += time.perf_counter()-started
-                else:
+                elif tile not in missing:
                     self.statistics['tree_hits'] += 1
                     self.native_tiles[tile] = self.native_tiles.pop(tile)
                 if normals and self.native_tiles[tile][1] is None:
@@ -200,7 +377,7 @@ def nativeIndexClass(base):
                     self._clear_native()
                 return super().query(points, k, cap, workers, selected)
             started = time.perf_counter()
-            plan = self._plan(points, cap)
+            plan = self._native_plan(points, cap)
             self.statistics['query_plan_s'] += time.perf_counter()-started
             streamed = not self._native_prepare(plan)
             # These arrays belong to this query result; callers may retain them.
@@ -235,7 +412,12 @@ def nativeIndexClass(base):
             if np.any((ids < 0) | (ids > self.n)):
                 raise ValueError('Invalid map neighbor index')
             valid = ids < self.n
-            tiles = np.unique(np.searchsorted(self.offsets[1:], ids[valid], side='right'))
+            if hasattr(self.lib, 'blk_index_gather_plan'):
+                needed = np.empty(len(self.keys), dtype=np.uint8)
+                self.check(self.lib.blk_index_gather_plan(self.handle, pointer(ids), ids.size, pointer(needed)))
+                tiles = np.flatnonzero(needed)
+            else:
+                tiles = np.unique(np.searchsorted(self.offsets[1:], ids[valid], side='right'))
             if not self._native_prepare(tiles, normals is not None):
                 self._clear_native()
                 values = super().gather(ids[valid], normals=normals is not None)

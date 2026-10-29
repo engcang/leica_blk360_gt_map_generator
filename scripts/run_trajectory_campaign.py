@@ -114,6 +114,8 @@ def launch(job, phase):
                '--baseline-only' if phase == 'forward' else '--recovery-only']
     if phase == 'recovery':
         command += ['--recovery-name', PLAN.get('recovery_name', 'recovery')]
+        if PLAN.get('revalidate_from'):
+            command += ['--revalidate-from', PLAN['revalidate_from']]
     process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=log,
         stderr=subprocess.STDOUT, start_new_session=True)
     active[seq] = dict(job=job, process=process, log=log, report=report, phase=phase)

@@ -4,6 +4,12 @@
 
 #include <ansi.h>
 
+#ifdef __APPLE__
+// Defined by upstream strcodec.c but not declared for segdec.c.
+// Apple Clang requires the declaration when compiling C99.
+unsigned int _byteswap_ulong(unsigned int bits);
+#endif
+
 //Codex: The reference ANSI codec assumes LP64 for 64-bit pointers; Windows uses LLP64.
 //Codex: Override only its pointer macros, without changing vendored source or global ABI macros.
 #undef UINTPTR_T

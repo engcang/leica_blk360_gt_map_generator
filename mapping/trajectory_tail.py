@@ -10,7 +10,7 @@ from scipy.spatial.transform import Rotation
 from parallel_runtime import cacheBudget
 from trajectory_geometry import voxel
 from trajectory_io import transform, save_json, digest
-from trajectory_validation import jointly_observable, confirm_partial_views
+from trajectory_validation import jointly_observable, confirm_partial_views, context_map_supported, map_rooted
 
 
 SUBMAP_PROTOCOL = 'shared-kiss-selective-support-v1'
@@ -151,12 +151,12 @@ class TailInitializer:
         T, info = self.fine.align(points, initial, capture_information=True)
         training = self.fine.quality(voxel(points, .1), T)
         if (not info.get('converged') and info.get('convergence_reason') == 'iteration_limit'
-                and training.get('geometry_supported')):
+                and context_map_supported(training)):
             T, info = self.fine.align(points, T, iterations=180, capture_information=True)
             training = self.fine.quality(voxel(points, .1), T)
         result.update(fine=info, training_quality=training,
                       optimizer_information=info.get('optimizer_information', {}))
-        ok = (info.get('converged') and training.get('geometry_supported')
+        ok = (info.get('converged') and context_map_supported(training)
               and training.get('observable_directions') == 6
               and result['optimizer_information'].get('observable_directions') == 6)
         if ok:
@@ -167,10 +167,10 @@ class TailInitializer:
                 fitted, fit = self.fine.align(subset, initial, capture_information=True)
                 quality = self.fine.quality(voxel(subset, .1), fitted)
                 if (not fit.get('converged') and fit.get('convergence_reason') == 'iteration_limit'
-                        and quality.get('geometry_supported')):
+                        and context_map_supported(quality)):
                     fitted, fit = self.fine.align(subset, fitted, iterations=180, capture_information=True)
                     quality = self.fine.quality(voxel(subset, .1), fitted)
-                stable = bool(fit.get('converged') and quality.get('geometry_supported')
+                stable = bool(fit.get('converged') and context_map_supported(quality)
                     and quality.get('observable_directions') == 6
                     and fit.get('optimizer_information', {}).get('observable_directions') == 6
                     and within(T, fitted, STABILITY_LIMIT))
@@ -189,17 +189,43 @@ class TailInitializer:
         """One KISS proposal -> individual fine fits; shared fitting is conditional."""
         started = time.perf_counter()
         anchor = window.anchor
+        # KISS's 30/50 cm feature pose is a proposal, not a 1 cm ICP seed.
+        # Refine only the training submap here; the anchor and witnesses remain
+        # wholly withheld and still need independent original-map fine fits.
+        if self.matcher is None:
+            from trajectory_geometry import Matcher
+            self.matcher = Matcher(self.cache, self.fine.workers)
+        initial = self.matcher.icp(window.coarse, initial)
+        preliminary = self.fine.quality(self.prepared_scan(anchor)[1], initial)
+        if (preliminary.get('coverage_20cm', 0) < .20
+                or preliminary.get('plane_rms_m', 1) > .06
+                or preliminary.get('inlier_precision_10cm', 0) < .60):
+            self.log(dict(stage='tail_candidate', index=anchor.index, scope=scope,
+                radius_s=window.radius, resolution_m=resolution, accepted=False,
+                reason='poor_direct_tls_proposal', anchor_quality=preliminary,
+                elapsed_s=time.perf_counter()-started))
+            return None
         validators = window.validators
         ids = np.unique(np.linspace(0, len(validators)-1, min(3, len(validators))).astype(int))
         checks = [anchor]+[validators[i] for i in ids]
-        fits = [self.fit(s, initial@window.relative(s), 'kiss_individual') for s in checks]
+        stage = 'local_capture_individual' if scope.startswith('local_capture_') else 'kiss_individual'
+        fits = [self.fit(anchor, initial, stage)]
+        anchor_quality = fits[0][1]
+        if not (anchor_quality.get('geometry_supported') and anchor_quality.get('fine', {}).get('converged')):
+            self.log(dict(stage='tail_candidate', index=anchor.index, scope=scope,
+                radius_s=window.radius, resolution_m=resolution, accepted=False,
+                reason='anchor_fine_validation_failed', checks=[anchor_quality],
+                elapsed_s=time.perf_counter()-started))
+            return None
+        fits.extend(self.fit(s, initial@window.relative(s), stage) for s in checks[1:])
         confirm_partial_views([q for _, q in fits], self.source)
         # Fine correction common to the scans need not remain within 15 cm of
         # a coarse KISS proposal. Compare the independently refined transforms.
-        full = [(s, T, q) for s, (T, q) in zip(checks, fits) if q.get('accepted')]
+        full = [(s, T, q) for s, (T, q) in zip(checks, fits)
+                if q.get('accepted') and (map_rooted(q) or context_map_supported(q))]
         reference = min(full, key=lambda x:x[2]['plane_rms_m']) if full else None
         T = reference[1]@np.linalg.inv(window.relative(reference[0])) if reference else initial
-        good = [bool(q.get('geometry_supported') and q.get('fine', {}).get('converged')
+        good = [bool((map_rooted(q) or context_map_supported(q)) and q.get('fine', {}).get('converged')
                 and within(fitted, T@window.relative(s), (.15, 3.)))
                 for s, (fitted, q) in zip(checks, fits)]
         weak = any(ok and q.get('observable_directions', 0) < 6 for ok, (_, q) in zip(good, fits))
@@ -234,7 +260,8 @@ class TailInitializer:
                         self.certify_tail_pose(fitted, q, certificate)
                     T = shared
         confirmed = [j for j, (s, (fitted, q)) in enumerate(zip(checks, fits))
-                     if q.get('accepted') and within(fitted, T@window.relative(s), (.15, 3.))]
+                     if q.get('accepted') and (map_rooted(q) or context_map_supported(q))
+                     and within(fitted, T@window.relative(s), (.15, 3.))]
         accepted = 0 in confirmed and len(confirmed) >= 3
         reason = 'individual_scans_verified' if accepted else 'insufficient_independent_verified_scans'
         # Compare candidates on precisely the same withheld scans, using a
@@ -268,6 +295,23 @@ class TailInitializer:
                 continue
             guesses = self.seed_guesses(window.anchor)
             self.seed_hypotheses = []
+            if not allow_global:
+                # Try bounded drift capture before feature matching. Only the
+                # training scans rank candidates; every returned anchor still
+                # needs three independently fitted TLS-supported scans.
+                if self.matcher is None:
+                    from trajectory_geometry import Matcher
+                    self.matcher = Matcher(self.cache, self.fine.workers)
+                seen = []
+                for label, guess in guesses:
+                    if any(within(guess, previous, (.5, 3.)) for previous in seen):
+                        continue
+                    seen.append(guess)
+                    for cost, proposal in self.matcher.capture_candidates(window.coarse, guess):
+                        self.validate_tail_seed(window, proposal, 'local_capture_'+label, .4)
+                    selected = choose_seed(self.seed_hypotheses)
+                    if selected is not None:
+                        return self._accept_tail_hypothesis(selected)
             for resolution in KISS_RESOLUTIONS:
                 target = self.kiss_targets.get(resolution)
                 if target is None:
@@ -314,12 +358,14 @@ class TailInitializer:
                         self.validate_tail_seed(window, initial, label, resolution)
                     selected = choose_seed(self.seed_hypotheses)
                     if selected is not None:
-                        h = next(h for h in self.seed_hypotheses if h['T'] is selected)
-                        if h['certificate']:
-                            self.remember_certificate(index, h['certificate'])
-                        for s, (fitted, q) in zip(h['checks'], h['fits']):
-                            self.seed_fits[s.index] = (fitted, q)
-                        # Return the anchor's own final fine pose, not the
-                        # transform fitted using another scan in the window.
-                        return self.seed_fits[index][0]
+                        return self._accept_tail_hypothesis(selected)
         return None
+
+    def _accept_tail_hypothesis(self, selected):
+        h = next(h for h in self.seed_hypotheses if h['T'] is selected)
+        index = h['window'].anchor.index
+        if h['certificate']:
+            self.remember_certificate(index, h['certificate'])
+        for s, (fitted, q) in zip(h['checks'], h['fits']):
+            self.seed_fits[s.index] = (fitted, q)
+        return self.seed_fits[index][0]

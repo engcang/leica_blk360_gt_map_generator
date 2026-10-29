@@ -17,7 +17,7 @@ def estimate_files(folder):
         if not directory.is_dir():
             continue
         files.extend(p for p in directory.iterdir() if p.is_file() and p.suffix.lower() in ('.tum', '.txt', '.csv')
-                     and p.name not in (GT_NAME, 'candidate_trajectory.tum', 'timestamps.txt', 'times.txt'))
+                     and p.name not in (GT_NAME, 'ground_truth_trajectory.partial.tum', 'candidate_trajectory.tum', 'timestamps.txt', 'times.txt'))
     def priority(p):
         name=p.stem.lower()
         return (0 if any(s in name for s in ('frontend','odometry','odom')) else 2 if 'backend' in name else 1, str(p))
@@ -102,6 +102,10 @@ def read_result(path):
                 if scene.get('trajectory_sha256') != digest(path):
                     continue
             return dict(output_directory=str(work),name=scene.get('name',folder.name))
+        if (work/'job_status.json').is_file():
+            status = json.loads((work/'job_status.json').read_text())
+            if status.get('status') in ('queued','running','failed','cancelled','interrupted'):
+                return dict(output_directory=str(work), name=folder.name)
     gt=folder/GT_NAME if path.is_dir() else path
     if not gt.is_file(): raise ValueError(f'No {GT_NAME} or saved viewer in {folder}')
     trajectory=Trajectory(dict(path=str(gt)),max_gap=.5)
@@ -130,12 +134,14 @@ def read_result(path):
 
 
 def open_results(paths):
+    def available(folder):
+        return any((folder/name).is_file() for name in (GT_NAME,'viewer.json','job_status.json')) or (folder/WORK_NAME/'viewer.json').is_file()
     results=[]
     for selected in paths:
         path=Path(selected).expanduser().resolve(strict=True)
-        if path.is_dir() and not any((path/name).is_file() for name in (GT_NAME,'viewer.json')) and not (path/WORK_NAME/'viewer.json').is_file():
+        if path.is_dir() and not available(path):
             children=[p for p in sorted(path.iterdir()) if p.is_dir() and
-                      ((p/GT_NAME).is_file() or (p/'viewer.json').is_file() or (p/WORK_NAME/'viewer.json').is_file())]
+                      available(p)]
             if children: results.extend(read_result(p) for p in children);continue
         results.append(read_result(path))
     return results

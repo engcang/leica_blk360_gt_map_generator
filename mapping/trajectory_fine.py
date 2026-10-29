@@ -440,7 +440,9 @@ class FineMatcher:
             with temporary.open('wb') as stream:
                 np.save(stream, np.asarray(cloud.normals)[:len(core)])
             temporary.replace(path)
-        return np.load(path, mmap_mode='r')
+        # This array is retained by the map index. Own the bytes so every tile
+        # does not also retain an open OS descriptor for the whole sequence.
+        return np.load(path)
 
     def align(self,points,initial,iterations=RECOVERY_ITERATIONS,capture_information=False,
               distances=RECOVERY_DISTANCES):

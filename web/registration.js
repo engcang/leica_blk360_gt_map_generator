@@ -371,14 +371,18 @@ async function refreshRegistration()
                 element('registration-jobs').append(empty);
             }
         }
-        if (visible_jobs.some(job => job.status === 'running'))
+        if (visible_jobs.some(job => job.status === 'running') || (runtime.status === 'running' && !registration_state.log_job_id))
+        {
             latest_worker_log = registration_state.log || 'Waiting for worker output.';
+            updateWorkerLog('registration-log', {key: registration_state.log_job_id || 'runtime', url: registration_state.log_url, tail: registration_state.log});
+        }
         else if (registration_state.log && latest_worker_log !== 'No active registration.' &&
-            (registration_state.log_job_id === undefined || visible_jobs.some(job => job.id === registration_state.log_job_id)))
+            (registration_state.log_job_id === undefined || (!registration_state.log_job_id && worker_logs.get('registration-log')?.key === 'runtime') ||
+                visible_jobs.some(job => job.id === registration_state.log_job_id)))
+        {
             latest_worker_log = registration_state.log;
-        const log = element('registration-log');
-        if (log.textContent !== latest_worker_log) log.textContent = latest_worker_log;
-        log.scrollTop = log.scrollHeight;
+            updateWorkerLog('registration-log', {key: registration_state.log_job_id || 'runtime', url: registration_state.log_url, tail: registration_state.log});
+        }
         if (typeof refreshAdditional === 'function') refreshAdditional();
         if (registration_state.storage_error) notice(registration_state.storage_error, true);
     }

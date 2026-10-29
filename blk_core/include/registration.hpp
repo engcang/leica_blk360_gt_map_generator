@@ -19,6 +19,7 @@
 #include "project.hpp"
 #include "placement.hpp"
 #include "worker_process.hpp"
+#include "worker_log.hpp"
 
 namespace blk_core
 {
@@ -302,8 +303,22 @@ namespace blk_core
                     }
                 }
                 result["log"] = readLog(report / "worker.log");
+                result["log_url"] = "registration/log/" + (active_id_.empty() ? std::string("runtime") : active_id_) + (active_export_ ? "?export=1" : "");
             }
             return result;
+        }
+
+        nlohmann::json logPage(const std::string &id, bool exported, const std::string &before, const std::string &after)
+        {
+            std::filesystem::path path;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                const auto &job = id == "runtime" ? state_.at("runtime") : findJob(state_, id);
+                const auto &entry = exported ? job.at("export") : job;
+                const auto report = entry.value("report_directory", "");
+                if (!report.empty()) path = std::filesystem::u8path(report) / "worker.log";
+            }
+            return workerLogPage(path, before, after);
         }
 
         void setup(const nlohmann::json &_body)
@@ -1147,22 +1162,7 @@ namespace blk_core
 
         static std::string readLog(const std::filesystem::path &_path)
         {
-            std::ifstream stream(_path, std::ios::binary | std::ios::ate);
-            if (!stream)
-            {
-                return "";
-            }
-            const auto length = std::min<std::streamoff>(stream.tellg(), 12000);
-            stream.seekg(-length, std::ios::end);
-            std::string result(static_cast<std::size_t>(length), '\0');
-            stream.read(result.data(), length);
-            //Codex: A tail may begin in the middle of a UTF-8 character; start at the next complete line.
-            if (stream.tellg() > length)
-            {
-                const auto newline = result.find('\n');
-                result = newline == std::string::npos ? "" : result.substr(newline + 1);
-            }
-            return result;
+            return workerLogPage(_path, "", "", 12000).at("text").get<std::string>();
         }
 
         static nlohmann::json &findJob(nlohmann::json &_state,

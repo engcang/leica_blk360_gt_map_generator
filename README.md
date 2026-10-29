@@ -39,6 +39,7 @@
 ## Usage
 
 - **Tabs:** Convert (default), View saved point clouds, Register, Additional Register, Generate trajectory.
+- **Worker logs:** scroll up to read earlier output; older entries load automatically. Scroll to the bottom to follow new output again.
 - **Selections:**
   - Choose PLY files or a folder each time; viewing/registration selections are not restored.
   - View files in place without a library cache.
@@ -166,6 +167,7 @@
   - Keep original PLYs at their recorded paths.
   - From a disconnected result, click **Add scans to chunks**.
 - **Inputs:** add new PLYs or a folder; choose a separate output folder.
+  - Default: `additional/` inside the selected reference result folder; change it before arranging if needed.
 - **Optional placement:** **Arrange reference and scans**.
   - Reference remains fixed.
   - With disconnected chunks, the first chunk anchors the frame; other chunks move rigidly to connect through new scans.
@@ -197,15 +199,20 @@
   - Use every available scan; no fixed 0.1 s selection interval. Unsupported timestamps remain explicitly skipped.
   - **CPU threads:** total batch budget; Auto adapts parallel sequences and per-sequence threads to CPU and available memory.
   - KISS initialization → 1 cm Open3D point-to-plane + Tukey localization → recovery of rejected intervals.
+    - Initialize with short scan windows; validate supplied transforms and fresh KISS candidates with independent 1 cm TLS fits.
     - Track from the last accepted pose using SLAM relative motion; KISS is not repeated for every scan.
   - Every accepted pose passes 1 cm fitting and held-out validation; imported baseline poses are initial guesses for the same refinement.
   - Recovery: reuse or initialize the end pose → reverse tracking → local submap fitting for remaining gaps.
+    - Restart long untracked gaps from independently validated windows; try bounded local drift capture before KISS.
   - Continue geometrically supported iteration-limited fits before trying submaps; preserve the same validation.
   - Local submaps: 2 / 6 s windows, initialized from nearby accepted poses and the original map alignment.
   - Screen submap proposals at 10 cm, refine the full submap at 1 cm, then refine and validate each recovered scan at 1 cm. Stop when local submap recovery fails.
   - KISS remains part of initial map alignment and independent end initialization; it is not a fallback after local recovery.
   - Save completed forward/reverse checkpoints for reuse before local submaps.
   - Validate recovered poses on the original 1 cm map; check existing and recovered poses against chronological relative motion.
+    - Surface RMS: below 5 cm; context-supported poses require below 3 cm and stronger close-distance TLS overlap.
+    - Check both held-out geometry and directions constrained by the actual Tukey-weighted fit; neighboring partial views cannot recursively certify one another.
+    - Gap motion bounds grow with measured travel and elapsed time; no fixed 50 cm / 10° correction cap.
     - Check across missing GT intervals when input odometry remains continuous; revalidate saved anchors before reuse.
   - Seed checks withhold the anchor scan and require agreement from at least two other scans.
   - Reuse original 1 cm map search indices across scans; CPU and cache budgets adapt to available resources.
@@ -219,6 +226,7 @@
   - Bounded GPU uploads for large maps; screenshot export retained.
 - **Files:** `ground_truth_trajectory.tum` beside each sequence's inputs.
   - `.ground_truth/` stores resumable work, quality records, the viewer, and 10 cm display maps.
+  - During generation: `ground_truth_trajectory.partial.tum` and an **In progress** trajectory preview; the final TUM and generated map appear after recovery finishes.
   - Original scanner maps, scans, and odometry files remain unchanged.
 - **View results:** explicitly choose a sequence/result folder, a parent containing several results, or individual TUM files.
   - Show generated GT and detected odometry; saved results also include their reconstructed maps.

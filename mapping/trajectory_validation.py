@@ -9,10 +9,10 @@ import bisect
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from trajectory_temporal import motion_limits, continuous_estimate
+from trajectory_temporal import motion_limits, bridge_limits, continuous_estimate
 from trajectory_io import PoseGap
 
-VALIDATION_PROTOCOL = 'independent-map-context-v2'
+VALIDATION_PROTOCOL = 'direct-tls-evidence-v3'
 CONTEXT_RADIUS_S = 1.
 CONTEXT_MIN_SCANS = 2
 LOW_OVERLAP_CONTEXT = .65
@@ -22,6 +22,41 @@ SUPPORT_CELL_M = .5
 MIN_PRINCIPAL_SPAN_M = .5
 INFORMATION_RELATIVE_EIGENVALUE = 1e-3
 INFORMATION_ABSOLUTE_EIGENVALUE = 1e-5
+MAX_PLANE_RMS_M = .05
+CONTEXT_MAX_PLANE_RMS_M = .03
+MIN_MAP_COVERAGE = .20
+
+
+def distance_evidence(dist):
+    """Measure close TLS overlap with all query points in the denominator."""
+    dist = np.asarray(dist)
+    inliers = dist[dist < .20]
+    count = len(inliers)
+    return dict(coverage_5cm=float(np.mean(dist < .05)) if len(dist) else 0.,
+                coverage_10cm=float(np.mean(dist < .10)) if len(dist) else 0.,
+                coverage_20cm=float(count/len(dist)) if len(dist) else 0.,
+                inlier_precision_5cm=float(np.mean(inliers < .05)) if count else 0.,
+                inlier_precision_10cm=float(np.mean(inliers < .10)) if count else 0.)
+
+
+def context_map_supported(q):
+    # Fail closed on old measurements. Neighbors cannot manufacture TLS evidence
+    # or lower the residual/overlap requirements for the candidate itself.
+    return bool(q.get('context_map_supported', False))
+
+
+def validate_optimizer(q, info):
+    """Broad validation matches cannot fill a direction missing in the fit."""
+    actual = info.get('optimizer_information') or {}
+    rank = actual.get('observable_directions', 0)
+    q['optimizer_observable_directions'] = rank
+    if rank < q.get('observable_directions', 0):
+        H = np.asarray(actual.get('scaled_information_matrix', np.zeros((6,6))))
+        _, weak, _ = observability(H)
+        q.update(observable_directions=rank, weak_directions=weak.T.tolist())
+        if q.get('geometry_supported'):
+            q.update(accepted=False, needs_context=True, reason='weak_directions')
+    return q
 
 
 def observability(information):
@@ -53,15 +88,17 @@ def motion_agrees(a, b, source):
     expected = A @ np.linalg.inv(F[0]) @ F[1]
     distance = float(np.linalg.norm(B[:3, 3]-expected[:3, 3]))
     angle = float(np.rad2deg(Rotation.from_matrix(expected[:3, :3].T@B[:3, :3]).magnitude()))
-    limit = motion_limits(F[0], F[1], stamps[1]-stamps[0])
+    limit = (bridge_limits(source, *stamps) if abs(stamps[1]-stamps[0]) > .5
+             else motion_limits(F[0], F[1], stamps[1]-stamps[0]))
     return distance <= limit[0] and angle <= limit[1]
 
 
 def map_rooted(q):
     context = q.get('context_validation', {})
-    return bool(q.get('accepted') and (q.get('reason') == 'geometry_pass'
-                or context.get('shared_transform_fitted')
-                or context.get('map_anchor_index') is not None))
+    strong = (q.get('geometry_supported') and q.get('coverage_20cm',0) >= LOW_OVERLAP_CONTEXT
+              and q.get('inlier_precision_5cm',0) >= .65 and q.get('inlier_precision_10cm',0) >= .90)
+    return bool(q.get('accepted') and ((q.get('reason') == 'geometry_pass' and strong)
+                or (context_map_supported(q) and context.get('shared_transform_fitted'))))
 
 
 def confirm_partial_views(rows, source, reference=None):
@@ -90,11 +127,11 @@ def confirm_partial_views(rows, source, reference=None):
                 continue
             if abs(q['timestamp']-expected) > 1e-6:
                 q.update(accepted=False, reason='scan_timestamp_mismatch')
-    eligible = [q for q in rows if raw_geometry_supported(q)
+    eligible = [q for q in rows if raw_geometry_supported(q) and context_map_supported(q)
                 and q.get('observable_directions') == 6]
     eligible.sort(key=lambda q: q['timestamp'])
     stamps = np.array([q['timestamp'] for q in eligible])
-    roots = [q for q in eligible if map_rooted(q)]
+    roots = [q for q in rows if raw_geometry_supported(q) and map_rooted(q)]
     if reference is not None and map_rooted(reference):
         roots.append(reference)
     roots.sort(key=lambda q:q['timestamp'])
@@ -124,8 +161,7 @@ def confirm_partial_views(rows, source, reference=None):
                          witness_timestamps=[a['timestamp'], b['timestamp']],
                          shared_transform_fitted=False, map_anchor_index=anchor['index']))
             changed.append(q['index'])
-            at = bisect.bisect_left(root_stamps, q['timestamp'])
-            roots.insert(at, q); root_stamps.insert(at, q['timestamp'])
+            # Promoted partial views are never new roots for further votes.
             break
     return changed
 
@@ -148,7 +184,7 @@ def jointly_observable(qualities, poses, anchor, *, shared_transform_fitted, min
     """Weak poses require an actual common-transform geometric fit first."""
     if not shared_transform_fitted or len(qualities) < minimum_scans:
         return dict(accepted=False, reason='shared_geometric_fit_required')
-    if not all(q.get('geometry_supported') for q in qualities):
+    if not all(q.get('geometry_supported') and context_map_supported(q) for q in qualities):
         return dict(accepted=False, reason='insufficient_independent_geometry')
     information = joint_information(qualities, poses, anchor)
     values, weak, rank = observability(information)

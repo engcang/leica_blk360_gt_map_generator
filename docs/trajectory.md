@@ -81,34 +81,45 @@
 ## Registration and recovery
 
 - **Initialization:** KISS at 30/50 cm, with complete scans withheld for validation.
-  - Select up to 24 scans evenly across the sequence; combine alternating scans in the SLAM frame for matching, and reserve the other scans for validation.
-  - Match the combined sparse cloud to the TLS map; select the candidate supported by the most validation scans. No averaging of per-scan transforms.
+  - Search short 2 / 6 s windows, starting near the beginning and trying later windows if necessary; avoid a rigid combination of drifted scans across the entire sequence.
+  - Withhold three complete scans from KISS training; individually refine them at 1 cm and verify direct TLS evidence and agreement within 15 cm / 3°.
+  - Validate supplied transforms by the same tests; reuse only a validated initialization bound to the job's input/map provenance.
+  - Weak individual geometry requires a full-rank shared training fit and independent held-out checks before initialization can pass.
   - Refine initialization candidates against the 10 cm index with point-to-plane ICP and a 5 cm Huber scale: 80 / 40 / 20 cm gates, up to 15 iterations per stage.
   - Optional JSON: `{"T_map_from_frontend": [[...], ...]}`.
   - The merged TLS map is already transformed; scanner poses are never applied again.
 - **Localization:** shared Open3D point-to-plane ICP + Tukey on 1 cm source points and original TLS tiles for every scan.
   - Predict from the previous accepted pose and SLAM relative motion; refine and validate before adopting the next pose.
+  - At startup or after a failed/missing scan, retain a prediction with strong direct TLS evidence. Otherwise, run inexpensive 10 cm coarse capture and check its TLS evidence before spending time on 1 cm fitting.
   - Imported baseline poses provide initial guesses and also undergo 1 cm refinement; coarse-only poses cannot become final output poses.
   - New forward-pass poses already verified at 1 cm are reused during recovery, followed by temporal checks.
   - Independent held-out scan points for quality checks.
-  - Geometric support: at least 80 planar correspondences, plane RMS < 8 cm, at least six occupied 50 cm support cells, and at least 50 cm span along two principal directions.
-  - Coverage below 65% requests additional context; it is not an overlap rejection threshold. No minimum coverage fraction is imposed on independently supported poses.
+  - Geometric support: at least 80 planar correspondences, plane RMS < 5 cm, at least six occupied 50 cm support cells, and at least 50 cm span along two principal directions.
+  - Direct overlap: at least 20% of held-out scan points within 20 cm of TLS; at least 70% of those matches within 10 cm. Record overlap at 5 / 10 / 20 cm.
+  - Coverage below 65% requests additional context. Context-supported poses require plane RMS < 3 cm, at least 65% of matched points within 5 cm, and at least 90% within 10 cm.
   - Partial views with six observable directions require two distinct neighboring scans within 1 s, each with its own converged full-rank map fit and consistent pairwise relative motion. Reuse existing fits rather than running extra ICP.
-    - Require a motion-consistent link to a separately accepted map anchor; low-overlap neighbors cannot establish a location by certifying one another.
+    - Require a motion-consistent link to a separately accepted map anchor; context-promoted partial views never become new roots for neighbor voting.
+    - Apply the same stricter direct TLS checks to the candidate, supporting scans, and shared submap training geometry.
   - A weak single-scan direction remains provisional until an actual shared submap fit and independent withheld geometry jointly constrain all six directions. SLAM relative motion contributes no geometric information to the rank test.
   - These support and information thresholds are engineering defaults, not sensor-noise-calibrated accuracy bounds.
   - Rotation/translation information scaled with a 5 m lever arm; weak eigenvectors retained in `quality.jsonl`.
+  - Inspect directions constrained by the actual Tukey-weighted optimizer as well as the held-out map geometry.
 - **Recovery order:** forward 1 cm → reverse 1 cm → local submaps → final validation and export.
   - Engine: Open3D point-to-plane ICP + Tukey, shared with the registration tabs.
   - Correspondence gates: 80 / 30 / 10 cm; Tukey scales: 10 / 10 / 3.33 cm.
   - Individual fits: 60 iterations per gate; geometrically supported iteration-limit results can continue for 180 iterations per gate.
   - Reverse tracking reuses an accepted end pose. Otherwise, independently initialize end windows with KISS, then track backwards; try earlier windows if the last window fails.
+    - If tracking stops inside a gap of at least 30 s, initialize another window and continue backwards, even when a later accepted pose exists.
+    - Before KISS, rank local translation/yaw proposals within ±8 m and ±5° using a 40 cm training cloud and the reusable parallel KD-tree. Withhold the anchor and validation scans from proposal scoring.
+    - Refine both local and KISS proposals on the 10 cm training submap before independent 1 cm fitting. Require at least three agreeing TLS-supported scans; weak-direction support retains the stricter shared-fit checks.
+    - Stop a candidate immediately when its anchor fails original-map geometry or fine convergence.
     - Forward/reverse tracking predicts from the last accepted pose and the SLAM relative transform. KISS is not called for every scan.
     - End initialization uses 2 / 4 / 6 s windows and 30 / 50 / 8 cm KISS resolutions, nearby regions before the whole map.
     - Its independent scan checks and conditional leave-one-scan-out stability checks are retained.
   - Local submaps use 2 / 6 s windows, up to 11 / 21 scans, and the preceding/following accepted poses plus the original alignment as initial guesses.
     - Rank supplied guesses and 10 cm coarse refinements before dense fitting; merge proposals within 1 cm / 0.1°.
-    - Refine the full 1 cm submap at the final 10 cm correspondence gate for up to 60 iterations. Continue for up to 180 additional iterations only when map geometry and anchor agreement support the unfinished fit.
+    - Check direct TLS evidence at the proposed position before fitting the dense training submap.
+    - Refine the full 1 cm submap at the final 10 cm correspondence gate for up to 60 iterations. Inspect up to 180 extra iterations in 60-iteration blocks; stop if held-out support fails or capped-distance cost stops improving. A plateau remains rejected.
     - Reject coarse proposals outside the temporal anchor bounds plus a 20 cm / 3° capture margin before dense fitting.
     - Withhold the anchor and complete validation scans; require independent geometry and consistent temporal motion.
     - Stop dependent validation once convergence, nearby-anchor agreement, or shared geometric support fails. Skip dense fitting when nearby-anchor constraints cannot both be satisfied.
@@ -119,6 +130,8 @@
   - Exact scan/timestamp matching, competing-candidate checks, and temporal auditing apply before export.
     - Missing GT samples do not disconnect continuous odometry. Check relative motion across those gaps; only actual input-trajectory gaps split the audit.
     - Allow accumulated gap drift using measured path length and elapsed time; rank conflicting chains by held-out capped-distance support.
+      - Up to 0.5 s: translation bound `0.15 + 0.03 × travel + 0.005 × elapsed` metres; rotation bound `3 + 0.1 × elapsed` degrees.
+      - Longer gaps: `0.25 + 0.10 × travel + 0.02 × elapsed` metres; `3 + 0.5 × elapsed` degrees. No fixed 50 cm / 10° cap.
     - Revalidate saved poses before using them as anchors, including poses accepted during forward/reverse tracking.
   - CPU/memory-aware caches reuse original TLS tiles, normals, exact correspondence indices, partitions, and identical fitting requests.
   - C++/OpenMP correspondence queries use persistent nanoflann indices and reusable buffers; optimizer reductions remain ordered.
@@ -136,6 +149,7 @@
 
 - **Initial fitting only:** `trajectory_worker.py --config CONFIG --report REPORT --baseline-only`.
   - Saves a completed, hashed `baseline/status.json`; reports `baseline_ready`, with recovery pending.
+  - Publish partial TUM and viewer snapshots during forward fitting, at most once per minute plus the completed baseline.
 - **Continue recovery:** same config with `--recovery-only`.
   - Verify the completed baseline and reuse the hashed tracking checkpoint when available; recheck its acceptance decisions.
   - Preserve legacy `tracking/`; write updated connected-motion tracking to `tracking_connected_v2/`.
@@ -143,6 +157,7 @@
   - Publish a trajectory preview against the scanned map during recovery; reconstruct the generated map after recovery finishes.
 - **Revalidate previous results:** `--recovery-only --recovery-name recovery_connected_v2 --revalidate-from recovery_final`.
   - Verify scan, map, pose, and source hashes; preserve the previous result folder.
+  - Require the same TLS validation protocol; changed acceptance criteria require fresh fits.
   - Reuse completed 1 cm geometric fits and exact request caches; recompute acceptance and recover newly rejected intervals.
 - **Batch scheduling:** `scripts/run_trajectory_campaign.py --batch BATCH_DIRECTORY`.
   - Read `plan.json`; finish initial fitting before launching recovery.
@@ -175,9 +190,11 @@
 - **Public trajectory:** `ground_truth_trajectory.tum` in the sequence folder.
   - Supporting files under `.ground_truth/`; CLI jobs without `sequence_directory` publish in their chosen output directory.
   - Internal `candidate_trajectory.tum` files remain resumable checkpoints.
+  - `ground_truth_trajectory.partial.tum` and **In progress** viewer layers expose partial fitting results; remove the partial TUM when the final result is published.
 - **Diagnostics:** `baseline/`, `recovery/quality.jsonl`, `recovery/attempts.jsonl`, `input_quality.json`, `provenance.json`.
 - **Reusable tracking:** `tracking/quality.jsonl`, `tracking/candidate_trajectory.tum`, and their hashed completion receipt.
 - **Live job state:** monitored jobs read `job_status.json`; a saved viewer can remain available while recovery is running or queued.
+  - Opening a parent folder includes unfinished monitored jobs even before their first viewer snapshot or final TUM exists.
   - Saved-result imports without live status are labeled `saved`; only a completed worker is labeled `completed`.
   - Background controllers register configurations through `/api/trajectory/monitor` and refresh status timestamps; missing or stale progress is shown as interrupted.
 - **Browser links:** keep the complete local URL, including `#` and its session key, when opening it in another browser.

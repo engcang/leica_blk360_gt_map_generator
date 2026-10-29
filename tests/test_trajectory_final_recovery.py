@@ -18,6 +18,52 @@ from trajectory_recovery import Recovery
 from trajectory_io import save_json
 
 
+class ReverseRestartTests(unittest.TestCase):
+    def recovery(self, count):
+        r = Recovery.__new__(Recovery)
+        r.rows_by_index = {i:dict(timestamp=i*.1) for i in range(count+1)}
+        r.poses = {count:np.eye(4)}
+        r.seed_fits, r.conflicted = {}, set()
+        r.certify_submap_pose = lambda *args: None
+        r.log = lambda record: None
+        r.seed_pose = lambda index, T: (T, dict(accepted=True))
+        return r
+
+    def test_later_anchor_does_not_prevent_restart_inside_long_gap(self):
+        r = self.recovery(1201)
+        def propagate(ids, seed, T, direction):
+            if direction == 'reverse_fine' and seed in (900,600):
+                return {i:(T,dict(accepted=True)) for i in ids if i >= seed-100}
+            return {}
+        def initialize(index, allow_global=True):
+            return np.eye(4) if index in (900,600) else None
+        with patch.object(r,'propagate',side_effect=propagate), \
+             patch.object(r,'initialize_tail',side_effect=initialize) as locate:
+            forward, backward = r.reverse_block(list(range(1201)),1201)
+        attempted = [call.args[0] for call in locate.call_args_list]
+        self.assertEqual(attempted[0],900)
+        self.assertIn(600,attempted)
+        self.assertIn(800,backward)
+        self.assertIn(500,backward)
+        self.assertFalse(forward)
+
+    def test_short_gap_reuses_end_without_new_initialization(self):
+        r = self.recovery(10)
+        with patch.object(r,'propagate',return_value={}), \
+             patch.object(r,'initialize_tail') as locate:
+            r.reverse_block([7,8,9],10)
+        locate.assert_not_called()
+
+    def test_successful_reverse_does_not_repeat_localization(self):
+        r = self.recovery(1201)
+        poses = {i:(np.eye(4),dict(accepted=True)) for i in range(1201)}
+        with patch.object(r,'propagate',return_value=poses), \
+             patch.object(r,'initialize_tail') as locate:
+            _, backward = r.reverse_block(list(range(1201)),1201)
+        locate.assert_not_called()
+        self.assertEqual(len(backward),1201)
+
+
 @unittest.skipUnless(os.environ.get('BLK_REGISTRATION_EXECUTABLE'), 'Native registration executable required')
 class FinalRecoveryTests(unittest.TestCase):
     def test_completed_tracking_is_reused_without_any_refitting(self):
@@ -73,6 +119,14 @@ class FinalRecoveryTests(unittest.TestCase):
             new = root/'output/recovery_connected_v2'
             self.assertEqual((new/'candidate_trajectory.tum').read_bytes(), saved[previous/'candidate_trajectory.tum'])
             self.assertIn('revalidated_source', json.loads((new/'provenance.json').read_text()))
+            provenance_path = previous/'provenance.json'
+            old_provenance = json.loads(provenance_path.read_text())
+            old_provenance['validation']['context_protocol'] = 'old-lenient-validation'
+            provenance_path.write_text(json.dumps(old_provenance))
+            with self.assertRaisesRegex(ValueError, 'TLS validation changed'):
+                run(config, root/'old-protocol-report.json', recovery_only=True,
+                    recovery_name='recovery_incompatible', revalidate_from='recovery')
+            provenance_path.write_bytes(saved[provenance_path])
             (previous/'candidate_trajectory.tum').write_text('modified')
             with self.assertRaisesRegex(ValueError,'changed'):
                 run(config, root/'third-report.json', recovery_only=True,

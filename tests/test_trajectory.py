@@ -44,6 +44,20 @@ def fixture(root, count=8):
 
 
 class InputTests(unittest.TestCase):
+    def test_local_capture_finds_offset_outside_icp_gate(self):
+        from scipy.spatial import cKDTree
+        rng = np.random.default_rng(34)
+        source = rng.uniform(-2, 2, (1500, 3)).astype(np.float32)
+        shift = np.array([3., -2., 0.])
+        matcher = Matcher.__new__(Matcher)
+        matcher.tree = cKDTree(source+shift)
+        matcher.workers = 2
+        proposals = matcher.capture_candidates(source, np.eye(4), radius_m=4, count=5)
+        self.assertEqual(len(proposals), 5)
+        np.testing.assert_allclose(proposals[0][1][:3,3], shift)
+        self.assertLess(proposals[0][0], 1e-12)
+        self.assertTrue(all(abs(T[0,3]) <= 4 and abs(T[1,3]) <= 4 for _,T in proposals))
+
     def test_backend_switch_preserves_all_other_resume_guards(self):
         with tempfile.TemporaryDirectory() as folder:
             output = Path(folder)
@@ -226,9 +240,10 @@ class InputTests(unittest.TestCase):
             def pose(self, stamps):return np.tile(np.eye(4),(len(stamps),1,1))
         recovery.source=Source();recovery.poses={};recovery.quality={};recovery.quarantined=[]
         from point_to_plane import FINE_ENGINE
+        from trajectory_validation import VALIDATION_PROTOCOL
         recovery.baseline_is_fine=True
         for q in recovery.rows:
-            q.update(validation_map_voxel_m=.01, validation_protocol='independent-map-context-v2',
+            q.update(validation_map_voxel_m=.01, validation_protocol=VALIDATION_PROTOCOL,
                      fine=dict(engine=FINE_ENGINE, converged=True))
         recovery.keep_baseline()
         self.assertIn(2,recovery.quarantined);self.assertNotIn(2,recovery.poses)
@@ -364,7 +379,8 @@ class NativeTests(unittest.TestCase):
             with patch.object(FineMatcher, 'align', new=recorded):
                 run(config, root/'progress.json')
             quality = [json.loads(line) for line in (root/'output/recovery/quality.jsonl').read_text().splitlines()]
-            self.assertEqual(len(calls), 8)
+            # Three independent initialization checks precede the eight fits.
+            self.assertEqual(len(calls), 11)
             for q in quality:
                 self.assertTrue(q['accepted'], q)
                 if q['index'] == 0:
@@ -409,16 +425,11 @@ class NativeTests(unittest.TestCase):
             root = Path(folder); config = fixture(root, count=8)
             for path in (root/'scans').glob('*.npy'):
                 np.save(path, np.load(path)[:3500])
-            run(config, root/'progress.json')
-            quality = [json.loads(line) for line in (root/'output/recovery/quality.jsonl').read_text().splitlines()]
-            self.assertTrue(all(not q['accepted'] for q in quality))
-            self.assertEqual((root/'output/recovery/candidate_trajectory.tum').stat().st_size, 0)
-            attempts = [json.loads(line) for line in (root/'output/recovery/attempts.jsonl').read_text().splitlines()]
-            seeds = [q for q in attempts if q['stage'] == 'submap_seed']
-            self.assertTrue(seeds)
-            self.assertTrue(all(not q['accepted'] for q in seeds))
-            self.assertTrue(all(q.get('training_quality', {}).get('observable_directions',
-                q['fine']['optimizer_information']['observable_directions']) == 3 for q in seeds))
+            with self.assertRaisesRegex(ValueError, 'initial location'):
+                run(config, root/'progress.json')
+            diagnostics=json.loads((root/'output/baseline/alignment_diagnostics.json').read_text())
+            self.assertTrue(all(not q['validated'] for q in diagnostics['hypotheses']))
+            self.assertFalse((root/'output/baseline/initial_alignment.json').exists())
 
     def test_weak_shared_training_fit_cannot_borrow_rank_from_heldout_walls(self):
         from trajectory_worker import baseline
@@ -518,6 +529,23 @@ class NativeTests(unittest.TestCase):
                 self.assertEqual(q['validation_map_voxel_m'],.01)
                 self.assertGreaterEqual(q['validation_s'],0)
             np.testing.assert_allclose(np.loadtxt(root/'output/recovery/candidate_trajectory.tum'),expected,atol=1e-4)
+
+    def test_bad_supplied_initialization_is_replaced_by_verified_kiss_location(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder); config = fixture(root)
+            wrong = np.eye(4); wrong[0, 3] = 20
+            config['initial_alignment'] = wrong.tolist()
+            with patch.object(NativeSession, 'kiss', return_value=np.eye(4)) as kiss:
+                run(config, root/'report.json', baseline_only=True)
+            kiss.assert_called()
+            baseline = root/'output/baseline'
+            diagnostics = json.loads((baseline/'alignment_diagnostics.json').read_text())
+            self.assertFalse(diagnostics['hypotheses'][0]['validated'])
+            alignment = json.loads((baseline/'initial_alignment.json').read_text())
+            self.assertTrue(alignment['validated'])
+            self.assertTrue(alignment['origin'].startswith('kiss-'))
+            self.assertEqual(len(alignment['checks']), 3)
+            np.testing.assert_allclose(alignment['T_map_from_frontend'], np.eye(4), atol=1e-4)
 
     def test_corrupt_accepted_timestamp_is_removed_before_checkpoint(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -659,7 +687,7 @@ class NativeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder); config = fixture(root)
             config.pop('initial_alignment')
-            with patch('trajectory_worker.initialize', side_effect=ValueError('initialization failed')):
+            with patch('trajectory_initialization.initialize', side_effect=ValueError('initialization failed')):
                 with self.assertRaisesRegex(ValueError, 'initialization failed'):
                     run(config, root/'progress.json')
             alignment = root/'initial.json'
@@ -715,10 +743,10 @@ class NativeTests(unittest.TestCase):
             recovered=output/'resume-test'
             r=Recovery(baseline,recovered,cache,source,2,lambda text:None)
             native_align=r.fine.align;calls=[]
-            def interrupted(points,initial):
+            def interrupted(points,initial,**kwargs):
                 calls.append(1)
                 if len(calls)>1:raise OSError('simulated interruption')
-                return native_align(points,initial)
+                return native_align(points,initial,**kwargs)
             r.fine.align=interrupted
             try:
                 with self.assertRaisesRegex(OSError,'simulated'):r.run()

@@ -37,8 +37,6 @@ function selectTab(name, focus = false)
         if (active && focus) tab.focus();
     }
     element('open-folder').hidden = name !== 'convert';
-    if (name === 'additional') element('additional-log').scrollTop = element('additional-log').scrollHeight;
-    if (name === 'register') element('registration-log').scrollTop = element('registration-log').scrollHeight;
 }
 for (const tab of document.querySelectorAll('[role="tab"]'))
 {
@@ -88,6 +86,94 @@ async function api(path, body)
         throw error;
     }
     return result;
+}
+
+const worker_logs = new Map();
+
+function updateWorkerLog(id, {key, url, tail = '', empty = 'Waiting for worker output.'})
+{
+    const node = element(id);
+    let state = worker_logs.get(id);
+    if (!state || state.key !== key || state.url !== url)
+    {
+        state = {key, url, follow: true, top: 0, start: null, end: null, busy: false, hasText: false, lastTail: ''};
+        worker_logs.set(id, state);
+        node.textContent = empty;
+        node.onscroll = () =>
+        {
+            if (!node.clientHeight) return;
+            state.top = node.scrollTop;
+            state.follow = node.scrollHeight - node.clientHeight - node.scrollTop <= 2;
+            if (!state.follow && node.scrollTop < 80) loadWorkerLog(id, state, true);
+        };
+        if (!node.logResizeObserver)
+        {
+            node.logResizeObserver = new ResizeObserver(() =>
+            {
+                const current = worker_logs.get(id);
+                if (current && node.clientHeight)
+                    node.scrollTop = current.follow ? node.scrollHeight : current.top;
+            });
+            node.logResizeObserver.observe(node);
+        }
+    }
+    if (url) { loadWorkerLog(id, state); return; }
+    // An already-running older server can still preserve newly received log history.
+    if (!tail || tail === state.lastTail) return;
+    let overlap = Math.min(state.lastTail.length, tail.length);
+    while (overlap && !state.lastTail.endsWith(tail.slice(0, overlap))) --overlap;
+    state.lastTail = tail;
+    const addition = tail.slice(overlap);
+    if (addition) appendWorkerLog(id, state, addition, false);
+}
+
+function appendWorkerLog(id, state, text, older)
+{
+    const node = element(id), visible = node.clientHeight > 0;
+    const height = node.scrollHeight, top = visible ? node.scrollTop : state.top;
+    if (!state.hasText) node.textContent = '';
+    if (older) node.prepend(document.createTextNode(text));
+    else node.append(document.createTextNode(text));
+    state.hasText = true;
+    if (visible)
+    {
+        node.scrollTop = state.follow ? node.scrollHeight : top + (older ? node.scrollHeight - height : 0);
+        state.top = node.scrollTop;
+    }
+}
+
+async function loadWorkerLog(id, state, older = false)
+{
+    const node = element(id);
+    if (!state.url || state.busy || (older && !state.start)) return;
+    state.busy = true;
+    let loaded = false;
+    const position = older ? `before=${state.start}` : state.end === null ? '' : `after=${state.end}`;
+    try
+    {
+        const page = await api(state.url + (position ? `${state.url.includes('?') ? '&' : '?'}${position}` : ''));
+        if (worker_logs.get(id) !== state) return;
+        if (page.reset)
+        {
+            node.textContent = ''; state.hasText = false; state.start = null; state.end = null;
+        }
+        if (state.start === null || older) state.start = page.start;
+        if (state.end === null || !older) state.end = page.end;
+        if (page.text) appendWorkerLog(id, state, page.text, older && !page.reset);
+        node.removeAttribute('title');
+        loaded = true;
+    }
+    catch (error)
+    {
+        // Keep the displayed history and retry on the next poll or upward scroll.
+        node.title = error.message;
+    }
+    finally
+    {
+        state.busy = false;
+        if (loaded && worker_logs.get(id) === state && node.clientHeight && !state.follow && node.scrollTop < 80 && state.start)
+            loadWorkerLog(id, state, true);
+    }
 }
 
 function action(id, handler)

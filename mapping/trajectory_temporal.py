@@ -12,7 +12,10 @@ def motion_error(previous, current, previous_estimate, current_estimate):
 
 def motion_limits(previous_estimate, current_estimate, elapsed):
     travel = float(np.linalg.norm(current_estimate[:3, 3]-previous_estimate[:3, 3]))
-    return min(.5, .15+.03*travel+.005*abs(elapsed)), min(10., 3.+.1*abs(elapsed))
+    elapsed = abs(elapsed)
+    if elapsed <= .5+1e-6:
+        return .15+.03*travel+.005*elapsed, 3.+.1*elapsed
+    return .25+.10*travel+.02*elapsed, 3.+.5*elapsed
 
 
 def continuous_estimate(estimate, a, b):
@@ -39,7 +42,9 @@ def bridge_limits(estimate, a, b):
                 np.diff(trajectory.matrices[:,:3,3],axis=0),axis=1))]
         travel = float(abs(np.diff(np.interp([a,b],times,trajectory._motion_arc))[0]))
     elapsed = abs(b-a)
-    return .15+.03*travel+.005*elapsed, 3.+.1*elapsed
+    if elapsed <= .5+1e-6:
+        return .15+.03*travel+.005*elapsed, 3.+.1*elapsed
+    return .25+.10*travel+.02*elapsed, 3.+.5*elapsed
 
 
 def screen_temporal(poses, timestamps, estimate, gap_s=.5, qualities=None):
@@ -90,7 +95,7 @@ def screen_temporal(poses, timestamps, estimate, gap_s=.5, qualities=None):
         else:
             # Allow accumulated odometry drift across missing fits, rather than
             # either ignoring the bridge or imposing the short-step 50 cm cap.
-            limit = (.15+.03*abs(arc[b]-arc[a])+.005*elapsed, 3.+.1*elapsed)
+            limit = (.25+.10*abs(arc[b]-arc[a])+.02*elapsed, 3.+.5*elapsed)
         return distance <= limit[0] and angle <= limit[1], (distance,angle), limit
 
     for lo,hi in zip(cuts[:-1],cuts[1:]):

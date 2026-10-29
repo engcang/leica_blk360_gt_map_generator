@@ -72,8 +72,13 @@ def main():
                 page.wait_for_function('!document.querySelector("#browser-go").disabled')
                 page.locator('#use-folder').click(); page.wait_for_function('additional_ids.length === 2')
                 assert page.locator('#additional-scans').inner_text().index('Setup98') < page.locator('#additional-scans').inner_text().index('Setup97')
+                page.wait_for_function('!additional_restoring && additional_poses.length === 3')
+                assert page.locator('#additional-output').input_value()==str(old/'additional')
+                assert page.locator('#additional-arrange').is_enabled()
                 page.locator('#additional-output').fill(str(output)); page.locator('#additional-name').click()
                 page.wait_for_function('additional_poses.length === 3 && !additional_restoring')
+                page.evaluate('path=>loadAdditionalReference(path)',str(source))
+                assert page.locator('#additional-output').input_value()==str(output)
                 assert page.locator('#additional-start').is_enabled()
                 with page.expect_popup() as popup: page.locator('#additional-arrange').click()
                 editor=popup.value; editor.on('pageerror',lambda error:errors.append(str(error)))
@@ -118,7 +123,7 @@ def main():
                 assert editor.locator('#x').is_disabled()
                 assert page.locator('#additional-log').evaluate('(e)=>e.closest("details")===null')
                 assert page.locator('#additional-log').evaluate('(e)=>e.scrollHeight>e.clientHeight && Math.abs(e.scrollHeight-e.clientHeight-e.scrollTop)<3')
-                screenshot=repo/'build/placement-fix/additional-tab.png'
+                screenshot=repo/'build/notes/placement-fix/additional-tab.png'
                 page.screenshot(path=str(screenshot),full_page=True)
                 assert source.read_bytes()==before
                 # Attempt to use the old output is rejected, as is a modified reference digest.

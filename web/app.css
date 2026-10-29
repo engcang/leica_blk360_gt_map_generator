@@ -790,6 +790,7 @@ dialog::backdrop
 {
     max-height: 300px;
     overflow: auto;
+    overflow-anchor: none;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     padding: 12px;

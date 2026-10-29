@@ -19,12 +19,11 @@ from scipy.spatial.transform import Rotation
 from trajectory_io import Trajectory, ScanSource, PoseGap, digest, rigid, save_json, transform, urdf_transform
 from trajectory_geometry import Matcher, voxel, ply_vertices
 from trajectory_map import prepare_map, reconstruct_maps
-from trajectory_native import NativeSession
 from point_to_plane import FINE_ENGINE
 from trajectory_validation import (confirm_partial_views, jointly_observable, VALIDATION_PROTOCOL)
-from trajectory_recovery import Recovery, difference, pose, fit_scan
+from trajectory_recovery import Recovery, difference, pose, fit_scan, capture_scan
 from trajectory_fine import FineMatcher
-from trajectory_temporal import screen_temporal, motion_limits
+from trajectory_temporal import screen_temporal, motion_limits, bridge_limits
 
 
 def record_execution(output, workers):
@@ -143,53 +142,16 @@ def checkpoint_baseline(output, rows):
     temporary.replace(output/'candidate_trajectory.tum')
 
 
-def initialize(config, source, matcher, cache, output, indices, workers, progress):
-    path = output/'initial_alignment.json'
-    if path.exists():
-        return rigid(json.loads(path.read_text())['T_map_from_frontend'])
-    if config.get('initial_alignment'):
-        value = config['initial_alignment']
-        if isinstance(value, str):
-            value = json.loads(Path(value).read_text())
-        A = rigid(value.get('T_map_from_frontend', value) if isinstance(value, dict) else value)
-        save_json(path, dict(T_map_from_frontend=A.tolist(), method='supplied'))
-        return A
-    sample_ids = indices[np.unique(np.linspace(0, len(indices)-1, min(24, len(indices))).astype(int))]
-    scans = list(source.iter_scans(scan_indices=sample_ids))
-    if len(scans) < 5:
-        raise ValueError('Automatic initialization needs at least five supported scans')
-    # Whole scans are withheld from global matching, then checked independently.
-    train, held = scans[::2], scans[1::2]
-    cloud = voxel(np.concatenate([transform(voxel(s.points, .2), s.frontend_T) for s in train]), .2)
-    hypotheses = []
-    with NativeSession(cache) as native:
-        for resolution in (.3, .5):
-            progress(f'Initializing trajectory with KISS-Matcher at {resolution:g} m')
-            try:
-                A = native.kiss(voxel(cloud, resolution), voxel(matcher.p, resolution), resolution, workers)
-                A = matcher.icp(cloud, A)
-                quality = [matcher.quality(voxel(s.points, .1), A@s.frontend_T) for s in held]
-                supported = [(q, A@s.frontend_T) for q, s in zip(quality, held) if q.get('geometry_supported')]
-                joint = jointly_observable([q for q, _ in supported], [T for _, T in supported], A,
-                                           shared_transform_fitted=True, minimum_scans=2)
-                count = len(supported) if joint['accepted'] else 0
-                hypotheses.append(dict(passes=count, T_map_from_frontend=A.tolist(), quality=quality,
-                                       initialization_validation=joint))
-            except (ValueError, RuntimeError) as exc:
-                hypotheses.append(dict(passes=0, error=str(exc)))
-    save_json(output/'alignment_diagnostics.json', {'hypotheses': hypotheses})
-    best = max(hypotheses, key=lambda h: h['passes'])
-    if best['passes'] < 2:
-        raise ValueError('Automatic initialization failed; supply an initial TLS-from-estimate transform and resume')
-    save_json(path, best)
-    return rigid(best['T_map_from_frontend'])
-
-
-def baseline(config, source, cache, output, indices, workers, progress):
+def baseline(config, source, cache, output, indices, workers, progress, on_checkpoint=None):
     output.mkdir(exist_ok=True)
     matcher = Matcher(cache, workers)
-    A = initialize(config, source, matcher, cache, output, indices, workers, progress)
-    del matcher
+    from trajectory_initialization import initialize as validated_initialize
+    fine = FineMatcher(cache, workers, result_cache=output/'fine_requests')
+    try:
+        A = validated_initialize(config, source, matcher, fine, output, indices, workers, progress)
+    except BaseException:
+        fine.close()
+        raise
     rows, path = [], output/'forward_attempts.jsonl'
     snapshot = output/'quality.jsonl'
     if not path.exists() and snapshot.exists():
@@ -212,19 +174,22 @@ def baseline(config, source, cache, output, indices, workers, progress):
     last_T = np.asarray(accepted[-1]['T_map_from_base']) if accepted else None
     last_F = source.pose([accepted[-1]['timestamp']])[0] if accepted else None
     last_quality = accepted[-1] if accepted else None
+    lost = not rows or not rows[-1].get('accepted')
     with ExitStack() as resources:
         stream = resources.enter_context(path.open('a', buffering=1))
-        fine = FineMatcher(cache, workers, result_cache=output/'fine_requests')
         resources.callback(fine.close)
         for scan in source.iter_scans(scan_indices=[i for i in indices if int(i) not in done]):
             initial = A@scan.frontend_T if last_T is None else last_T@np.linalg.inv(last_F)@scan.frontend_T
-            T, q = fit_scan(fine, scan, initial)
+            failed = None
+            if lost or last_quality is None or scan.timestamp-last_quality['timestamp'] > .5:
+                captured, failed = capture_scan(matcher,fine,scan,initial)
+            else:
+                captured = initial
+            T, q = fit_scan(fine, scan, captured) if failed is None else (captured,failed)
             correction = difference(T, initial)
             q['stage'] = 'forward_fine'
-            if correction[0] > .5 or correction[1] > 10:
-                q.update(accepted=False, reason='unverified_large_correction')
-            elif last_quality is not None:
-                limits = motion_limits(last_F, scan.frontend_T, scan.timestamp-last_quality['timestamp'])
+            if last_quality is not None:
+                limits = bridge_limits(source, last_quality['timestamp'], scan.timestamp)
                 if correction[0] > limits[0] or correction[1] > limits[1]:
                     q.update(accepted=False, reason='tracking_motion_inconsistent')
             accepted_count += int(q['accepted'])
@@ -243,13 +208,18 @@ def baseline(config, source, cache, output, indices, workers, progress):
                 last_F = source.pose([latest['timestamp']])[0]
                 last_quality = latest
             stream.write(json.dumps(q, allow_nan=False)+'\n')
+            lost = not q.get('accepted')
             if len(rows) % 50 == 0:
                 checkpoint_baseline(output, rows)
                 save_json(output/'input_quality.json', source.scan_quality)
                 progress(f'Localizing scans at 1 cm: {len(rows)}/{len(indices)}, {accepted_count} accepted')
+                if on_checkpoint is not None:
+                    on_checkpoint(A)
         fine.verify_unchanged()
     checkpoint_baseline(output, rows)
     save_json(output/'input_quality.json', source.scan_quality)
+    if on_checkpoint is not None:
+        on_checkpoint(A, force=True)
     return A
 
 
@@ -286,11 +256,21 @@ def export_viewer(config, source, trajectories, output, cache, A, progress, reco
     if any(abs(q['timestamp']-row[0]) > 1e-6 for q, row in zip(accepted, rows)):
         raise ValueError('Result scan/pose timestamps disagree')
     selections = {'tls_gt': {q['index']: pose(row) for q, row in zip(accepted, rows)}}
-    _, temporal_errors = screen_temporal(selections['tls_gt'], {q['index']:q['timestamp'] for q in accepted}, source,
+    screened, temporal_errors = screen_temporal(selections['tls_gt'], {q['index']:q['timestamp'] for q in accepted}, source,
                                         qualities={q['index']:q for q in accepted})
-    if temporal_errors:
+    if temporal_errors and not preview:
         raise ValueError('Result still contains inconsistent temporal motion; recover it before map export')
-    layers = [dict(key='tls_gt', label='Generated ground-truth trajectory', color='#FF9B54', rows=rows.tolist(),
+    if preview:
+        keep = np.array([q['index'] in screened for q in accepted], dtype=bool)
+        rows = rows[keep]
+        quality = [dict(q, accepted=False, reason='pending_temporal_validation')
+                   if q.get('accepted') and q['index'] not in screened else q for q in quality]
+        partial = output/'ground_truth_trajectory.partial.tum'
+        temporary = partial.with_suffix('.tum.pending')
+        np.savetxt(temporary, rows, fmt='%.9f')
+        temporary.replace(partial)
+    label = 'Generated ground-truth trajectory'+(' · In progress' if preview else '')
+    layers = [dict(key='tls_gt', label=label, color='#FF9B54', rows=rows.tolist(),
                    gap_s=max(float(config.get('max_pose_gap_s', .5)), 1.5*float(config.get('period_s', 0))))]
     indices = source.selection(float(config.get('period_s', 0)))
     colors = ['#5EC8DE', '#CB8CFF', '#FFB75E', '#8CDB9B']
@@ -323,10 +303,11 @@ def export_viewer(config, source, trajectories, output, cache, A, progress, reco
         trajectories=layers, gap_s=float(config.get('max_pose_gap_s', .5)),
         quality=[{k:q[k] for k in ('index','timestamp','accepted','reason','plane_rms_m','coverage_20cm','observable_directions') if k in q} for q in quality],
         input_quality=input_quality,
-        T_map_from_estimate=A.tolist(), trajectory_sha256=digest(result/'candidate_trajectory.tum')))
+        T_map_from_estimate=A.tolist(), trajectory_sha256=digest(partial if preview else result/'candidate_trajectory.tum')))
     if not preview:
         save_json(output/'products.json', products)
         publish_trajectory(config, result/'candidate_trajectory.tum', output)
+        (output/'ground_truth_trajectory.partial.tum').unlink(missing_ok=True)
 
 
 def publish_trajectory(config, source, output):
@@ -428,7 +409,13 @@ def run(config, report, inspect_only=False, baseline_only=False, recovery_only=F
         elif config.get('baseline_directory'):
             A = import_baseline(config['baseline_directory'], output/'baseline', source, binding)
         else:
-            A = baseline(config, source, cache, output/'baseline', indices, workers, progress)
+            last_forward_preview = [0.]
+            def forward_preview(alignment, force=False):
+                if force or time.monotonic()-last_forward_preview[0] >= 60:
+                    export_viewer(config, source, trajectories, output, cache, alignment, progress,
+                                  recovery_name='baseline', preview=True)
+                    last_forward_preview[0] = time.monotonic()
+            A = baseline(config, source, cache, output/'baseline', indices, workers, progress, forward_preview)
         source.verify_unchanged()
         if ready is None:
             ready = mark_baseline_ready(output, len(indices))

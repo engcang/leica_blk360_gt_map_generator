@@ -38,7 +38,10 @@ class StagedTrajectoryTests(unittest.TestCase):
             receipt=ready_baseline(out)
             self.assertEqual(receipt['accepted'],8)
             self.assertEqual(json.loads((root/'report.json').read_text())['status'],'baseline_ready')
-            self.assertFalse((out/'viewer.json').exists())
+            self.assertTrue(json.loads((out/'viewer.json').read_text())['preview'])
+            self.assertFalse((out/'ground_truth_trajectory.tum').exists())
+            np.testing.assert_allclose(np.loadtxt(out/'ground_truth_trajectory.partial.tum'),
+                                       np.loadtxt(out/'baseline/candidate_trajectory.tum'), atol=1e-8)
             saved={p:p.read_bytes() for p in (out/'baseline').glob('*') if p.is_file()}
             old=out/'recovery'; old.mkdir(); (old/'keep.txt').write_text('comparison result')
             with patch('trajectory_worker.baseline', side_effect=AssertionError('Baseline recomputed')):
@@ -47,6 +50,8 @@ class StagedTrajectoryTests(unittest.TestCase):
             self.assertEqual(saved,{p:p.read_bytes() for p in saved})
             self.assertEqual((old/'keep.txt').read_text(),'comparison result')
             self.assertTrue((out/'recovery_v12/candidate_trajectory.tum').exists())
+            self.assertFalse(json.loads((out/'viewer.json').read_text())['preview'])
+            self.assertFalse((out/'ground_truth_trajectory.partial.tum').exists())
             (out/'baseline/quality.jsonl').write_text('changed')
             with self.assertRaisesRegex(ValueError,'baseline changed'):
                 ready_baseline(out)
@@ -78,8 +83,8 @@ class StagedTrajectoryTests(unittest.TestCase):
                     quality=dict(supported,geometry_supported=geometric,accepted=geometric,
                                  reason='geometry_pass' if geometric else 'surface_residual')
                     with patch.object(r.fine,'align',side_effect=[
-                        (expected,dict(converged=False,convergence_reason='iteration_limit')),
-                        (expected,dict(converged=converged,convergence_reason='fitness_rmse' if converged else 'iteration_limit'))]) as align, \
+                        (expected,dict(converged=False,convergence_reason='iteration_limit',optimizer_information={'observable_directions':6})),
+                        (expected,dict(converged=converged,convergence_reason='fitness_rmse' if converged else 'iteration_limit',optimizer_information={'observable_directions':6}))]) as align, \
                          patch.object(r.fine,'quality',return_value=quality):
                         _,candidate=r.fit_continued(scan,expected)
                     self.assertEqual(candidate['accepted'],converged and geometric)

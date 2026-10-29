@@ -44,6 +44,36 @@ def source(count=10):
 
 
 class ContextValidationTests(unittest.TestCase):
+    def test_shared_bad_residuals_cannot_be_promoted_by_neighbor_votes(self):
+        q=plane_quality(coverage=.4)
+        # Enough broad support/rank, but 6cm residuals cannot pass the new
+        # direct map check, regardless of neighboring motion agreement.
+        rows=[candidate(i,dict(q,plane_rms_m=.06,context_map_supported=False)) for i in range(3)]
+        anchor=candidate(3,plane_quality())
+        self.assertEqual(confirm_partial_views(rows,source(),reference=anchor),[])
+        self.assertTrue(all(not row['accepted'] for row in rows))
+
+    def test_context_approvals_are_not_roots_for_an_unbounded_chain(self):
+        from trajectory_validation import map_rooted
+        q=candidate(0,plane_quality(coverage=.3))
+        q.update(accepted=True,reason='independent_neighbor_geometry',context_validation={'map_anchor_index':8})
+        self.assertFalse(map_rooted(q))
+
+    def test_tukey_fit_rank_cannot_be_supplied_by_broad_validation_matches(self):
+        from trajectory_validation import validate_optimizer
+        q=plane_quality()
+        H=np.diag([1.,1.,0.,0.,0.,1.])
+        validate_optimizer(q,{'optimizer_information':{'observable_directions':3,'scaled_information_matrix':H.tolist()}})
+        self.assertFalse(q['accepted']);self.assertEqual(q['reason'],'weak_directions')
+        self.assertEqual(q['observable_directions'],3)
+        self.assertEqual(np.asarray(q['weak_directions']).shape,(3,6))
+
+    def test_tls_distance_distribution_is_checked_even_when_planes_match(self):
+        rng=np.random.default_rng(5);p=rng.normal(size=(900,3));n=np.eye(3)[np.arange(900)%3]
+        q=correspondence_quality(p,n,np.zeros(900),np.full(900,.16),np.eye(4))
+        self.assertFalse(q['accepted']);self.assertFalse(q['geometry_supported'])
+        self.assertEqual(q['reason'],'insufficient_close_map_support')
+
     def test_partial_fov_needs_two_independent_neighbors_not_minimum_coverage(self):
         q = plane_quality(coverage=.20)
         self.assertTrue(q['geometry_supported']); self.assertFalse(q['accepted'])

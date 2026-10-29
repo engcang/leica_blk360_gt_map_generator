@@ -259,7 +259,8 @@ async function refreshTrajectory()
     }
     element('trajectory-results-empty').hidden = selected.length > 0;
     const latest = batch.find(job => job.status === 'running') || batch.at(-1);
-    element('trajectory-log').textContent = latest?.log_tail || 'No active trajectory generation in this batch.';
+    updateWorkerLog('trajectory-log', {key: latest?.id, url: latest?.log_url, tail: latest?.log_tail,
+        empty: latest ? 'Waiting for worker output.' : 'No active trajectory generation in this batch.'});
 }
 
 async function openTrajectoryResults(paths)

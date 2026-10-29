@@ -75,8 +75,11 @@ def main():
                 page.wait_for_function('additional_reference?.items.length===2')
                 page.locator('#panel-additional').wait_for(state='visible')
                 page.evaluate('path=>addAdditionalPaths([path])',str(paths[3]))
-                extension=root/'extension'; page.locator('#additional-output').fill(str(extension)); page.locator('#additional-name').click()
                 page.wait_for_function('additional_poses.length===3 && !additional_restoring')
+                extension=output/'additional'
+                assert page.locator('#additional-output').input_value()==str(extension)
+                assert page.locator('#additional-arrange').is_enabled()
+                assert page.locator('#additional-output').bounding_box()['y'] < page.locator('#additional-arrange').bounding_box()['y']
                 with page.expect_popup() as popup: page.locator('#additional-arrange').click()
                 editor=popup.value; editor.on('pageerror',lambda e:errors.append(str(e)))
                 editor.wait_for_function('window.blkPlacement?.items().length===3 && document.body.dataset.loaded==="true"')

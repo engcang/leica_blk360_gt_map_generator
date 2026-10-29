@@ -33,6 +33,26 @@ class NativeMapTests(reference.PersistentMapTests):
         self.assertEqual(index.cache_bytes, 0)
         self.assertFalse(index.native_tiles)
 
+    @unittest.skipUnless(Path('/proc/self/fd').is_dir(), 'Linux descriptor accounting')
+    def test_many_resident_tiles_do_not_retain_file_descriptors(self):
+        import resource
+        points = np.column_stack((np.arange(160)*8.+.25, np.ones(160), np.ones(160)))
+        normals = np.tile([0.,0.,1.], (len(points),1))
+        index = self.index(points, normals)
+        before = len(list(Path('/proc/self/fd').iterdir()))
+        limits = resource.getrlimit(resource.RLIMIT_NOFILE)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (min(limits[0], max(64,before+24)),limits[1]))
+        try:
+            self.assertTrue(index._native_prepare(np.arange(len(index.keys)), normals=True))
+            self.assertLessEqual(len(list(Path('/proc/self/fd').iterdir())), before+3)
+            distances, ids = index.query(points, distance_upper_bound=.1)
+            np.testing.assert_array_equal(distances, np.zeros(len(points)))
+            xyz, directions = index.gather(ids, normals=True)
+            np.testing.assert_array_equal(xyz,points)
+            np.testing.assert_array_equal(directions,normals)
+        finally:
+            resource.setrlimit(resource.RLIMIT_NOFILE, limits)
+
     def test_close_releases_indices_normals_and_query_plan_idempotently(self):
         points = np.array([[0.,0,0],[.01,.01,.01]])
         index = self.index(points, np.tile([0.,0.,1.], (2,1)))

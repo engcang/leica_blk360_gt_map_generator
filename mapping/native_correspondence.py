@@ -369,8 +369,11 @@ def nativeIndexClass(base):
             missing = sorted(needed-set(self.native_tiles))
             if len(missing) > 1 and hasattr(self.lib, 'blk_index_add_batch'):
                 started = time.perf_counter()
-                buffers = [np.memmap(self.matcher.folder/(self.keys[t]+'.bin'), mode='r',
-                                     dtype='<f4').reshape(-1,3) for t in missing]
+                # Owned buffers close each input immediately. Retaining one
+                # memmap per tile exhausts OS file handles on long sequences.
+                # The existing byte budget already includes these coordinates.
+                buffers = [np.fromfile(self.matcher.folder/(self.keys[t]+'.bin'),
+                                       dtype='<f4').reshape(-1,3) for t in missing]
                 tiles = np.asarray(missing,dtype=np.int64)
                 addresses = np.asarray([p.ctypes.data for p in buffers],dtype=np.uintp)
                 self.check(self.lib.blk_index_add_batch(self.handle,pointer(tiles),pointer(addresses),len(tiles)))
@@ -384,7 +387,7 @@ def nativeIndexClass(base):
             for tile in sorted(needed):
                 if tile not in self.native_tiles:
                     started = time.perf_counter()
-                    raw = np.memmap(self.matcher.folder/(self.keys[tile]+'.bin'), mode='r', dtype='<f4').reshape(-1, 3)
+                    raw = np.fromfile(self.matcher.folder/(self.keys[tile]+'.bin'), dtype='<f4').reshape(-1, 3)
                     self.check(self.lib.blk_index_add(self.handle, tile, pointer(raw)))
                     size = len(raw)*80
                     if hasattr(self.lib, 'blk_index_bytes'):

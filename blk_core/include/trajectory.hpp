@@ -9,6 +9,7 @@
 #include <json.hpp>
 #include "project.hpp"
 #include "worker_process.hpp"
+#include "worker_log.hpp"
 
 namespace blk_core
 {
@@ -84,12 +85,24 @@ namespace blk_core
                             for (auto &[key, value] : progress.items()) if (key != "status") job[key] = value;
                         }
                         job["log_tail"] = tail(report / "worker.log");
+                        job["log_url"] = "trajectory/" + job.at("id").get<std::string>() + "/log";
                     }
                     catch (...) {}
                 }
                 job["viewer_available"] = std::filesystem::is_regular_file(viewerPath(job));
             }
             return result;
+        }
+
+        nlohmann::json logPage(const std::string &id, const std::string &before, const std::string &after)
+        {
+            std::filesystem::path path;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                const auto report = find(id).value("report_directory", "");
+                if (!report.empty()) path = std::filesystem::u8path(report) / "worker.log";
+            }
+            return workerLogPage(path, before, after);
         }
 
         nlohmann::json helper(nlohmann::json request, const std::string &python)
@@ -302,12 +315,7 @@ namespace blk_core
         }
         static std::string tail(const std::filesystem::path &path)
         {
-            std::ifstream stream(path, std::ios::binary);
-            if (!stream) return "";
-            stream.seekg(0, std::ios::end);
-            const auto size = stream.tellg();
-            stream.seekg(std::max<std::streamoff>(0, static_cast<std::streamoff>(size) - 8000));
-            return std::string(std::istreambuf_iterator<char>(stream), {});
+            return workerLogPage(path, "", "", 8000).at("text").get<std::string>();
         }
         nlohmann::json &find(const std::string &id)
         {

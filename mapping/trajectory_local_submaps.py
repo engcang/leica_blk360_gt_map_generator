@@ -6,7 +6,7 @@ import copy
 from scipy.spatial.transform import Rotation
 from trajectory_geometry import voxel
 from trajectory_io import transform
-from trajectory_validation import jointly_observable, VALIDATION_PROTOCOL
+from trajectory_validation import jointly_observable, VALIDATION_PROTOCOL, context_map_supported
 from parallel_runtime import cacheBudget
 from trajectory_temporal import bridge_limits, continuous_estimate
 
@@ -106,10 +106,10 @@ class LocalSubmaps:
         certificate = self.context_certificates.get(q['index'])
         if certificate and certificate.get('protocol') == 'shared-kiss-selective-support-v1':
             return self.certify_tail_pose(T, q, certificate)
-        if (certificate is None or not certificate.get('training_quality', {}).get('geometry_supported')
+        if (certificate is None or not context_map_supported(certificate.get('training_quality', {}))
                 or certificate['training_quality'].get('observable_directions') != 6
                 or certificate.get('optimizer_information', {}).get('observable_directions') != 6
-                or not q.get('geometry_supported') or not q.get('fine', {}).get('converged')):
+                or not context_map_supported(q) or not q.get('fine', {}).get('converged')):
             return
         member = certificate['member']
         dm, da = difference(T, np.asarray(member['T_map_from_base']))
@@ -145,6 +145,19 @@ class LocalSubmaps:
         self.progress(f'Validating scan {anchor.index}: {2*radius:g} s submap, {scope}, 1 cm fitting')
         self.log(dict(stage='submap_seed_started', index=anchor.index, scope=scope,
                       radius_s=radius, resolution_m=resolution, started_unix=time.time()))
+        # Validate the proposed location on original TLS points before touching
+        # the million-point training submap. This is a permissive precheck;
+        # the final held-out checks below remain stricter.
+        _, held = self.prepared_scan(anchor)
+        preliminary = self.fine.quality(held, initial)
+        if (preliminary.get('coverage_20cm',0) < .20
+                or preliminary.get('plane_rms_m',1) > .06
+                or preliminary.get('inlier_precision_10cm',0) < .60):
+            self.log(dict(stage='submap_seed', index=anchor.index, scope=scope,
+                radius_s=radius, accepted=False, reason='poor_direct_tls_proposal',
+                short_circuited=True, anchor_quality=preliminary,
+                elapsed_s=time.perf_counter()-started))
+            return None
         try:
             # Broad capture happens on the 10 cm submap. Keep the full 1 cm
             # source for the final 10 cm correspondence gate, not for three
@@ -152,14 +165,27 @@ class LocalSubmaps:
             T, info = self.fine.align(train, initial, iterations=60,
                                       distances=(.1,), capture_information=True)
             context = [difference(T, expected) for expected in self.seed_context(anchor)]
-            if (not info.get('converged') and info.get('convergence_reason') == 'iteration_limit'
-                    and all(dm <= lm and da <= la for (dm,da),(lm,la) in zip(context,self.context_limits(len(context))))
-                    and info.get('optimizer_information', {}).get('observable_directions') == 6
-                    and self.fine.quality(voxel(train, .1), T).get('geometry_supported')):
+            # Preserve the 180 extra-iteration budget, but inspect progress in
+            # 60-iteration blocks. No further dense work after support fails or
+            # held-out error stops improving; a plateau is not convergence.
+            for _ in range(3):
+                if (info.get('converged') or info.get('convergence_reason') != 'iteration_limit'
+                        or any(dm > lm or da > la for (dm,da),(lm,la) in zip(context,self.context_limits(len(context))))
+                        or info.get('optimizer_information', {}).get('observable_directions') != 6):
+                    break
+                before_quality = self.fine.quality(held, T)
+                if not context_map_supported(before_quality):
+                    break
                 first = info
-                T, info = self.fine.align(train, T, iterations=180,
-                                          distances=(.1,), capture_information=True)
+                T, info = self.fine.align(train, T, iterations=60, distances=(.1,), capture_information=True)
                 info = dict(info, continuation_from=first)
+                after_quality = self.fine.quality(held, T)
+                context = [difference(T, expected) for expected in self.seed_context(anchor)]
+                old = capped_distance_cost(before_quality)
+                new = capped_distance_cost(after_quality)
+                if not info.get('converged') and (not context_map_supported(after_quality) or old-new <= max(1e-6,.001*old)):
+                    info['continuation_stopped'] = 'heldout_support_or_progress'
+                    break
         except (RuntimeError, ValueError) as exc:
             self.log(dict(stage='submap_seed_failed', index=anchor.index, scope=scope,
                           radius_s=radius, resolution_m=resolution, reason=str(exc)))
@@ -185,14 +211,14 @@ class LocalSubmaps:
         # Check actual training geometry separately from independent validation:
         # a floor-only fit must never inherit lateral coordinates from SLAM.
         training_quality = self.fine.quality(voxel(train, .1), T)
-        training_supported = (training_quality.get('geometry_supported')
+        training_supported = (context_map_supported(training_quality)
                               and training_quality.get('observable_directions') == 6
                               and optimizer_information.get('observable_directions') == 6)
         if not training_supported:
             return reject('shared_fit_weak_geometry', training_quality=training_quality)
         _, held = self.prepared_scan(anchor)
         aq = self.fine.quality(held, T)
-        if not aq.get('geometry_supported'):
+        if not context_map_supported(aq):
             return reject('insufficient_anchor_geometry', training_quality=training_quality,
                           anchor_quality=aq)
         costs = [capped_distance_cost(aq)]
@@ -208,7 +234,7 @@ class LocalSubmaps:
             fitted, q = self.fit(s, guess, 'submap_heldout')
             check = dict(q, agreement_m_deg=difference(fitted, guess),
                          shared_transform_quality=predicted, shared_transform_pose=guess.tolist())
-            if (predicted.get('geometry_supported') and q.get('geometry_supported')
+            if (context_map_supported(predicted) and context_map_supported(q)
                     and q.get('fine', {}).get('converged')
                     and check['agreement_m_deg'][0] <= .15 and check['agreement_m_deg'][1] <= 3):
                 valid.append(check)

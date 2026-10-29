@@ -69,5 +69,15 @@ class ProjectTests(unittest.TestCase):
         self.assertLessEqual(budget['concurrency']*budget['workers_per_sequence'],16)
         with self.assertRaisesRegex(ValueError,'more than once'):batch_plan([configs[0],configs[0]])
 
+    def test_result_parent_includes_unfinished_jobs_without_final_tum(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            for name,status in [('one','running'),('two','failed')]:
+                folder=root/name;folder.mkdir()
+                (folder/'job_status.json').write_text(json.dumps(dict(status=status,stage='Initial fitting')))
+            results=open_results([root])
+            self.assertEqual([r['name'] for r in results],['one','two'])
+            self.assertTrue(all('scene' not in r for r in results))
+
 
 if __name__=='__main__':unittest.main()

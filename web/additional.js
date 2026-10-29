@@ -4,6 +4,17 @@ let additional_restoring = false, additional_starting = false, additional_serial
 let additional_editor = null, additional_context = null, additional_editor_items = null;
 let additional_pending = false, additional_lock = null, additional_signature = '', additional_log = 'No active registration.';
 const additional_visible_jobs = new Set();
+let additional_default_output = '';
+
+function defaultAdditionalOutput()
+{
+    const field = element('additional-output'), path = additional_reference?.path;
+    if (!path || (field.value.trim() && field.value.trim() !== additional_default_output)) return;
+    const end = Math.max(path.lastIndexOf('/'), path.lastIndexOf(String.fromCharCode(92)));
+    if (end < 0) return;
+    additional_default_output = path.slice(0, end + 1) + 'additional';
+    field.value = additional_default_output;
+}
 
 function additionalDraft()
 {
@@ -20,7 +31,9 @@ function additionalControls()
     element('additional-start').disabled = busy || !capable || !selected || additional_restoring || additional_pending || !!additional_error || registration_state?.runtime.status !== 'completed';
     element('additional-stop').disabled = !registration_state?.jobs.some(job => job.kind === 'additional' && job.status === 'running');
     element('additional-setup').hidden = registration_state?.runtime.status === 'completed';
-    element('additional-message').textContent = !capable ? 'Start the updated app to use Additional Register.' : additional_error;
+    element('additional-message').textContent = !capable ? 'Start the updated app to use Additional Register.' : additional_error ||
+        (additional_reference && additional_ids.length && !element('additional-output').value.trim()
+            ? 'Choose a new result output folder to save placements.' : '');
     element('additional-placement-status').textContent = additional_pending ? 'Saving placements...' : additional_restoring ? 'Checking saved placements...' :
         additional_poses.slice(additional_reference?.items?.length || 1).some(Boolean) ? `${additional_poses.slice(additional_reference?.items?.length || 1).filter(Boolean).length} / ${additional_ids.length} new scan placements saved` : '';
     element('additional-message').hidden = !element('additional-message').textContent;
@@ -35,6 +48,7 @@ async function loadAdditionalReference(path)
     if (additional_starting) return;
     const result = await api('registration/reference', {reference_poses:path});
     additional_reference = result;
+    defaultAdditionalOutput();
     additional_poses = [];
     element('additional-reference-status').textContent = result.partial
         ? `${result.items.length} chunks · ${result.scans.length} scans · internal chunk poses preserved — ${result.path}`
@@ -99,10 +113,12 @@ function refreshAdditional()
         additional_signature = signature;
         element('additional-jobs').replaceChildren(...jobs.slice().reverse().map(renderRegistrationJob));
     }
-    if (jobs.some(job => job.status === 'running')) additional_log = registration_state.log || 'Waiting for worker output.';
-    else if (!registration_state.busy && additional_log !== 'No active registration.' && registration_state.log && jobs.some(job => job.id === registration_state.log_job_id)) additional_log = registration_state.log;
-    const log = element('additional-log');
-    log.textContent = additional_log; log.scrollTop = log.scrollHeight;
+    if (jobs.some(job => job.status === 'running') ||
+        (!registration_state.busy && additional_log !== 'No active registration.' && registration_state.log && jobs.some(job => job.id === registration_state.log_job_id)))
+    {
+        additional_log = registration_state.log || 'Waiting for worker output.';
+        updateWorkerLog('additional-log', {key: registration_state.log_job_id, url: registration_state.log_url, tail: registration_state.log});
+    }
     additionalControls();
 }
 async function openAdditionalEditor()

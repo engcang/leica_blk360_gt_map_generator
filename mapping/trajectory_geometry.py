@@ -5,7 +5,8 @@ from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation
 from trajectory_io import digest, save_json, transform
 from trajectory_validation import (observability, LOW_OVERLAP_CONTEXT, MIN_SUPPORT_POINTS,
-    MIN_SUPPORT_CELLS, SUPPORT_CELL_M, MIN_PRINCIPAL_SPAN_M, VALIDATION_PROTOCOL)
+    MIN_SUPPORT_CELLS, SUPPORT_CELL_M, MIN_PRINCIPAL_SPAN_M, VALIDATION_PROTOCOL,
+    MAX_PLANE_RMS_M, CONTEXT_MAX_PLANE_RMS_M, MIN_MAP_COVERAGE, distance_evidence)
 
 def voxel(points: np.ndarray, size: float) -> np.ndarray:
     """Keep actual points in deterministic voxel order."""
@@ -68,6 +69,44 @@ class Matcher:
         self.tree = cKDTree(self.p)
         self.workers = workers
 
+    def capture_candidates(self, points, initial, radius_m=8., count=5):
+        """Rank local translation/yaw proposals; these never certify a pose.
+
+        A stale odometry seed can be metres outside ICP's capture basin. Search
+        a sparse cloud with the existing compiled, parallel KD-tree first. Cap
+        every distance (including missing matches) so low overlap cannot win
+        merely by discarding points. Final fitting still uses original 1 cm data.
+        """
+        points = voxel(points, .4)
+        if not len(points):
+            return []
+        radius = int(np.ceil(radius_m))
+        shifts = np.array([(x, y, 0.) for x in range(-radius, radius+1)
+                           for y in range(-radius, radius+1)])
+        candidates = []
+        batch = max(1, min(16, 131072//len(points)))
+        for angle in (0., -5., 5.):
+            T = initial.copy()
+            T[:3, :3] = Rotation.from_euler('z', angle, degrees=True).as_matrix()@T[:3, :3]
+            moved = transform(points, T)
+            for start in range(0, len(shifts), batch):
+                offsets = shifts[start:start+batch]
+                query = (moved[None, :, :]+offsets[:, None, :]).reshape(-1, 3)
+                distances, _ = self.tree.query(query, distance_upper_bound=.75, workers=self.workers)
+                costs = np.mean(np.minimum(distances, .75).reshape(len(offsets), -1)**2, axis=1)
+                for cost, offset in zip(costs, offsets):
+                    proposal = T.copy(); proposal[:3, 3] += offset
+                    candidates.append((float(cost), angle, proposal))
+        chosen = []
+        for cost, angle, T in sorted(candidates, key=lambda item:item[0]):
+            if any(np.linalg.norm(T[:3, 3]-old[:3, 3]) < 2. and abs(angle-yaw) < 8.
+                   for _, yaw, old in chosen):
+                continue
+            chosen.append((cost, angle, T))
+            if len(chosen) >= count:
+                break
+        return [(cost, T) for cost, _, T in chosen]
+
     def correspondences(self, points: np.ndarray, T: np.ndarray, cap: float) -> tuple:
         moved = transform(points, T)
         dist, ids = self.tree.query(moved, distance_upper_bound=cap, workers=self.workers)
@@ -116,10 +155,10 @@ class Matcher:
 
     def quality(self, points: np.ndarray, T: np.ndarray) -> dict:
         p, n, r, use, dist = self.correspondences(points, T, .20)
-        return correspondence_quality(p, n, r, dist, T)
+        return correspondence_quality(p, n, r, dist, T, coarse=True)
 
 
-def correspondence_quality(p, n, r, dist, T):
+def correspondence_quality(p, n, r, dist, T, *, coarse=False):
     if len(r) < MIN_SUPPORT_POINTS:
         return dict(accepted=False, geometry_supported=False, reason='insufficient_support', points=len(r))
     J = np.column_stack([np.cross((p-T[:3, 3])/5., n), n])
@@ -133,10 +172,20 @@ def correspondence_quality(p, n, r, dist, T):
     _, basis = np.linalg.eigh(np.cov(p, rowvar=False))
     span = np.sort(np.ptp((p-p.mean(axis=0)) @ basis, axis=0))
     distributed = cells >= MIN_SUPPORT_CELLS and span[-2] >= MIN_PRINCIPAL_SPAN_M
-    supported = rms < .08 and distributed
+    evidence = distance_evidence(dist)
+    # Coarse proposals are screened permissively; only original-map validation
+    # may certify a pose. Fine checks reuse the same nearest-neighbor distances.
+    limit = .08 if coarse else MAX_PLANE_RMS_M
+    close = (coarse or (coverage >= MIN_MAP_COVERAGE
+                        and evidence['inlier_precision_10cm'] >= .70))
+    supported = rms < limit and distributed and close
+    strict = bool(not coarse and supported and rms < CONTEXT_MAX_PLANE_RMS_M
+                  and evidence['inlier_precision_5cm'] >= .65
+                  and evidence['inlier_precision_10cm'] >= .90)
     needs_context = rank < 6 or coverage < LOW_OVERLAP_CONTEXT
     accepted = supported and not needs_context
-    reason = ('surface_residual' if rms >= .08 else 'concentrated_support' if not distributed
+    reason = ('surface_residual' if rms >= limit else 'concentrated_support' if not distributed
+              else 'insufficient_close_map_support' if not close
               else 'weak_directions' if rank < 6 else 'partial_view_needs_context'
               if needs_context else 'geometry_pass')
     supported_distances = dist[np.isfinite(dist)]
@@ -144,7 +193,8 @@ def correspondence_quality(p, n, r, dist, T):
                 needs_context=bool(supported and needs_context), reason=reason,
                 acceptance_scope='single-scan' if accepted else 'provisional' if supported else 'rejected',
                 validation_protocol=VALIDATION_PROTOCOL,
-                points=len(r), coverage_20cm=coverage, plane_rms_m=rms,
+                points=len(r), **evidence, plane_rms_m=rms,
+                context_map_supported=strict, validation_plane_rms_limit_m=limit,
                 inlier_distance_mse_m2=float(np.mean(supported_distances**2)),
                 inlier_distance_p90_m=float(np.quantile(supported_distances, .9)),
                 observable_directions=rank, scaled_information_eigenvalues=eig.tolist(),

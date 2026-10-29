@@ -15,9 +15,11 @@ from scipy.spatial.transform import Rotation
 from trajectory_fine import FineMatcher
 from trajectory_io import digest, save_json, transform, PoseGap
 from trajectory_geometry import voxel
-from trajectory_temporal import screen_temporal, motion_limits
+from trajectory_temporal import screen_temporal, motion_limits, bridge_limits
 from trajectory_validation import (confirm_partial_views, jointly_observable, VALIDATION_PROTOCOL,
-    LOW_OVERLAP_CONTEXT, MIN_SUPPORT_POINTS, MIN_SUPPORT_CELLS, SUPPORT_CELL_M, MIN_PRINCIPAL_SPAN_M)
+    LOW_OVERLAP_CONTEXT, MIN_SUPPORT_POINTS, MIN_SUPPORT_CELLS, SUPPORT_CELL_M, MIN_PRINCIPAL_SPAN_M,
+    context_map_supported, MAX_PLANE_RMS_M, CONTEXT_MAX_PLANE_RMS_M, MIN_MAP_COVERAGE,
+    validate_optimizer)
 from parallel_runtime import cacheBudget
 from trajectory_tail import TailInitializer, SUBMAP_PROTOCOL, WINDOW_RADII, SUPPORT_AGREEMENT
 from trajectory_local_submaps import LocalSubmaps
@@ -67,11 +69,12 @@ def fit_scan(fine, scan, initial):
     train, held = partition(scan)
     partitioned = time.perf_counter()
     try:
-        T, info = fine.align(train, initial)
+        T, info = fine.align(train, initial, capture_information=True)
     except (RuntimeError, ValueError) as exc:
         T, info = initial.copy(), dict(converged=False, reason='registration_error', detail=str(exc))
     fitted = time.perf_counter()
     q = fine.quality(held, T)
+    validate_optimizer(q, info)
     q.update(index=scan.index, timestamp=scan.timestamp, fine=info,
              correction_m_deg=difference(T, initial), T_map_from_base=T.tolist(),
              partition_s=partitioned-started, validation_s=time.perf_counter()-fitted,
@@ -79,6 +82,25 @@ def fit_scan(fine, scan, initial):
     if not info.get('converged'):
         q.update(accepted=False, reason='fine_registration_failed')
     return T, q
+
+
+def capture_scan(matcher, fine, scan, initial):
+    """Cheap broad capture before retrying dense ICP after tracking is lost."""
+    held = partition(scan)[1]
+    predicted = fine.quality(held, initial)
+    if (context_map_supported(predicted) or
+            predicted.get('accepted') and predicted.get('inlier_precision_10cm',0) >= .90):
+        return initial, None
+    coarse = matcher.icp(voxel(scan.points,.1), initial)
+    q = fine.quality(held, coarse)
+    plausible = (q.get('coverage_20cm',0) >= .20 and q.get('plane_rms_m',1) < .06
+                 and q.get('inlier_precision_10cm',0) >= .60)
+    if not plausible:
+        q.update(accepted=False, geometry_supported=False, reason='coarse_capture_failed',
+                 index=scan.index, timestamp=scan.timestamp, T_map_from_base=coarse.tolist(),
+                 correction_m_deg=difference(coarse, initial),
+                 fine=dict(engine=FINE_ENGINE,converged=False,reason='poor_direct_tls_proposal'))
+    return coarse, None if plausible else q
 
 
 def capped_distance_cost(quality):
@@ -141,7 +163,7 @@ class Recovery(LocalSubmaps, TailInitializer):
         self.seed_certificates, self.context_certificates = {}, {}
         self.conflicted = set()
         self.revalidate_from = Path(revalidate_from) if revalidate_from is not None else None
-        self.provenance = dict(protocol='studio-recovery-connected-local-v2', input=self.source.provenance,
+        self.provenance = dict(protocol='studio-recovery-direct-tls-v3', input=self.source.provenance,
             baseline_policy='verified-1cm' if baseline_is_fine else 'refit-imported-at-1cm',
             baseline_trajectory_sha256=digest(self.baseline/'candidate_trajectory.tum'),
             baseline_quality_sha256=digest(self.baseline/'quality.jsonl'),
@@ -152,12 +174,13 @@ class Recovery(LocalSubmaps, TailInitializer):
                        proposal_merge_m_deg=[.01,.1], coarse_anchor_capture_margin_m_deg=[.2,3.],
                        initial_guesses=['initial_alignment','before_anchor','after_anchor'],
                        local_coarse_voxel_m=.1, post_reverse_kiss=False,
-                       tail_initialization='shared-kiss-selective-support-v1',
+                       tail_initialization='local-capture-coarse-fine-v2',
+                       tail_local_capture_radius_m=8., reverse_restart_gap_s=30.,
                        tail_window_radii_s=list(WINDOW_RADII), tail_kiss_resolutions_m=[.3,.5,.08],
                        iteration_limit_continuation=180,
                        schedule='forward-then-reverse-then-local-submaps'),
             validation=dict(context_protocol=VALIDATION_PROTOCOL, independent_witness_scans=2,
-                            temporal_protocol='continuous-estimate-bridge-v2', partial_views_require_map_anchor=True,
+                            temporal_protocol='drift-scaled-bridge-v3', partial_views_require_map_anchor=True,
                             shared_training_observable_directions=6,
                             shared_training_information='actual-final-Tukey-weighted-fit',
                             shared_agreement_m_deg=[.15,3.], weak_departure_m=.01),
@@ -165,12 +188,13 @@ class Recovery(LocalSubmaps, TailInitializer):
             correspondence_distances=list(RECOVERY_DISTANCES), iterations_per_stage=RECOVERY_ITERATIONS,
             relative_fitness=1e-6, relative_rmse=1e-6, solver_threads=1,
             thresholds=dict(partial_view_context_below_coverage=LOW_OVERLAP_CONTEXT,
-                            minimum_coverage=None, support_points=MIN_SUPPORT_POINTS,
+                            minimum_coverage=MIN_MAP_COVERAGE, context_plane_rms_m=CONTEXT_MAX_PLANE_RMS_M,
+                            support_points=MIN_SUPPORT_POINTS,
                             support_cells=MIN_SUPPORT_CELLS, support_cell_m=SUPPORT_CELL_M,
                             second_principal_span_m=MIN_PRINCIPAL_SPAN_M,
                             weak_submap_departure_scaled_m=.01,
-                            plane_rms_m=.08, joint_observable_directions=6,
-                            correction_m=.5, correction_deg=10, agreement_m=.15, agreement_deg=3))
+                            plane_rms_m=MAX_PLANE_RMS_M, joint_observable_directions=6,
+                            correction_m=None, correction_deg=None, agreement_m=.15, agreement_deg=3))
         from native_correspondence import backendInfo as correspondenceInfo
         correspondence = correspondenceInfo()
         if correspondence['backend'] == 'native-tiled-map-v1':
@@ -179,6 +203,8 @@ class Recovery(LocalSubmaps, TailInitializer):
             if self.revalidate_from.resolve() == self.output.resolve():
                 raise ValueError('Revalidation must preserve the previous result in a different folder')
             previous = json.loads((self.revalidate_from/'provenance.json').read_text())
+            if previous.get('validation', {}).get('context_protocol') != VALIDATION_PROTOCOL:
+                raise ValueError('Previous TLS validation changed; generate fresh 1 cm fits instead of reusing their acceptance')
             for key in ('input','map','fine_engine','target_normals','baseline_trajectory_sha256','baseline_quality_sha256'):
                 if previous.get(key) != self.provenance.get(key):
                     raise ValueError(f'Revalidation source changed: {key}')
@@ -258,17 +284,18 @@ class Recovery(LocalSubmaps, TailInitializer):
         train, held = self.prepared_scan(scan)
         prepared = time.perf_counter()
         try:
-            T, info = self.fine.align(train, initial)
+            T, info = self.fine.align(train, initial, capture_information=True)
             q = self.fine.quality(held, T)
             if (not info.get('converged') and info.get('convergence_reason') == 'iteration_limit'
                     and q.get('geometry_supported')):
                 first = info
-                T, info = self.fine.align(train, T, iterations=180)
+                T, info = self.fine.align(train, T, iterations=180, capture_information=True)
                 info = dict(info, continuation_from=first, continuation_iterations_per_stage=180)
                 q = self.fine.quality(held, T)
         except (RuntimeError, ValueError) as exc:
             T, info = initial.copy(), dict(converged=False, reason='registration_error', detail=str(exc))
             q = self.fine.quality(held, T)
+        validate_optimizer(q, info)
         q.update(index=scan.index, timestamp=scan.timestamp, fine=info,
                  correction_m_deg=difference(T, initial), T_map_from_base=T.tolist(),
                  partition_s=prepared-started, total_fit_s=time.perf_counter()-started)
@@ -406,10 +433,10 @@ class Recovery(LocalSubmaps, TailInitializer):
                 or not certificate.get('joint', {}).get('accepted')
                 or q['index'] in certificate.get('training_indices', ())
                 or q.get('reason') not in ('weak_directions', 'partial_view_needs_context')
-                or not certificate.get('training_quality', {}).get('geometry_supported')
+                or not context_map_supported(certificate.get('training_quality', {}))
                 or certificate['training_quality'].get('observable_directions') != 6
                 or certificate.get('optimizer_information', {}).get('observable_directions') != 6
-                or not q.get('geometry_supported') or not q.get('fine', {}).get('converged')):
+                or not context_map_supported(q) or not q.get('fine', {}).get('converged')):
             return
         member = certificate['member']
         dm, da = difference(T, np.asarray(member['T_map_from_base']))
@@ -467,11 +494,25 @@ class Recovery(LocalSubmaps, TailInitializer):
                 self.progress(f'Recovering {direction}: scan {index}, {len(result)} supported poses')
                 last_progress = time.monotonic()
             initial=last_T@np.linalg.inv(last_F)@s.frontend_T
-            T,q=self.fit(s,initial,direction)
+            failed = None
+            if lost or abs(s.timestamp-last_time) > .5:
+                if self.matcher is None:
+                    from trajectory_geometry import Matcher
+                    self.matcher = Matcher(self.cache,self.fine.workers)
+                captured, failed = capture_scan(self.matcher,self.fine,s,initial)
+            else:
+                captured = initial
+            if failed is None:
+                T,q=self.fit(s,captured,direction)
+            else:
+                T,q=captured,dict(failed,stage=direction)
+                self.latest_attempt[index]=q
+                self.log(q)
             q['support_ancestors'] = sorted(support_ancestors)
             dm,da=difference(T,initial)
             # SLAM is a short-interval consistency check, never map evidence.
-            limit_m, limit_deg = motion_limits(last_F, s.frontend_T, s.timestamp-last_time)
+            limit_m, limit_deg = (bridge_limits(self.source, last_time, s.timestamp)
+                if abs(s.timestamp-last_time) > .5 else motion_limits(last_F, s.frontend_T, s.timestamp-last_time))
             within_motion = dm <= limit_m and da <= limit_deg
             if not within_motion:
                 q.update(accepted=False, reason='tracking_motion_inconsistent')
@@ -517,9 +558,7 @@ class Recovery(LocalSubmaps, TailInitializer):
             for original in self.rows:
                 index=original['index'];q=dict(self.quality.get(index,self.latest_attempt.get(index,original)))
                 if q.get('accepted') and index not in self.poses:
-                    dm, da = q.get('correction_m_deg', [0, 0])
-                    q['reason'] = ('unverified_large_correction' if dm > .5 or da > 10
-                                   else 'unverified_submap_seed')
+                    q['reason'] = 'unverified_submap_seed'
                 q['accepted']=index in self.poses
                 if index in self.conflicted:
                     q.update(accepted=False, reason='seed_disagreement')
@@ -595,7 +634,7 @@ class Recovery(LocalSubmaps, TailInitializer):
                 return False
         saved = json.loads(receipt.read_text())
         keys = ('input', 'map', 'baseline_trajectory_sha256', 'baseline_quality_sha256',
-                'fine_engine', 'correspondence_distances', 'iterations_per_stage', 'thresholds')
+                'fine_engine', 'correspondence_distances', 'iterations_per_stage', 'thresholds', 'validation')
         if (saved.get('protocol') != 'forward-reverse-checkpoint-v1' or not saved.get('completed')
                 or any(saved['provenance'].get(k) != self.provenance.get(k) for k in keys)):
             raise ValueError('Forward/reverse checkpoint inputs or settings changed')
@@ -626,7 +665,12 @@ class Recovery(LocalSubmaps, TailInitializer):
         removed = self.screen_poses('tracking_checkpoint_temporal_audit')
         self.baseline_temporal_removed = sorted(set(self.baseline_temporal_removed)|removed)
         self.log(dict(stage='tracking_checkpoint_reused', accepted=len(self.poses), rejected_on_revalidation=len(removed)))
-        return not removed
+        same_search = (saved['provenance'].get('seeds', {}).get('tail_initialization')
+                       == self.provenance['seeds']['tail_initialization'])
+        # Keep verified poses, but retry missing intervals when reverse capture
+        # has improved. Do not mistake an older unsuccessful search for proof
+        # that the remaining scans have already had the new recovery attempt.
+        return not removed and same_search
 
     def save_tracking(self):
         self.checkpoint()
@@ -665,6 +709,60 @@ class Recovery(LocalSubmaps, TailInitializer):
                     continue
             dest[i]=value
 
+    def reverse_block(self, indices, after_index=None):
+        """Reuse the end anchor, then independently restart long untracked gaps."""
+        backward, forward = {}, {}
+        if after_index is not None:
+            backward = self.propagate(list(reversed(indices)), after_index,
+                                      self.poses[after_index], 'reverse_fine')
+        for seed_index in self.seed_indices(indices, from_end=True):
+            if seed_index in backward or seed_index in forward:
+                continue
+            if (after_index is not None and
+                    self.rows_by_index[after_index]['timestamp']-
+                    self.rows_by_index[seed_index]['timestamp'] <= 3.):
+                # This end anchor was just tried by reverse ICP. Independent
+                # initialization is constrained to the same nearby anchor;
+                # searching the whole map here cannot resolve accumulated drift.
+                continue
+            remaining = []
+            for i in reversed(indices):
+                if i > seed_index:
+                    continue
+                if i in backward or i in forward:
+                    break
+                remaining.append(i)
+            if not remaining:
+                continue
+            # Ordinary short holes remain local-submap work. A failed reverse
+            # pass must not suppress independent localization of a long gap
+            # merely because some accepted pose exists later in the sequence.
+            span = self.rows_by_index[remaining[0]]['timestamp']-self.rows_by_index[remaining[-1]]['timestamp']
+            if (after_index is not None or backward or forward) and span < 30.:
+                continue
+            T = self.initialize_tail(seed_index, allow_global=False)
+            if T is None:
+                T = self.initialize_tail(seed_index, allow_global=True)
+            if T is None:
+                continue
+            T, q = self.seed_pose(seed_index, T)
+            self.certify_submap_pose(T, q)
+            if not q.get('accepted'):
+                continue
+            q.update(stage='tail_seed')
+            self.seed_fits[seed_index] = (T, q)
+            new_backward = {seed_index:(T,q), **self.propagate(
+                [i for i in reversed(indices) if i < seed_index and i not in backward],
+                seed_index, T, 'reverse_fine')}
+            new_forward = self.propagate(
+                [i for i in indices if i > seed_index and i not in backward and i not in forward],
+                seed_index, T, 'tail_forward')
+            self.merge_direction(backward, new_backward)
+            self.merge_direction(forward, new_forward)
+            self.log(dict(stage='tail_initialized', index=seed_index,
+                          reverse_recovered=len(new_backward), forward_recovered=len(new_forward)))
+        return forward, backward
+
     def run(self, tracking_only=False):
         started=time.monotonic();self.keep_baseline();baseline_count=len(self.poses)
         tracking_ready = self.restore_tracking()
@@ -695,30 +793,9 @@ class Recovery(LocalSubmaps, TailInitializer):
                 # Imported baselines may still have gaps never tried by this engine.
                 if phase == 'tracking' and before and not self.baseline_is_fine:
                     i=max(before);forward=self.propagate(indices,i,original_anchors[i],'forward_fine')
-                if phase == 'tracking' and after:
-                    i=min(after);backward=self.propagate(list(reversed(indices)),i,original_anchors[i],'reverse_fine')
-                elif phase == 'tracking':
-                    # Reuse an accepted end when available; otherwise initialize
-                    # independent windows from the end, including earlier windows
-                    # when the last scan is outside the TLS map.
-                    for seed_index in self.seed_indices(indices, from_end=True):
-                        T = self.initialize_tail(seed_index, allow_global=False)
-                        if T is None:
-                            T = self.initialize_tail(seed_index, allow_global=True)
-                        if T is None:
-                            continue
-                        T, q = self.seed_pose(seed_index, T)
-                        self.certify_submap_pose(T, q)
-                        if not q.get('accepted'):
-                            continue
-                        q.update(stage='tail_seed')
-                        self.seed_fits[seed_index] = (T, q)
-                        backward = {seed_index:(T,q), **self.propagate(
-                            [i for i in reversed(indices) if i < seed_index], seed_index,T,'reverse_fine')}
-                        forward = self.propagate([i for i in indices if i > seed_index],seed_index,T,'tail_forward')
-                        self.log(dict(stage='tail_initialized', index=seed_index,
-                                      reverse_recovered=len(backward), forward_recovered=len(forward)))
-                        break
+                if phase == 'tracking':
+                    restarted, backward = self.reverse_block(indices, min(after) if after else None)
+                    self.merge_direction(forward, restarted)
                 disputed = set(self.conflicted).intersection(indices)
                 for i in set(forward).intersection(backward):
                     dm, da = difference(forward[i][0], backward[i][0])

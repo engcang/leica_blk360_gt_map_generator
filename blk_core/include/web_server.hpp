@@ -185,6 +185,14 @@ namespace blk_core
             {
                 reply(response, trajectory_.snapshot());
             });
+            server_.Get("/api/trajectory/([0-9a-f]{32})/log", [this](const httplib::Request &request, httplib::Response &response)
+            {
+                reply(response, trajectory_.logPage(request.matches[1], request.get_param_value("before"), request.get_param_value("after")));
+            });
+            server_.Get("/api/registration/log/([0-9a-f]{32}|runtime)", [this](const httplib::Request &request, httplib::Response &response)
+            {
+                reply(response, registration_.logPage(request.matches[1], request.get_param_value("export") == "1", request.get_param_value("before"), request.get_param_value("after")));
+            });
             server_.Post("/api/trajectory/discover", [this](const httplib::Request &request, httplib::Response &response)
             {
                 auto body=nlohmann::json::parse(request.body); body["operation"]="discover";

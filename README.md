@@ -263,6 +263,7 @@
   - Automatic thread detection for native engines, Open3D, and quality queries.
   - Generate trajectory: **CPU threads → Auto** uses available logical CPUs; an explicit count sets a limit.
     - C++/OpenMP map-index construction, correspondence processing, and deterministic voxel selection.
+    - Compact immutable KD-trees inside hashed map tiles; exact bounds reuse both matches and missing matches.
     - Parallel queries, normals, and map layers; ordered trajectory propagation and serial Open3D solver reductions.
     - Reuse exact distance bounds to skip points still outside the correspondence gate; unchanged fitting points and thresholds.
   - CPU affinity/container limits and available RAM detected per machine.

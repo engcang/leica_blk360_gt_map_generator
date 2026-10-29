@@ -1,10 +1,10 @@
 // Exact tiled nearest-neighbor queries. Python owns immutable point/normal buffers.
 #include <cstdint>
 #include <nanoflann.hpp>
+#include "packed_kdtree.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstdint>
 #include <limits>
 #include <memory>
 #include <string>
@@ -21,7 +21,13 @@ namespace {
 using Id = std::int64_t;
 using Cell = std::array<Id, 3>;
 constexpr double infinity = std::numeric_limits<double>::infinity();
+constexpr double match_halo = .1;
 thread_local std::string error;
+Id tile_count(Id n) {
+    if (n < 0 || n >= std::numeric_limits<std::uint32_t>::max())
+        throw std::length_error("Map tile exceeds the 32-bit local index capacity");
+    return n;
+}
 struct CellHash {
     std::size_t operator()(const Cell &c) const {
         std::size_t h = 0;
@@ -34,9 +40,13 @@ struct Tile {
     const double *normals = nullptr;
     Id count;
     using Metric = nanoflann::L2_Simple_Adaptor<double, Tile, double>;
-    using Tree = nanoflann::KDTreeSingleIndexAdaptor<Metric, Tile, 3, Id>;
+    using Tree = nanoflann::KDTreeSingleIndexAdaptor<Metric, Tile, 3, std::uint32_t>;
     Tree tree;
-    Tile(const float *p, Id n) : points(p), count(n), tree(3, *this, {16}) { tree.buildIndex(); }
+    std::unique_ptr<PackedKdTree<Tree>> packed;
+    Tile(const float *p, Id n) : points(p), count(tile_count(n)), tree(3, *this, {16}) {
+        tree.buildIndex();
+        packed = std::make_unique<PackedKdTree<Tree>>(tree);
+    }
     std::size_t kdtree_get_point_count() const { return count; }
     double kdtree_get_pt(Id i, std::size_t d) const { return points[3 * i + d]; }
     template<class Box> bool kdtree_get_bbox(Box &) const { return false; }
@@ -64,10 +74,9 @@ struct Neighbors {
     double *distances;
     Id *ids;
     bool seeded = false;
+    double cutoff = cap2;
     bool full() const { return count == k; }
-    double worstDist() const {
-        return count < k ? cap2 : std::min(cap2, std::nextafter(distances[k-1], infinity));
-    }
+    double worstDist() const { return cutoff; }
     bool addPoint(double d, Id local) {
         if (!(d < cap2)) return true;
         const Id id = local + offset;
@@ -79,6 +88,9 @@ struct Neighbors {
         }
         distances[pos] = d; ids[pos] = id;
         count = std::min(k, count+1);
+        // Tree traversal reads this bound many times for each actual update.
+        // Cache the same nextafter result instead of recomputing it per node.
+        if (count == k) cutoff = std::min(cap2, std::nextafter(distances[k-1], infinity));
         return true;
     }
 };
@@ -113,7 +125,7 @@ void search_neighbors(const Index &index, const double *p, int k, double cap, do
         const double margin = 128*std::numeric_limits<double>::epsilon()*scale;
         if (std::sqrt(bound) > std::sqrt(result.worstDist())+margin) return;
         result.offset = index.offsets[tile];
-        tree->tree.findNeighbors(result, p, nanoflann::SearchParams());
+        tree->packed->search(result, p);
     };
     search(owner);
     const double margin = 128*std::numeric_limits<double>::epsilon()*(1+cap+std::abs(p[0])+std::abs(p[1])+std::abs(p[2]));
@@ -147,7 +159,9 @@ struct MatchState {
     Index &index;
     Id count;
     bool initialized = false;
-    std::vector<double> reference, second, second_xyz;
+    double halo = 0.;  // Old callers load only their original query plan.
+    std::vector<double> reference, second;
+    std::vector<float> second_xyz;  // Original map XYZ is float32; this is lossless.
     std::vector<Id> candidate_ids, second_ids;
     MatchState(Index &i, Id n) : index(i), count(n), reference(3*n), second(n),
         second_xyz(3*n), candidate_ids(n, i.offsets.back()), second_ids(n,i.offsets.back()) {}
@@ -208,6 +222,7 @@ template<class F> int guarded(F fn) {
 
 BLK_EXPORT const char *blk_correspondence_error() { return error.c_str(); }
 BLK_EXPORT int blk_correspondence_abi() { return 1; }
+BLK_EXPORT double blk_matches_search_halo() { return match_halo; }
 BLK_EXPORT int blk_voxel_rows(const void *points, Id count, int float32, double size,
                               int workers, Id *chosen, Id *used) {
     return guarded([&] {
@@ -248,7 +263,7 @@ BLK_EXPORT void blk_index_remove(void *handle, Id tile) { static_cast<Index *>(h
 BLK_EXPORT std::uint64_t blk_index_bytes(void *handle, Id tile) {
     auto &data = static_cast<Index *>(handle)->tiles.at(tile);
     // Reserve normals even before they are loaded; include mapped input points.
-    return data->tree.usedMemory(data->tree) + data->count*(3*sizeof(float)+3*sizeof(double));
+    return data->tree.usedMemory(data->tree) + data->packed->bytes() + data->count*(3*sizeof(float)+3*sizeof(double));
 }
 BLK_EXPORT void blk_index_normals(void *handle, Id tile, const double *normals) {
     static_cast<Index *>(handle)->tiles[tile]->normals = normals;
@@ -443,6 +458,13 @@ BLK_EXPORT void *blk_matches_create(void *index, Id count) {
     catch (const std::exception &e) { error = e.what(); return nullptr; }
 }
 BLK_EXPORT void blk_matches_destroy(void *handle) { delete static_cast<MatchState *>(handle); }
+BLK_EXPORT int blk_matches_set_search_halo(void *handle, double halo) {
+    return guarded([&] {
+        if (!std::isfinite(halo) || halo < 0 || halo > match_halo)
+            throw std::invalid_argument("Invalid correspondence search halo");
+        static_cast<MatchState *>(handle)->halo = halo;
+    });
+}
 BLK_EXPORT int blk_matches_run(void *handle, const double *points, double cap, int reset,
     double *xyz, double *normals, double *distances, std::int32_t *pairs,
     std::uint8_t *ties, Id *statistics) {
@@ -471,6 +493,9 @@ BLK_EXPORT int blk_matches_run(void *handle, const double *points, double cap, i
                 const double movement = std::sqrt(motion2), distance = std::sqrt(distance2);
                 const double margin = 128*std::numeric_limits<double>::epsilon()*(1+cap+state.second[row]+std::sqrt(p2)+std::sqrt(r2));
                 const bool present = state.candidate_ids[row] < absent_id;
+                if (present && distance > cap+margin && state.second[row]-movement > cap+margin) {
+                    ++absent; continue;
+                }
                 if (present && distance+movement < state.second[row]-margin) {
                     if (distance < cap) { distances[row] = distance; ++reused; }
                     else ++absent;
@@ -491,19 +516,25 @@ BLK_EXPORT int blk_matches_run(void *handle, const double *points, double cap, i
                 }
             }
             double d[2]; Id ids[2];
-            search_neighbors(index, p, 2, cap, d, ids,seed_ids,seed_distances2);
+            // A small search halo certifies absent matches for subsequent
+            // iterations. The fitting gate remains exactly cap.
+            const double search_cap = cap+state.halo;
+            search_neighbors(index, p, 2, search_cap, d, ids,seed_ids,seed_distances2);
             ++queried;
             distances[row] = d[0];
             state.candidate_ids[row] = ids[0];
             state.second_ids[row] = ids[1];
-            state.second[row] = std::min(d[1], cap);
+            state.second[row] = std::min(d[1], search_cap);
             for (int a = 0; a < 3; ++a) state.reference[3*row+a] = p[a];
             if (ids[0] < absent_id) {
                 if (!gather_row(index, ids[0], xyz+3*row, normals+3*row)) missing_tile = 1;
-                if (std::isfinite(d[1]) && d[0] == d[1]) { ties[row] = 1; ++tie_count; }
+                if (d[0] < cap && d[0] == d[1]) { ties[row] = 1; ++tie_count; }
             }
-            if (ids[1] < absent_id && !gather_row(index,ids[1],state.second_xyz.data()+3*row,nullptr))
-                missing_tile = 1;
+            if (ids[1] < absent_id) {
+                double second_xyz[3];
+                if (!gather_row(index,ids[1],second_xyz,nullptr)) missing_tile = 1;
+                else for (int a = 0; a < 3; ++a) state.second_xyz[3*row+a] = float(second_xyz[a]);
+            }
         }
         if (missing_tile) throw std::runtime_error("Missing tile/normal buffer in fused correspondence query");
         // Compact in source order, independent of thread scheduling. The serial

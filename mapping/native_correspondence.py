@@ -53,6 +53,9 @@ def loadLibrary(path=None):
     if hasattr(lib, 'blk_index_bytes'):
         lib.blk_index_bytes.restype = ct.c_uint64
         lib.blk_index_bytes.argtypes = [pointer, integer]
+    if hasattr(lib, 'blk_matches_search_halo'):
+        lib.blk_matches_search_halo.restype = ct.c_double
+        lib.blk_matches_search_halo.argtypes = []
     optional = dict(
         blk_index_plan=[pointer, pointer, integer, ct.c_double, pointer],
         blk_plan_reusable=[pointer, pointer, pointer, integer, ct.c_double, ct.c_double],
@@ -73,6 +76,7 @@ def loadLibrary(path=None):
     fused = dict(
         blk_matches_create=(pointer, [pointer, integer]),
         blk_matches_destroy=(None, [pointer]),
+        blk_matches_set_search_halo=(ct.c_int, [pointer, ct.c_double]),
         blk_matches_run=(ct.c_int, [pointer, pointer, ct.c_double, ct.c_int,
                                    pointer, pointer, pointer, pointer, pointer, pointer]),
         blk_matches_patch_ties=(ct.c_int, [pointer, pointer, pointer, pointer, integer,
@@ -123,6 +127,8 @@ class NativeMatches:
         if not self.handle:
             raise MemoryError(index.lib.blk_correspondence_error().decode())
         self._release = weakref.finalize(self, index.lib.blk_matches_destroy, self.handle)
+        if hasattr(index.lib,'blk_matches_set_search_halo'):
+            index.check(index.lib.blk_matches_set_search_halo(self.handle,index.match_halo))
         self.distances = np.empty(count, dtype=np.float64)
         self.pairs = np.empty((count,2), dtype=np.int32)
         self.ties = np.empty(count, dtype=np.uint8)
@@ -142,7 +148,7 @@ class NativeMatches:
         started = time.perf_counter()
         if cap >= 2*index.tile_m:
             return None
-        plan = index._native_plan(points, cap)
+        plan = index._native_plan(points, cap+index.match_halo)
         index.statistics['query_plan_s'] += time.perf_counter()-started
         if not index._native_prepare(plan, normals=True):
             return None  # The streamed reference path remains available under low RAM.
@@ -189,6 +195,7 @@ def nativeIndexClass(base):
                                            and hasattr(self.lib, 'blk_correspondence_pack'))
             self.fused_correspondences = all(hasattr(self.lib, name) for name in (
                 'blk_matches_create','blk_matches_destroy','blk_matches_run','blk_matches_patch_ties'))
+            self.match_halo = self.lib.blk_matches_search_halo() if hasattr(self.lib,'blk_matches_search_halo') else 0.
             self.match_states = weakref.WeakSet()
 
         def new_match_state(self, count):

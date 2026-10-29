@@ -137,6 +137,49 @@ class NativeMapTests(reference.PersistentMapTests):
             np.testing.assert_array_equal(np.asarray(target.cloud.points)[pairs[:,1]],index.gather(ids[valid]))
             self.assertEqual(rmse,float(d[0]) if valid[0] else 0.)
 
+    def test_absent_match_halo_does_not_expand_the_fitting_gate(self):
+        index = self.index([[7.75,1,1],[8.25,1,1]],[[0,0,1],[1,0,0]])
+        target = reference.IndexedPointToPlaneTarget(index,2)
+        target._query_state.stats = dict(queried_points=0)
+        # Start with two equidistant neighbors outside the fitting gate, then
+        # move a formerly absent point inside it, across a tile boundary.
+        for x,cap in ((8.,.2),(8.001,.2),(8.051,.2),(8.001,.3),(8.,.2)):
+            moved = np.array([[x,1,1]])
+            source = reference.o3d.geometry.PointCloud(reference.o3d.utility.Vector3dVector(moved))
+            pairs,fitness,rmse = target.correspondences(source,cap)
+            d,ids = index.query(moved,distance_upper_bound=cap)
+            valid = d < cap
+            pairs = np.asarray(pairs)
+            np.testing.assert_array_equal(pairs[:,0],np.flatnonzero(valid))
+            np.testing.assert_array_equal(np.asarray(target.cloud.points)[pairs[:,1]],index.gather(ids[valid]))
+            self.assertEqual(fitness,float(valid.mean()))
+            self.assertEqual(rmse,float(d[0]) if valid[0] else 0.)
+        if getattr(index,'match_halo',0):
+            self.assertGreater(target._query_state.stats['absent_correspondences_reused'],0)
+
+    def test_packed_tree_keeps_exact_bounds_and_neighbors_for_degenerate_maps(self):
+        rng = np.random.default_rng(81)
+        for origin in (-4096.,0.,4096.):
+            # Duplicates, thin planes, and large offsets exercise leaf packing,
+            # exact float32 bounds, boundary ties, and sparse tile owners.
+            points = rng.uniform(0,2,(4000,3)).astype(np.float32)+origin
+            points[:,2] = origin
+            points[100:200] = points[:100]
+            index = self.index(points)
+            xyz = index.gather(np.arange(index.n))
+            tree = reference.cKDTree(xyz)
+            queries = np.vstack((xyz[::17]+[.0001,.0002,.01],
+                                 xyz[::31]+[0,0,2],xyz[:10]))
+            for cap in (.01,.05,.8):
+                for k in (1,2,20):
+                    actual = index.query(queries,k=k,distance_upper_bound=cap)
+                    # The tiled reference has an explicit ordering for equal
+                    # neighbors; a standalone cKDTree may choose another tie.
+                    expected = reference.TiledMapIndex.query(index,queries,k=k,distance_upper_bound=cap)
+                    np.testing.assert_array_equal(actual[0],tree.query(queries,k=k,distance_upper_bound=cap)[0])
+                    for a,b in zip(actual,expected):
+                        np.testing.assert_array_equal(a,b)
+
 
 if __name__ == '__main__':
     unittest.main()

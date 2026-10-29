@@ -123,6 +123,10 @@
   - CPU/memory-aware caches reuse original TLS tiles, normals, exact correspondence indices, partitions, and identical fitting requests.
   - C++/OpenMP correspondence queries use persistent nanoflann indices and reusable buffers; optimizer reductions remain ordered.
     - Build independent map tile indices in parallel; reuse exact previous neighbors as search bounds.
+    - Locate map tiles with a spatial hash; pack nanoflann-built trees into contiguous 20-byte nodes with 32-bit local indices. Global point IDs remain 64-bit.
+    - Keep map XYZ and tree extrema at their original float32 precision; distances, poses, normals, and optimizer arithmetic remain float64.
+    - Search a 10 cm halo beyond the fitting gate to certify absent matches across iterations; halo points do not enter the optimizer unless they pass the unchanged fitting gate.
+    - Cache the exact rounded search cutoff between neighbor updates; preserve equal-distance tie handling.
     - Fuse correspondence reuse, search, normal gathering, and ordered pair construction in C++.
     - Parallel voxel selection preserves the same original points and voxel order.
     - Balance query work dynamically; split oversized query batches without removing source/map points or changing search radii.

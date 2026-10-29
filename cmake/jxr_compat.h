@@ -5,6 +5,8 @@
 #include <ansi.h>
 
 #ifdef __APPLE__
+#include <wchar.h>
+
 // Defined by upstream strcodec.c but not declared for segdec.c.
 // Apple Clang requires the declaration when compiling C99.
 unsigned int _byteswap_ulong(unsigned int bits);

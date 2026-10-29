@@ -26,18 +26,32 @@ jobs:
           from pathlib import Path
           path = Path('build/mac-setup.log')
           log = path.read_text(errors='replace') if path.exists() else 'Launcher failed before the build started.'
-          tail = '\n'.join(log.splitlines()[-100:])[-18000:]
+          tail = '\n'.join(log.splitlines()[-60:])[-3900:]
           print('::error::' + tail.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))
           PYLOG
             exit 1
           fi
       - name: Save, reopen, and relocate placements
         run: |
-          python3 tests/mac_placement_smoke.py --executable install-mac/blk_studio
-          python3 tests/mac_placement_smoke.py --executable install-mac/blk_studio_rgb --rgb
+          status=0
+          {
+            python3 tests/mac_placement_smoke.py --executable install-mac/blk_studio &&
+            python3 tests/mac_placement_smoke.py --executable install-mac/blk_studio_rgb --rgb
+          } > build/mac-placement-test.log 2>&1 || status=$?
+          cat build/mac-placement-test.log
+          if [[ "$status" != 0 ]]; then
+            python3 - <<'PYLOG'
+          from pathlib import Path
+          log = Path('build/mac-placement-test.log').read_text(errors='replace')[-3900:]
+          print('::error::' + log.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))
+          PYLOG
+            exit "$status"
+          fi
       - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-log-${{ matrix.os }}
-          path: build/mac-setup.log
+          path: |
+            build/mac-setup.log
+            build/mac-placement-test.log

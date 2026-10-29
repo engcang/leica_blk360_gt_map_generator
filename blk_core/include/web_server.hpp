@@ -71,6 +71,26 @@ namespace blk_core
                         return httplib::Server::HandlerResponse::Handled;
                     }
                 }
+#ifdef BLK_PLACEMENT_ONLY
+                // This build exposes file selection and placement persistence only.
+                if (_request.path.rfind("/api/", 0) == 0)
+                {
+                    const bool allowed = _request.method == "GET"
+                        ? (_request.path == "/api/project" || _request.path == "/api/registration" ||
+                           _request.path == "/api/browse" || _request.path.rfind("/api/cloud/", 0) == 0 ||
+                           _request.path.rfind("/api/placement-sample/", 0) == 0)
+                        : (_request.method == "POST" && (_request.path == "/api/add-clouds" ||
+                           _request.path == "/api/refresh-clouds" || _request.path == "/api/create-folder" ||
+                           _request.path == "/api/registration/draft" ||
+                           _request.path == "/api/registration/placements/load" ||
+                           _request.path == "/api/registration/placements/save" || _request.path == "/api/shutdown"));
+                    if (!allowed)
+                    {
+                        reply(_response, {{"error", "This build supports manual PLY placement only"}}, 404);
+                        return httplib::Server::HandlerResponse::Handled;
+                    }
+                }
+#endif
                 _response.set_header("Cache-Control", "no-store");
                 _response.set_header("X-Content-Type-Options", "nosniff");
                 _response.set_header("Referrer-Policy", "no-referrer");
@@ -169,6 +189,14 @@ namespace blk_core
 
         void routes()
         {
+            server_.Get("/app-mode.js", [](const httplib::Request &, httplib::Response &response)
+            {
+#ifdef BLK_PLACEMENT_ONLY
+                response.set_content("window.BLK_PLACEMENT_ONLY=true;document.documentElement.dataset.placementOnly='true';", "text/javascript; charset=utf-8");
+#else
+                response.set_content("window.BLK_PLACEMENT_ONLY=false;", "text/javascript; charset=utf-8");
+#endif
+            });
             server_.Get("/trajectory-viewer.html", [this](const httplib::Request &, httplib::Response &response)
             {
                 serveFile(response, web_root_ / "trajectory-viewer.html", "text/html; charset=utf-8");

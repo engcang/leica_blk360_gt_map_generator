@@ -1,0 +1,33 @@
+name: macOS manual placement
+
+on:
+  push:
+    branches: [mac]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  placement:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build without registration submodules or Python packages
+        run: ./Start-BLK-Studio-Mac.command --no-launch
+      - name: Save, reopen, and relocate placements
+        run: |
+          python3 tests/mac_placement_smoke.py --executable install-mac/blk_studio
+          python3 tests/mac_placement_smoke.py --executable install-mac/blk_studio_rgb --rgb
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ matrix.os }}
+          path: build/mac-setup.log

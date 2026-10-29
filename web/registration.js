@@ -379,7 +379,7 @@ async function refreshRegistration()
         const log = element('registration-log');
         if (log.textContent !== latest_worker_log) log.textContent = latest_worker_log;
         log.scrollTop = log.scrollHeight;
-        if (typeof refreshAdditional === 'function') refreshAdditional();
+        if (!window.BLK_PLACEMENT_ONLY && typeof refreshAdditional === 'function') refreshAdditional();
         if (registration_state.storage_error) notice(registration_state.storage_error, true);
     }
     catch (error)

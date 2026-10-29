@@ -45,7 +45,7 @@ for (const tab of document.querySelectorAll('[role="tab"]'))
     tab.onclick = () => selectTab(tab.id.slice(4));
     tab.onkeydown = event =>
     {
-        const tabs = [...document.querySelectorAll('[role="tab"]')];
+        const tabs = [...document.querySelectorAll('[role="tab"]')].filter(tab => !window.BLK_PLACEMENT_ONLY || tab.id === 'tab-register');
         let index = tabs.indexOf(tab);
         if (event.key === 'ArrowRight') index = (index + 1) % tabs.length;
         else if (event.key === 'ArrowLeft') index = (index + tabs.length - 1) % tabs.length;
@@ -286,7 +286,7 @@ async function refresh()
         }
         if (project.storage_error) notice(`Project save error: ${project.storage_error}`, true);
         await refreshRegistration();
-        await refreshTrajectory();
+        if (!window.BLK_PLACEMENT_ONLY) await refreshTrajectory();
         if (project.migration_notice && !sessionStorage.getItem('migration-notice'))
         {
             notice(project.migration_notice);
@@ -583,5 +583,14 @@ action('quit', async () =>
     element('connection').textContent = 'App closed. You can close this tab.';
     element('start').disabled = element('cancel').disabled = true;
 });
+if (window.BLK_PLACEMENT_ONLY)
+{
+    selectTab('register');
+    document.title = 'BLK Studio · Manual placement';
+    element('placement-open').textContent = 'Arrange PLY scans';
+    element('placement-open').classList.replace('secondary', 'primary');
+    document.querySelector('label[for="map-output"]').textContent = 'PLACEMENT JSON OUTPUT FOLDER';
+    element('map-output').placeholder = 'Choose where to save initial_placements.json';
+}
 document.addEventListener('DOMContentLoaded', refresh);
 setInterval(refresh, 1200);

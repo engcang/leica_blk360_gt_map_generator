@@ -2,6 +2,10 @@
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 
+if [[ "$(uname -s)" == Darwin ]]; then
+    exec bash ./Start-BLK-Studio-Mac.command "$@"
+fi
+
 if [[ ! -f /etc/os-release ]]; then
     echo 'This launcher supports Ubuntu 22.04/24.04 on x86_64.' >&2
     exit 1

@@ -10,6 +10,8 @@ if(MSVC)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
+option(BLK_PLACEMENT_ONLY "Build the manual PLY placement workspace" ${APPLE})
+
 ### Find dependencies
 find_package(Threads REQUIRED)
 include(cmake/dependencies.cmake)
@@ -20,6 +22,9 @@ add_library(blk_core INTERFACE)
 target_include_directories(blk_core INTERFACE blk_core/include)
 target_include_directories(blk_core SYSTEM INTERFACE "${BLK_THIRD_PARTY}")
 target_link_libraries(blk_core INTERFACE jpeg_xr Threads::Threads)
+if(BLK_PLACEMENT_ONLY)
+    target_compile_definitions(blk_core INTERFACE BLK_PLACEMENT_ONLY=1)
+endif()
 if(MSVC)
     target_compile_options(blk_core INTERFACE /fp:precise /utf-8)
 else()
@@ -31,20 +36,30 @@ if(WIN32)
 endif()
 
 ### Build applications
-add_executable(blk_convert blk_core/src/main.cpp)
-target_include_directories(blk_convert PRIVATE blk_core/src)
-target_link_libraries(blk_convert PRIVATE blk_core)
+if(NOT BLK_PLACEMENT_ONLY)
+    add_executable(blk_convert blk_core/src/main.cpp)
+    target_include_directories(blk_convert PRIVATE blk_core/src)
+    target_link_libraries(blk_convert PRIVATE blk_core)
+endif()
 add_executable(blk_studio WIN32 blk_core/src/studio.cpp)
 target_include_directories(blk_studio PRIVATE blk_core/src)
 target_link_libraries(blk_studio PRIVATE blk_core)
 if(MINGW)
     target_link_options(blk_studio PRIVATE -static -municode)
-    target_link_options(blk_convert PRIVATE -static)
+    if(TARGET blk_convert)
+        target_link_options(blk_convert PRIVATE -static)
+    endif()
 endif()
 
-add_executable(blk_convert_rgb blk_core/src/main.cpp)
+if(NOT BLK_PLACEMENT_ONLY)
+    add_executable(blk_convert_rgb blk_core/src/main.cpp)
+endif()
 add_executable(blk_studio_rgb WIN32 blk_core/src/studio.cpp)
-foreach(target blk_convert_rgb blk_studio_rgb)
+set(rgb_targets blk_studio_rgb)
+if(TARGET blk_convert_rgb)
+    list(APPEND rgb_targets blk_convert_rgb)
+endif()
+foreach(target ${rgb_targets})
     target_include_directories(${target} PRIVATE blk_core/src)
     target_link_libraries(${target} PRIVATE blk_core)
     target_compile_definitions(${target} PRIVATE BLK_RGB=1)
@@ -60,10 +75,13 @@ endif()
 #Codex: Refresh assets without a relink; one target avoids concurrent writes to the shared runtime directory.
 add_custom_target(blk_runtime_resources ALL
     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/web $<TARGET_FILE_DIR:blk_studio>/web
-    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/mapping $<TARGET_FILE_DIR:blk_studio>/mapping
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE $<TARGET_FILE_DIR:blk_studio>/LICENSE
     COMMAND ${CMAKE_COMMAND} -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/web -DDEST=$<TARGET_FILE_DIR:blk_studio>/web_rgb -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/rgb_web.cmake
-    DEPENDS blk_studio blk_convert blk_studio_rgb blk_convert_rgb)
+    DEPENDS blk_studio blk_studio_rgb)
+if(NOT BLK_PLACEMENT_ONLY)
+    add_custom_command(TARGET blk_runtime_resources POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/mapping $<TARGET_FILE_DIR:blk_studio>/mapping)
+endif()
 
 ### Test
 include(CTest)
@@ -84,13 +102,18 @@ if(BUILD_TESTING)
 endif()
 
 ### Install
-install(TARGETS blk_studio blk_convert blk_studio_rgb blk_convert_rgb RUNTIME DESTINATION . BUNDLE DESTINATION .)
+install(TARGETS blk_studio blk_studio_rgb RUNTIME DESTINATION . BUNDLE DESTINATION .)
+if(NOT BLK_PLACEMENT_ONLY)
+    install(TARGETS blk_convert blk_convert_rgb RUNTIME DESTINATION .)
+endif()
 install(DIRECTORY web DESTINATION .)
-install(FILES docs/trajectory.md DESTINATION docs)
 install(DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/web_rgb" DESTINATION .)
-install(DIRECTORY mapping DESTINATION . FILES_MATCHING PATTERN "*.py" PATTERN "requirements.txt"
-        PATTERN "__pycache__" EXCLUDE PATTERN "test_*.py" EXCLUDE)
-install(DIRECTORY mapping/bin DESTINATION mapping OPTIONAL)
+if(NOT BLK_PLACEMENT_ONLY)
+    install(FILES docs/trajectory.md DESTINATION docs)
+    install(DIRECTORY mapping DESTINATION . FILES_MATCHING PATTERN "*.py" PATTERN "requirements.txt"
+            PATTERN "__pycache__" EXCLUDE PATTERN "test_*.py" EXCLUDE)
+    install(DIRECTORY mapping/bin DESTINATION mapping OPTIONAL)
+endif()
 install(FILES LICENSE README.md DESTINATION .)
 install(FILES "${BLK_THIRD_PARTY}/jxrlib/LICENSE" DESTINATION licenses RENAME jxrlib.LICENSE)
 install(FILES "${BLK_THIRD_PARTY}/httplib.LICENSE" "${BLK_THIRD_PARTY}/json.LICENSE" "${BLK_THIRD_PARTY}/picosha2.LICENSE" DESTINATION licenses)

@@ -853,3 +853,7 @@ dialog::backdrop
 .trajectory-run-controls .registration-actions { padding: 20px 0 0; }
 .trajectory-result-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 #trajectory-output-paths { padding-left: 20px; font-size: 13px; line-height: 1.7; }
+
+html[data-placement-only] .automatic-registration,
+html[data-placement-only] [role="tab"]:not(#tab-register),
+html[data-placement-only] [role="tabpanel"]:not(#panel-register) { display: none !important; }

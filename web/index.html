@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>BLK Studio · Scan workspace</title>
     <link rel="stylesheet" href="/app.css">
+    <script src="/app-mode.js"></script>
     <script src="/app.js" defer></script>
     <script src="/registration.js" defer></script>
     <script src="/additional.js" defer></script>
@@ -47,16 +48,16 @@
             <div id="registration-scans"><div class="empty">Select PLY files or a folder.</div></div>
             <div class="registration-actions"><button id="placement-open" class="secondary">Arrange PLY scans (optional)</button><span id="placement-status" class="hint" hidden></span></div>
             <div class="registration-settings">
-                <label>Map name<input id="map-name" value="reference_map" maxlength="100" aria-label="Map name"></label>
+                <label class="automatic-registration">Map name<input id="map-name" value="reference_map" maxlength="100" aria-label="Map name"></label>
                 <button id="registration-clear" class="quiet">Clear selection</button>
             </div>
             <label class="map-output-label" for="map-output">MAP OUTPUT FOLDER</label><div class="map-output"><input id="map-output" aria-label="Map output folder" placeholder="Choose where to save poses and review"><button id="map-browse" class="secondary">Browse…</button></div>
 
-            <details id="registration-setup" class="registration-advanced"><summary>Registration setup <span id="runtime-state">Not checked</span></summary><label for="registration-python">Python executable (path or command, no arguments)</label><div class="map-output"><input id="registration-python" aria-label="Python executable" placeholder="python"><button id="runtime-check" class="secondary">Check runtime</button><button id="runtime-install" class="secondary">Install packages</button></div><p id="runtime-message" class="hint" role="status"></p></details>
-            <div class="registration-actions"><button id="registration-start" class="primary" disabled>Register scans</button><button id="registration-stop" class="secondary" disabled>Stop registration</button></div>
-            <section class="registration-advanced worker-log" aria-label="Latest worker log"><h3>Latest worker log</h3><pre id="registration-log" tabindex="0">No active registration.</pre></section>
-            <div class="registration-actions"><button id="open-registration-result" class="secondary">Open existing result</button></div>
-            <div id="registration-jobs"></div>
+            <details id="registration-setup" class="registration-advanced automatic-registration"><summary>Registration setup <span id="runtime-state">Not checked</span></summary><label for="registration-python">Python executable (path or command, no arguments)</label><div class="map-output"><input id="registration-python" aria-label="Python executable" placeholder="python"><button id="runtime-check" class="secondary">Check runtime</button><button id="runtime-install" class="secondary">Install packages</button></div><p id="runtime-message" class="hint" role="status"></p></details>
+            <div class="registration-actions automatic-registration"><button id="registration-start" class="primary" disabled>Register scans</button><button id="registration-stop" class="secondary" disabled>Stop registration</button></div>
+            <section class="registration-advanced worker-log automatic-registration" aria-label="Latest worker log"><h3>Latest worker log</h3><pre id="registration-log" tabindex="0">No active registration.</pre></section>
+            <div class="registration-actions automatic-registration"><button id="open-registration-result" class="secondary">Open existing result</button></div>
+            <div id="registration-jobs" class="automatic-registration"></div>
         </section>
         </div>
         <div id="panel-additional" role="tabpanel" aria-labelledby="tab-additional" hidden>

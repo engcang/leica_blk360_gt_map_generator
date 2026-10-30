@@ -204,6 +204,7 @@
   - Every accepted pose passes 1 cm fitting and held-out validation; imported baseline poses are initial guesses for the same refinement.
   - Recovery: reuse or initialize the end pose → reverse tracking → local submap fitting for remaining gaps.
     - Restart long untracked gaps from independently validated windows; try bounded local drift capture before KISS.
+    - Before dense submaps, probe gap interiors from accepted poses on both sides; restart only after three independent 1 cm TLS fits agree.
   - Continue geometrically supported iteration-limited fits before trying submaps; preserve the same validation.
   - Local submaps: 2 / 6 s windows, initialized from nearby accepted poses and the original map alignment.
   - Screen submap proposals at 10 cm, refine the full submap at 1 cm, then refine and validate each recovered scan at 1 cm. Stop when local submap recovery fails.

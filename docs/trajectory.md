@@ -116,6 +116,12 @@
     - Forward/reverse tracking predicts from the last accepted pose and the SLAM relative transform. KISS is not called for every scan.
     - End initialization uses 2 / 4 / 6 s windows and 30 / 50 / 8 cm KISS resolutions, nearby regions before the whole map.
     - Its independent scan checks and conditional leave-one-scan-out stability checks are retained.
+  - Before dense submap recovery, check interior windows of gaps lasting at least 2 s, with seed probes about every 5 s plus the midpoint and endpoints.
+    - Propagate the preceding/following accepted pose through odometry; coarse-fit the training window, then independently fit the withheld anchor and two other scans at 1 cm.
+    - Require all three scans to pass direct full-rank TLS validation; no weak-direction or neighbor-only promotion, KISS, or dense shared fitting in this retry.
+    - Compare both endpoint candidates; reject unresolved competing locations. Resume forward/reverse tracking from each verified seed and retain the temporal audit.
+    - The 5 s interval selects initialization probes only; tracking still processes every available scan.
+    - Reuse completed reverse searches when only this probe schedule changes; keep verified earlier results and attempt only missing intervals.
   - Local submaps use 2 / 6 s windows, up to 11 / 21 scans, and the preceding/following accepted poses plus the original alignment as initial guesses.
     - Rank supplied guesses and 10 cm coarse refinements before dense fitting; merge proposals within 1 cm / 0.1°.
     - Check direct TLS evidence at the proposed position before fitting the dense training submap.

@@ -185,7 +185,7 @@ class TailInitializer:
         self.log(dict(stage='tail_support_fit', index=window.anchor.index, **result))
         return (T if ok else None), result
 
-    def validate_tail_seed(self, window, initial, scope, resolution):
+    def validate_tail_seed(self, window, initial, scope, resolution, *, allow_shared_support=True):
         """One KISS proposal -> individual fine fits; shared fitting is conditional."""
         started = time.perf_counter()
         anchor = window.anchor
@@ -232,7 +232,7 @@ class TailInitializer:
         enough = good[0] and fits[0][1].get('accepted') and sum(
             bool(ok and q.get('accepted')) for ok, (_, q) in zip(good[1:], fits[1:])) >= 2
         certificate = None
-        if not enough and weak and good[0] and sum(good[1:]) >= 2:
+        if allow_shared_support and not enough and weak and good[0] and sum(good[1:]) >= 2:
             try:
                 shared, support = self._tail_support_fit(window, initial)
             except (ValueError, RuntimeError) as error:
@@ -261,6 +261,7 @@ class TailInitializer:
                     T = shared
         confirmed = [j for j, (s, (fitted, q)) in enumerate(zip(checks, fits))
                      if q.get('accepted') and (map_rooted(q) or context_map_supported(q))
+                     and (allow_shared_support or map_rooted(q))
                      and within(fitted, T@window.relative(s), (.15, 3.))]
         accepted = 0 in confirmed and len(confirmed) >= 3
         reason = 'individual_scans_verified' if accepted else 'insufficient_independent_verified_scans'
@@ -285,6 +286,34 @@ class TailInitializer:
                               fits=[fits[j] for j in confirmed], checks=[checks[j] for j in confirmed], window=window)
             self.seed_hypotheses.append(hypothesis)
             return hypothesis
+        return None
+
+    def initialize_from_anchors(self, index):
+        """Find an independently supported island without feature or dense submap search.
+
+        Ten bad scans stop tracking, but do not prove that the entire interval
+        is unobservable. Revisit its interior from the verified endpoints before
+        spending time on dense shared fitting. No partial-view promotion here.
+        """
+        from trajectory_recovery import choose_seed
+        for radius in (1., 3.):
+            window = self.tail_window(index, radius)
+            if window is None:
+                continue
+            guesses = [(label, T) for label, T in self.seed_guesses(window.anchor)
+                       if label != 'initial_alignment']
+            self.seed_hypotheses = []
+            seen = []
+            for label, initial in guesses:
+                if any(within(initial, previous, (.01, .1)) for previous in seen):
+                    continue
+                seen.append(initial)
+                self.validate_tail_seed(window, initial, 'local_capture_'+label, .1,
+                                        allow_shared_support=False)
+            # Compare both endpoint hypotheses before accepting either one.
+            selected = choose_seed(self.seed_hypotheses)
+            if selected is not None:
+                return self._accept_tail_hypothesis(selected)
         return None
 
     def initialize_tail(self, index, allow_global=True):

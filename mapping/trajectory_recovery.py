@@ -157,6 +157,7 @@ class Recovery(LocalSubmaps, TailInitializer):
         self.seed_fits = {}
         self.matcher = None
         self.tracking_directory = Path(tracking_directory) if tracking_directory else self.output/'tracking'
+        self.anchor_tracking_ready = False
         self.on_checkpoint = on_checkpoint
         self.kiss_attempts = set()
         self.seed_hypotheses = []
@@ -176,9 +177,11 @@ class Recovery(LocalSubmaps, TailInitializer):
                        local_coarse_voxel_m=.1, post_reverse_kiss=False,
                        tail_initialization='local-capture-coarse-fine-v2',
                        tail_local_capture_radius_m=8., reverse_restart_gap_s=30.,
+                       anchor_recovery='endpoint-window-v1', anchor_probe_spacing_s=5.,
+                       anchor_probe_min_gap_s=2.,
                        tail_window_radii_s=list(WINDOW_RADII), tail_kiss_resolutions_m=[.3,.5,.08],
                        iteration_limit_continuation=180,
-                       schedule='forward-then-reverse-then-local-submaps'),
+                       schedule='forward-then-reverse-with-anchor-restarts-then-local-submaps'),
             validation=dict(context_protocol=VALIDATION_PROTOCOL, independent_witness_scans=2,
                             temporal_protocol='drift-scaled-bridge-v3', partial_views_require_map_anchor=True,
                             shared_training_observable_directions=6,
@@ -648,9 +651,10 @@ class Recovery(LocalSubmaps, TailInitializer):
         accepted = [q for q in rows if q.get('accepted')]
         if len(accepted) != saved['accepted'] or len(values) != len(accepted):
             raise ValueError('Forward/reverse checkpoint pose count mismatch')
-        allowed = {'baseline_retained', 'baseline_fine', 'forward_fine', 'reverse_fine', 'tail_seed', 'tail_forward'}
-        if (saved['provenance'].get('protocol') == 'studio-recovery-connected-local-v2'
-                and saved['provenance'].get('revalidated_source') == self.provenance.get('revalidated_source')):
+        allowed = {'baseline_retained', 'baseline_fine', 'forward_fine', 'reverse_fine', 'tail_seed', 'tail_forward',
+                   'anchor_seed', 'anchor_forward', 'anchor_reverse'}
+        if (self.provenance.get('revalidated_source') and
+                saved['provenance'].get('revalidated_source') == self.provenance['revalidated_source']):
             allowed.update(('verified_submap_seed','submap_forward','submap_reverse'))
         for q, row in zip(accepted, values):
             if (q.get('stage') not in allowed or abs(q['timestamp']-row[0]) > 1e-6
@@ -667,6 +671,8 @@ class Recovery(LocalSubmaps, TailInitializer):
         self.log(dict(stage='tracking_checkpoint_reused', accepted=len(self.poses), rejected_on_revalidation=len(removed)))
         same_search = (saved['provenance'].get('seeds', {}).get('tail_initialization')
                        == self.provenance['seeds']['tail_initialization'])
+        self.anchor_tracking_ready = (not removed and same_search and
+            saved['provenance'].get('seeds', {}).get('anchor_recovery') == self.provenance['seeds']['anchor_recovery'])
         # Keep verified poses, but retry missing intervals when reverse capture
         # has improved. Do not mistake an older unsuccessful search for proof
         # that the remaining scans have already had the new recovery attempt.
@@ -686,7 +692,7 @@ class Recovery(LocalSubmaps, TailInitializer):
             quarantined=self.quarantined, conflicted=sorted(self.conflicted),
             baseline_temporal_removed=self.baseline_temporal_removed))
 
-    def seed_indices(self, indices, *, from_end=False):
+    def seed_indices(self, indices, *, from_end=False, spacing_s=30.):
         if not indices:
             return []
         ordered = list(reversed(indices)) if from_end else indices
@@ -694,7 +700,7 @@ class Recovery(LocalSubmaps, TailInitializer):
         stamp = self.rows_by_index[ordered[0]]['timestamp']
         for index in ordered[1:]:
             t = self.rows_by_index[index]['timestamp']
-            if abs(t-stamp) >= 30:
+            if abs(t-stamp) >= spacing_s:
                 seeds.append(index); stamp = t
         return list(dict.fromkeys(seeds+[ordered[len(ordered)//2], ordered[-1]]))
 
@@ -770,9 +776,10 @@ class Recovery(LocalSubmaps, TailInitializer):
             tracking_ready = False
         self.restore_accepted_checkpoint()
         self.checkpoint()
-        phases = ('tracking',) if tracking_only else ('tracking', 'local')
+        phases = ('tracking', 'anchors') if tracking_only else ('tracking', 'anchors', 'local')
         for phase in phases:
-            if phase == 'tracking' and tracking_ready:
+            if ((phase == 'tracking' and tracking_ready) or
+                    (phase == 'anchors' and tracking_ready and self.anchor_tracking_ready)):
                 continue
             allow_global = False
             self.window_cache.clear()
@@ -785,6 +792,9 @@ class Recovery(LocalSubmaps, TailInitializer):
             blocks.sort(key=(lambda b: -b[-1]) if phase == 'tracking' else
                         (lambda b: (not bool(suspect.intersection(b)), -len(b), b[0])))
             for block_number,indices in enumerate(blocks):
+                if (phase == 'anchors' and self.rows_by_index[indices[-1]]['timestamp']-
+                        self.rows_by_index[indices[0]]['timestamp'] < 2.):
+                    continue
                 original_anchors=dict(self.poses)
                 lo,hi=indices[0],indices[-1]
                 before=[i for i in original_anchors if i<lo];after=[i for i in original_anchors if i>hi]
@@ -814,27 +824,26 @@ class Recovery(LocalSubmaps, TailInitializer):
                 if search_needed and phase != 'tracking':
                     # End/middle/start first, then other stable time segments. A
                     # failed seed does not abandon the rest of a long interval.
-                    seeds=list(dict.fromkeys([search_needed[-1],search_needed[len(search_needed)//2],search_needed[0]]))
-                    last_stamp=self.rows_by_index[search_needed[0]]['timestamp']
-                    for i in search_needed:
-                        stamp=self.rows_by_index[i]['timestamp']
-                        if stamp-last_stamp>=30:
-                            seeds.append(i);last_stamp=stamp
-                    seeds=list(dict.fromkeys(seeds))
+                    seeds=list(dict.fromkeys([search_needed[-1],search_needed[len(search_needed)//2],
+                        *self.seed_indices(search_needed, spacing_s=5. if phase == 'anchors' else 30.)]))
                     for seed_index in seeds:
                         if seed_index in forward or seed_index in backward:continue
-                        T=self.submap_seed(seed_index, allow_global=allow_global)
+                        T=(self.initialize_from_anchors(seed_index) if phase == 'anchors' else
+                           self.submap_seed(seed_index, allow_global=allow_global))
                         if T is None:continue
                         s=self.scan(seed_index)
                         # Use the fitted submap as the initial pose for the
                         # anchor's own 1 cm fitting and validation.
-                        T,q=self.fit(s,T,'verified_submap_anchor')
+                        T,q=(self.seed_pose(seed_index,T) if phase == 'anchors' else
+                             self.fit(s,T,'verified_submap_anchor'))
                         self.certify_submap_pose(T, q)
                         if not q['accepted']:continue
-                        q.update(index=s.index,timestamp=s.timestamp,stage='verified_submap_seed')
+                        q.update(index=s.index,timestamp=s.timestamp,
+                                 stage='anchor_seed' if phase == 'anchors' else 'verified_submap_seed')
                         self.seed_fits[seed_index] = (T, q)
-                        new_forward={seed_index:(T,q),**self.propagate([i for i in indices if i>seed_index and (i not in forward and i not in backward or i in disputed)],seed_index,T,'submap_forward')}
-                        new_backward={seed_index:(T,q),**self.propagate([i for i in reversed(indices) if i<seed_index and (i not in forward and i not in backward or i in disputed)],seed_index,T,'submap_reverse')}
+                        prefix = 'anchor' if phase == 'anchors' else 'submap'
+                        new_forward={seed_index:(T,q),**self.propagate([i for i in indices if i>seed_index and (i not in forward and i not in backward or i in disputed)],seed_index,T,prefix+'_forward')}
+                        new_backward={seed_index:(T,q),**self.propagate([i for i in reversed(indices) if i<seed_index and (i not in forward and i not in backward or i in disputed)],seed_index,T,prefix+'_reverse')}
                         covered=set(new_forward)|set(new_backward)
                         resolved=covered.intersection(disputed)-verified_indices
                         for i in resolved:
@@ -861,7 +870,7 @@ class Recovery(LocalSubmaps, TailInitializer):
                 self.checkpoint()
                 self.progress(f'Recovered {len(self.poses)-baseline_count} poses; interval {block_number+1}/{len(blocks)}')
                 print(f'{self.source.sequence}: block {block_number+1}/{len(blocks)}, {len(self.poses)-baseline_count} recovered',flush=True)
-            if phase == 'tracking':
+            if phase == 'anchors':
                 self.save_tracking()
         self.source.verify_unchanged();self.fine.verify_unchanged()
         if digest(self.baseline/'candidate_trajectory.tum')!=self.provenance['baseline_trajectory_sha256']:

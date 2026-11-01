@@ -143,7 +143,7 @@ endif()
 ### Build application
 add_library(blk_correspondence SHARED src/correspondence.cpp)
 target_include_directories(blk_correspondence SYSTEM PRIVATE "${BLK_NANOFLANN_SOURCE_DIR}/include")
-target_link_libraries(blk_correspondence PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(blk_correspondence PRIVATE blk_eigen OpenMP::OpenMP_CXX)
 if(MSVC)
     target_compile_options(blk_correspondence PRIVATE /fp:precise)
 else()

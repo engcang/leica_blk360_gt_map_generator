@@ -213,6 +213,7 @@
   - Validate recovered poses on the original 1 cm map; check existing and recovered poses against chronological relative motion.
     - Surface RMS: below 5 cm; context-supported poses require below 3 cm and stronger close-distance TLS overlap.
     - Check both held-out geometry and directions constrained by the actual Tukey-weighted fit; neighboring partial views cannot recursively certify one another.
+    - Recheck uncertain local fits against nearby alternatives; reject competing alignments with substantially better held-out TLS overlap and distance support.
     - Gap motion bounds grow with measured travel and elapsed time; no fixed 50 cm / 10° correction cap.
     - Check across missing GT intervals when input odometry remains continuous; revalidate saved anchors before reuse.
   - Seed checks withhold the anchor scan and require agreement from at least two other scans.
@@ -274,6 +275,8 @@
   - Automatic thread detection for native engines, Open3D, and quality queries.
   - Generate trajectory: **CPU threads → Auto** uses available logical CPUs; an explicit count sets a limit.
     - C++/OpenMP map-index construction, correspondence processing, and deterministic voxel selection.
+    - 10 cm Huber capture: reusable native map index and buffers; parallel matching, normal-matrix accumulation, and line search.
+      - Preserve weak-direction handling, per-step limits, and convergence rules; fixed reduction blocks make thread counts reproducible.
     - Compact immutable KD-trees inside hashed map tiles; exact bounds reuse both matches and missing matches.
     - Parallel queries, normals, and map layers; ordered trajectory propagation and serial Open3D solver reductions.
     - Reuse exact distance bounds to skip points still outside the correspondence gate; unchanged fitting points and thresholds.

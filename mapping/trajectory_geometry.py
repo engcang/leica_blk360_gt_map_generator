@@ -68,6 +68,8 @@ class Matcher:
         self.good = np.load(cache / 'normal_valid.npy', mmap_mode='r')
         self.tree = cKDTree(self.p)
         self.workers = workers
+        self._native_coarse = None
+        self._native_coarse_checked = False
 
     def capture_candidates(self, points, initial, radius_m=8., count=5):
         """Rank local translation/yaw proposals; these never certify a pose.
@@ -117,6 +119,18 @@ class Matcher:
         return moved[valid], n, r, valid, dist
 
     def icp(self, points: np.ndarray, initial: np.ndarray) -> np.ndarray:
+        if not getattr(self, '_native_coarse_checked', False):
+            from native_correspondence import CoarseIcp
+            self._native_coarse = CoarseIcp.create(self.p, self.n, self.good, self.workers)
+            self._native_coarse_checked = True
+        if self._native_coarse is not None:
+            result = self._native_coarse.fit(points, initial)
+            if result is not None:
+                return result
+        return self.icp_reference(points, initial)
+
+    def icp_reference(self, points: np.ndarray, initial: np.ndarray) -> np.ndarray:
+        """Reference and exact-tie fallback for the native equivalent solver."""
         T = initial.copy()
         for cap in (.8, .4, .2):
             for _ in range(15):

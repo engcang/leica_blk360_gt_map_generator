@@ -164,62 +164,67 @@ def main():
                     assert view.locator('#visualizing-items input').count() == count
                     for old in ('show-previous','show-next','show-all','previous-count','next-count'):
                         assert view.locator('#'+old).count() == 0
-                    visible([1])
-                    assert view.locator('#visualize-1').is_checked()
+                    visible([0,1])
+                    for i in [0,1]:
+                        assert view.locator(f'#visualize-{i}').is_checked()
                     assert view.locator('#visualize-1').is_disabled()
-                    # Choose nonconsecutive scans without adding the items between them.
-                    view.locator(f'#visualize-{count-1}').check();visible([1,count-1])
-                    view.locator('#visualize-0').check();visible([0,1,count-1])
-                    view.locator(f'#visualize-{count-1}').uncheck();visible([0,1])
+                    assert view.locator('#visualize-0').is_enabled()
                     view.locator('#visualize-0').uncheck();visible([1])
-                    assert view.locator('#reference').input_value() == '0'
-                    # The moving scan follows selection; explicitly checked items persist.
-                    view.locator('#moving').select_option(str(count-1));visible([count-1])
-                    assert view.locator(f'#visualize-{count-1}').is_disabled()
-                    view.locator('#visualize-1').check();visible([1,count-1])
-                    view.locator('#moving').select_option('1');visible([1])
-                    view.locator('#moving').select_option('0');visible([0,1])
-                    view.locator('#visualize-1').uncheck();visible([0])
-                    assert view.locator('#roll-plus').is_disabled() and view.locator('#pitch-minus').is_disabled()
-                    view.locator('#moving').select_option('1');visible([1])
-                    for i in range(count):
-                        if i != 1: view.locator(f'#visualize-{i}').check()
-                    visible(list(range(count)))
-                    assert int(view.locator('body').get_attribute('data-shown')) == expected_all_points
-                    view.locator('#clear-visualizing').click();visible([1])
-                    assert view.locator('#visualize-1').is_checked() and view.locator('#visualize-1').is_disabled()
-                    # Shift-click works on row text too, in both directions, and
-                    # keeps the current item visible while clearing a whole range.
-                    view.locator('#visualize-0').check()
-                    view.locator('#visualizing-items label').nth(count-1).locator('.item-name').click(modifiers=['Shift'])
-                    visible(list(range(count)))
-                    view.locator('#visualizing-items label').nth(0).locator('.item-name').click(modifiers=['Shift'])
-                    visible([1])
-                    assert view.locator('#visualize-1').is_checked() and view.locator('#visualize-1').is_disabled()
-                    view.locator('#visualize-0').check()
-                    view.locator(f'#visualize-{count-1}').click(modifiers=['Shift'])
-                    visible(list(range(count)))
-                    view.locator('#visualize-0').click(modifiers=['Shift'])
-                    visible([1])
-                    assert view.evaluate('blkPlacement.items().map(i=>i.pose)') == before
-                    assert view.evaluate('blkPlacement.items().map(i=>[i.enabled,i.comparisonReference])') == placements_before
-                    # Each Next starts with exactly the current/previous pair,
-                    # without accumulating old selections or changing the camera.
+                    view.locator('#density').select_option('10');visible([1])
+                    view.locator('#next').click();visible([1,2])
+                    view.locator('#previous').click();visible([0,1])
+                    # Explicit selections survive navigation; automatic neighbors
+                    # move with the current scan and do not accumulate.
                     view.locator('#moving').select_option('0');visible([0])
                     view.locator(f'#visualize-{count-1}').check();visible([0,count-1])
-                    view.locator('#next').click();visible([0,1])
-                    view.locator('#next').click();visible([1,2])
+                    view.locator('#next').click();visible([0,1,count-1])
+                    view.locator('#next').click();visible(sorted(set([1,2,count-1])))
+                    view.locator('#previous').click();visible([0,1,count-1])
+                    view.locator('#moving').select_option('0');visible([0,count-1])
+                    view.locator(f'#visualize-{count-1}').uncheck();visible([0])
+                    assert view.locator('#roll-plus').is_disabled() and view.locator('#pitch-minus').is_disabled()
+                    # Shift-range selection excludes only the mandatory current item.
+                    view.locator('#clear-visualizing').click();visible([0])
+                    view.locator('#visualizing-items label').nth(count-1).locator('.item-name').click(modifiers=['Shift'])
+                    visible(list(range(count)))
                     poses_before_clear = view.evaluate('blkPlacement.items().map(i=>i.pose)')
-                    view.locator('#clear-visualizing').click();visible([2])
+                    view.locator('#clear-visualizing').click();visible([0])
                     assert view.evaluate('blkPlacement.items().map(i=>i.pose)') == poses_before_clear
+                    view.locator('#moving').select_option(str(count-1));visible([count-2,count-1])
+                    view.locator('#visualize-0').check();visible(sorted(set([0,count-2,count-1])))
+                    view.locator('#moving').select_option('0');visible([0])
+                    view.locator('#moving').select_option(str(count-1));visible(sorted(set([0,count-2,count-1])))
+                    view.locator('#clear-visualizing').click();visible([count-1])
+                    view.locator('#moving').select_option('1');visible([0,1])
+                    assert view.evaluate('blkPlacement.items().map(i=>i.enabled?i.pose:null)') == [p if state[0] else None for p,state in zip(before,placements_before)]
                     assert view.evaluate('blkPlacement.items().map(i=>[i.enabled,i.comparisonReference])') == placements_before
-                    view.locator('#previous').click();visible([1])
+                    # Each rotation button repeats while held, stops on release,
+                    # and the entire gesture is one undo operation.
+                    for axis,index in [('roll',4),('pitch',5),('yaw',3)]:
+                        saved_pose = view.evaluate('blkPlacement.items()[1].pose.slice()')
+                        button = view.locator('#'+axis+'-plus')
+                        button.hover();view.mouse.down();view.wait_for_timeout(650);view.mouse.up()
+                        repeated = view.evaluate('blkPlacement.items()[1].pose.slice()')
+                        assert repeated[index]-saved_pose[index] >= math.radians(1.5), (axis,saved_pose,repeated)
+                        view.wait_for_timeout(180)
+                        assert view.evaluate('blkPlacement.items()[1].pose') == repeated
+                        view.locator('#undo').click()
+                        assert view.evaluate('blkPlacement.items()[1].pose') == saved_pose
+                    # Cancel a held gesture when moving to another item.
+                    view.locator('#yaw-plus').hover();view.mouse.down()
+                    view.evaluate("document.getElementById('next').click()")
+                    after_navigation=view.evaluate('blkPlacement.items().map(i=>i.pose.slice())')
+                    view.wait_for_timeout(550);view.mouse.up()
+                    assert view.evaluate('blkPlacement.items().map(i=>i.pose)') == after_navigation
+                    view.locator('#undo').click()
+                    assert view.evaluate('blkPlacement.items().map(i=>i.enabled?i.pose:null)') == [p if state[0] else None for p,state in zip(before,placements_before)]
                     view.locator('#density').select_option('5')
                     view.wait_for_function('document.body.dataset.loaded === "true"')
                     assert view.evaluate('JSON.stringify(blkPlacement.camera)') == camera_before
-                    view.locator('#density').select_option('10');visible([1])
+                    view.locator('#density').select_option('10');visible([0,1])
                     view.locator('#fit').click()
                     assert view.evaluate('JSON.stringify(blkPlacement.camera)') != camera_before
+                    view.wait_for_function('document.querySelector("#save-status").textContent.startsWith("Saved on disk:")')
                     return pose
                 scan_pose = exercise_controls(editor, 4, 400)
                 assert scan_pose[:4]==[1.25,0,0,0]
@@ -229,7 +234,8 @@ def main():
                 reopened = popup.value
                 reopened.on('pageerror', lambda error: errors.append(str(error)))
                 reopened.wait_for_function('window.blkPlacement?.items().length === 4 && document.body.dataset.loaded === "true"')
-                assert reopened.evaluate('blkPlacement.items()[1].pose') == scan_pose
+                restored = reopened.evaluate('blkPlacement.items()[1].pose')
+                assert restored == scan_pose, (restored, scan_pose)
                 reopened.close()
                 assert page.locator('.registration-results').count() == 0
                 assert page.locator('#registration-log').evaluate('(el) => el.closest("details") === null')

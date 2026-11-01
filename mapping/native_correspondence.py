@@ -75,6 +75,9 @@ def loadLibrary(path=None):
             function = getattr(lib, name)
             function.restype, function.argtypes = None, args
     fused = dict(
+        blk_coarse_create=(pointer, [pointer, pointer, pointer]),
+        blk_coarse_destroy=(None, [pointer]),
+        blk_coarse_run=(ct.c_int, [pointer, pointer, integer, pointer, pointer, pointer]),
         blk_resident_create=(pointer, [pointer, integer, ct.c_int]),
         blk_resident_destroy=(None, [pointer]),
         blk_resident_matches_create=(pointer, [pointer, integer]),
@@ -162,6 +165,53 @@ class ResidentIndex:
         if len(points) >= np.iinfo(np.int32).max or not finitePoints(lib,points,workers):
             raise ValueError('Finite PLY target within Open3D correspondence capacity required')
         return cls(points,workers,lib)
+
+
+class CoarseIcp:
+    """Reusable native implementation of the existing guarded Huber solver."""
+    def __init__(self, points, normals, valid, workers, lib):
+        self.index = ResidentIndex(np.ascontiguousarray(points, dtype=np.float64), threadBudget(workers), lib)
+        self.normals = np.ascontiguousarray(normals, dtype=np.float64)
+        self.valid = np.ascontiguousarray(valid, dtype=np.uint8)
+        self.handle = lib.blk_coarse_create(self.index.handle, pointer(self.normals), pointer(self.valid))
+        if not self.handle:
+            raise MemoryError(lib.blk_correspondence_error().decode())
+        self._release = weakref.finalize(self, lib.blk_coarse_destroy, self.handle)
+        # One Matcher normally has one caller; serialize its reusable buffers if
+        # a future caller shares it. Different Matchers still run independently.
+        import threading
+        self.lock = threading.Lock()
+        self.statistics = {}
+
+    @classmethod
+    def create(cls, points, normals, valid, workers):
+        if not enabled():
+            return None
+        lib = loadLibrary()
+        if not hasattr(lib, 'blk_coarse_run'):
+            return None
+        if (np.ndim(points) != 2 or np.shape(points)[1] != 3
+                or np.shape(points) != np.shape(normals) or np.shape(valid) != (len(points),)
+                or not np.isfinite(points).all() or not np.isfinite(normals[np.asarray(valid, dtype=bool)]).all()):
+            raise ValueError('Finite coarse map points and valid normals required')
+        return cls(points, normals, valid, workers, lib)
+
+    def fit(self, points, initial):
+        points = np.ascontiguousarray(points, dtype=np.float64)
+        initial = np.ascontiguousarray(initial, dtype=np.float64)
+        if (points.ndim != 2 or points.shape[1] != 3 or initial.shape != (4,4)
+                or not np.isfinite(points).all() or not np.isfinite(initial).all()):
+            raise ValueError('Finite XYZ points and initial transform required')
+        result = np.empty((4,4)); statistics = np.empty(6, dtype=np.int64)
+        with self.lock:
+            code = self.index.lib.blk_coarse_run(self.handle, pointer(points), len(points),
+                                                pointer(initial), pointer(result), pointer(statistics))
+            if code:
+                raise RuntimeError(self.index.lib.blk_correspondence_error().decode())
+            self.statistics = dict(zip(('iterations', 'queried_points', 'reused_points',
+                                       'excluded_points', 'tie_queries', 'reference_fallback'),
+                                      map(int, statistics)))
+        return None if statistics[5] else result
 
 
 class ResidentMatches:

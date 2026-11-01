@@ -86,6 +86,9 @@
   - Validate supplied transforms by the same tests; reuse only a validated initialization bound to the job's input/map provenance.
   - Weak individual geometry requires a full-rank shared training fit and independent held-out checks before initialization can pass.
   - Refine initialization candidates against the 10 cm index with point-to-plane ICP and a 5 cm Huber scale: 80 / 40 / 20 cm gates, up to 15 iterations per stage.
+    - Native C++ execution reuses the exact nearest-neighbor index and scratch buffers across scans; matching, weighted matrix accumulation, and line-search costs run in parallel.
+    - Retain sensor-centered updates, truncated weak directions, 30 cm / 0.1 rad per-step limits, and fixed-correspondence line search at scales 1 / ½ / ¼ / ⅛.
+    - Fixed reduction blocks preserve results across thread budgets. Older native libraries and exact-distance ties use the reference solver.
   - Optional JSON: `{"T_map_from_frontend": [[...], ...]}`.
   - The merged TLS map is already transformed; scanner poses are never applied again.
 - **Localization:** shared Open3D point-to-plane ICP + Tukey on 1 cm source points and original TLS tiles for every scan.
@@ -96,6 +99,10 @@
   - Independent held-out scan points for quality checks.
   - Geometric support: at least 80 planar correspondences, plane RMS < 5 cm, at least six occupied 50 cm support cells, and at least 50 cm span along two principal directions.
   - Direct overlap: at least 20% of held-out scan points within 20 cm of TLS; at least 70% of those matches within 10 cm. Record overlap at 5 / 10 / 20 cm.
+  - Local ambiguity check: for supported fits with plane RMS above 3 cm and inlier precision within 10 cm below 95%, compare native 10 cm fits initialized at the candidate and ±35 cm along horizontal map axes.
+    - Fit the training half only; evaluate alternatives on the withheld half, charging unmatched points at 20 cm.
+    - Reject when an alternative differs by more than 15 cm / 3°, has at least 80 planar matches and plane RMS below 6 cm, increases coverage by at least five percentage points, and reduces capped squared-distance cost by more than 20%.
+    - Stop at the first conflict; do not promote the alternative without its own full 1 cm fitting and validation. Rejected candidates cannot be restored through neighbor or submap support.
   - Coverage below 65% requests additional context. Context-supported poses require plane RMS < 3 cm, at least 65% of matched points within 5 cm, and at least 90% within 10 cm.
   - Partial views with six observable directions require two distinct neighboring scans within 1 s, each with its own converged full-rank map fit and consistent pairwise relative motion. Reuse existing fits rather than running extra ICP.
     - Require a motion-consistent link to a separately accepted map anchor; context-promoted partial views never become new roots for neighbor voting.

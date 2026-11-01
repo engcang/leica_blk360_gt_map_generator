@@ -10,6 +10,8 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <Eigen/Eigenvalues>
+#include <Eigen/Geometry>
 
 #ifdef _WIN32
 #define BLK_EXPORT extern "C" __declspec(dllexport)
@@ -583,3 +585,4 @@ BLK_EXPORT int blk_matches_patch_ties(void *handle, const Id *rows, const Id *id
 }
 
 #include "resident_correspondence.hpp"
+#include "coarse_icp.hpp"

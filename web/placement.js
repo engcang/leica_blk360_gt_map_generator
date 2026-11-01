@@ -14,7 +14,9 @@
     let initialFitView = null;
     let interactionMode = 'view', heightCut = null;
     const visualized = new Set();
+    let showPrevious = true;
     let visibilityAnchor = null;
+    let trimHold = null;
     const poseFields = ['x','y','z','yaw','roll','pitch'];
     let saveContext = null, saveTimer = null, saveQueue = Promise.resolve(), saveInFlight = null, dirty = false;
     let browserDraft = null, browserCopySaved = false;
@@ -77,17 +79,24 @@
         if(q[3]<=0)return null;
         return [(q[0]/q[3]+1)*canvas.clientWidth/2,(1-q[1]/q[3])*canvas.clientHeight/2];
     }
+    function requiredVisible()
+    {
+        return items.length ? [selected] : [];
+    }
     function visible()
     {
         if(!items.length)return [];
-        return [...new Set([selected,...visualized])];
+        const previous=showPrevious&&selected>0 ? [selected-1] : [];
+        return [...new Set([...requiredVisible(),...previous,...visualized])];
     }
     function syncVisibility()
     {
+        const shown=new Set(visible());
         [...$('visualizing-items').children].forEach((row,i)=>
         {
             const input=row.querySelector('input');
-            input.checked=i===selected||visualized.has(i);input.disabled=i===selected;
+            const required=requiredVisible().includes(i);
+            input.checked=shown.has(i);input.disabled=required;
             row.classList.toggle('selected',i===selected);
             row.querySelector('.item-role').textContent=i===selected?'Current':i===reference?'Reference':'';
         });
@@ -293,6 +302,8 @@
     function changed(){items[selected].enabled=true;items[selected].comparisonReference=reference;backupChanged();sync();}
     function choose(index,inherit=true,fallbackReference=reference)
     {
+        stopTrim();
+        if(index!==selected)showPrevious=true;
         selected=index;
         reference=items[selected].comparisonReference??fallbackReference;
         if(reference===selected)reference=selected===0?1:0;
@@ -323,7 +334,11 @@
                 const anchor=visibilityAnchor??selected;
                 const first=e.shiftKey?Math.min(anchor,i):i,last=e.shiftKey?Math.max(anchor,i):i;
                 for(let index=first;index<=last;index++)
-                    if(checkbox.checked)visualized.add(index);else visualized.delete(index);
+                    if(!requiredVisible().includes(index))
+                    {
+                        if(index===selected-1)showPrevious=checkbox.checked;
+                        if(checkbox.checked)visualized.add(index);else visualized.delete(index);
+                    }
                 visibilityAnchor=i;
                 syncVisibility();loadVisible();
             };
@@ -354,30 +369,58 @@
     $('next').onclick=()=>
     {
         if(selected>=items.length-1)return;
-        visualized.clear();visualized.add(selected);visibilityAnchor=selected;
         choose(selected+1,true,selected);
     };
     $('clear-visualizing').onclick=()=>
     {
-        visualized.clear();visibilityAnchor=null;
+        visualized.clear();showPrevious=false;visibilityAnchor=null;
         syncVisibility();loadVisible();
     };
     $('use').onchange=()=>{remember();items[selected].enabled=$('use').checked;backupChanged();sync();};
-    function setPoseValue(index,value)
+    function setPoseValue(index,value,recordUndo=true)
     {
         if(!items.length||selected===0||locked)return;
         if(!Number.isFinite(value)||Math.abs(value)>1e6){$('error').textContent='Enter a finite placement value within supported bounds.';sync();return;}
-        remember();
+        if(recordUndo)remember();
         if(index>=4&&items[selected].pose.length===4)items[selected].pose.push(0,0);
         items[selected].pose[index]=value;changed();
     }
     for(const [i,id] of poseFields.entries())$(id).onchange=()=>setPoseValue(i,Number($(id).value)*(i>=3?Math.PI/180:1));
-    for(const axis of ['roll','pitch','yaw'])for(const [sign,direction] of [['minus',-1],['plus',1]])$(axis+'-'+sign).onclick=e=>
+    function stopTrim()
     {
-        if(!items.length)return;
-        const index=poseFields.indexOf(axis),step=Number($('trim-step').value)*Math.PI/180*(e.shiftKey ? .1 : 1);
-        setPoseValue(index,(items[selected].pose[index]??0)+direction*step);
-    };
+        if(!trimHold)return;
+        clearTimeout(trimHold.delay);clearInterval(trimHold.repeat);
+        trimHold=null;
+    }
+    for(const axis of ['roll','pitch','yaw'])for(const [sign,direction] of [['minus',-1],['plus',1]])
+    {
+        const button=$(axis+'-'+sign),index=poseFields.indexOf(axis);
+        const step=(shift,recordUndo=true)=>
+        {
+            if(!items.length||selected===0||locked)return;
+            const amount=Number($('trim-step').value)*Math.PI/180*(shift ? .1 : 1);
+            setPoseValue(index,(items[selected].pose[index]??0)+direction*amount,recordUndo);
+        };
+        button.onpointerdown=e=>
+        {
+            if(e.button!==0||button.disabled)return;
+            e.preventDefault();stopTrim();button.focus({preventScroll:true});
+            button.setPointerCapture(e.pointerId);
+            step(e.shiftKey);
+            const hold={};trimHold=hold;
+            hold.delay=setTimeout(()=>
+            {
+                if(trimHold!==hold)return;
+                step(e.shiftKey,false);
+                hold.repeat=setInterval(()=>step(e.shiftKey,false),70);
+            },350);
+        };
+        // Pointer presses already apply their first step; keyboard clicks do not.
+        button.onclick=e=>{if(e.detail===0)step(e.shiftKey);};
+        for(const event of ['pointerup','pointercancel','lostpointercapture','pointerleave'])button.addEventListener(event,stopTrim);
+    }
+    window.addEventListener('blur',stopTrim);
+    document.addEventListener('visibilitychange',()=>{if(document.hidden)stopTrim();});
     $('undo').onclick=()=>{const step=undo.pop();if(!step)return;items[step.index].pose=step.pose;items[step.index].enabled=step.enabled;choose(step.index,false);backupChanged();};
     $('zero').onclick=()=>{remember();items[selected].pose=[0,0,0,0];items[selected].enabled=false;backupChanged();sync();};
     $('top').onclick=()=>{camera.azimuth=-Math.PI/2;camera.elevation=Math.PI/2-.001;requestDraw();};

@@ -75,6 +75,8 @@ def fit_scan(fine, scan, initial):
     fitted = time.perf_counter()
     q = fine.quality(held, T)
     validate_optimizer(q, info)
+    if info.get('converged') and hasattr(fine, 'validate_basin'):
+        fine.validate_basin(train, held, T, q)
     q.update(index=scan.index, timestamp=scan.timestamp, fine=info,
              correction_m_deg=difference(T, initial), T_map_from_base=T.tolist(),
              partition_s=partitioned-started, validation_s=time.perf_counter()-fitted,
@@ -299,6 +301,8 @@ class Recovery(LocalSubmaps, TailInitializer):
             T, info = initial.copy(), dict(converged=False, reason='registration_error', detail=str(exc))
             q = self.fine.quality(held, T)
         validate_optimizer(q, info)
+        if info.get('converged') and hasattr(self.fine, 'validate_basin'):
+            self.fine.validate_basin(train, held, T, q)
         q.update(index=scan.index, timestamp=scan.timestamp, fine=info,
                  correction_m_deg=difference(T, initial), T_map_from_base=T.tolist(),
                  partition_s=prepared-started, total_fit_s=time.perf_counter()-started)

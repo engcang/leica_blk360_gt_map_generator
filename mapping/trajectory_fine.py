@@ -399,6 +399,11 @@ class FineMatcher:
             self.kiss_points = None
             self.tile_cache.clear()
             self.cache_bytes = 0
+            self._ambiguity_matcher = None
+
+    def validate_basin(self, train, held, transform, quality):
+        from trajectory_ambiguity import audit
+        return audit(self, train, held, transform, quality)
 
     def _tile(self,key):
         if key in self.tile_cache:

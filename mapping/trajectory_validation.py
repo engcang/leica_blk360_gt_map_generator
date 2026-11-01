@@ -12,7 +12,7 @@ from scipy.spatial.transform import Rotation
 from trajectory_temporal import motion_limits, bridge_limits, continuous_estimate
 from trajectory_io import PoseGap
 
-VALIDATION_PROTOCOL = 'direct-tls-evidence-v3'
+VALIDATION_PROTOCOL = 'direct-tls-evidence-v4'
 CONTEXT_RADIUS_S = 1.
 CONTEXT_MIN_SCANS = 2
 LOW_OVERLAP_CONTEXT = .65

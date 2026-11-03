@@ -2,17 +2,17 @@
 import argparse
 import http.server
 from pathlib import Path
-import re
-import subprocess
-import tempfile
 import threading
+from urllib.parse import urlsplit
+from playwright.sync_api import sync_playwright
 
 
 def run(chrome):
     web=Path(__file__).resolve().parents[1]/'web'
     prelude=r'''<script>
 async function refreshRegistration(){}
-let requests=[],state={draft:{},jobs:[{id:'hidden',name:'Development result',status:'completed',output_directory:'/debug',viewer_available:true}],running:false};
+let requests=[],state={draft:{},jobs:[{id:'hidden',name:'Development result',status:'completed',output_directory:'/debug',viewer_available:true},
+    {id:'external',name:'Background campaign',status:'running',managed_externally:true,output_directory:'/external',viewer_available:true}],running:false};
 const seq=path=>({name:path.split('/').pop(),sequence_directory:path,scans:{path:path+'/scans',format:'directory'},trajectories:[{path:path+'/odometry.tum',format:'tum'}]});
 window.fetch=async(url,options={})=>{
     const route=String(url).replace('/api/',''),body=options.body?JSON.parse(options.body):null;
@@ -40,6 +40,7 @@ addEventListener('load',async()=>{
         await refresh();check(trajectory_initialized,'Form not initialized');
         check(element('trajectory-jobs').children.length===0,'Cached project results were displayed');
         check(element('trajectory-message').textContent==='','Development jobs leaked into status');
+        check(!requests.some(x=>x.route==='trajectory/open'),'URL automatically opened development results');
         check(!element('trajectory-period')&&!element('trajectory-options')&&!element('trajectory-initial'),'Retired controls remain');
         check([...document.querySelectorAll('[role=tab]')].at(-1).textContent==='Generate trajectory','Tab is not last');
         element('tab-trajectory').click();
@@ -86,19 +87,22 @@ addEventListener('load',async()=>{
     routes={'/':html.encode(),**{'/'+name:(web/name).read_bytes() for name in ('app.js','app.css','trajectory.js')}}
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
-            value=routes.get(self.path);self.send_response(200 if value is not None else 404)
+            value=routes.get(urlsplit(self.path).path);self.send_response(200 if value is not None else 404)
             self.send_header('Content-Type','application/javascript' if self.path.endswith('.js') else 'text/css' if self.path.endswith('.css') else 'text/html; charset=utf-8')
             self.end_headers();self.wfile.write(value or b'')
         def log_message(self,*args):pass
     with http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler) as server:
         thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
         try:
-            with tempfile.TemporaryDirectory(prefix='blk-trajectory-controls-') as directory:
-                result=subprocess.run([chrome,'--headless','--no-sandbox','--no-first-run','--disable-background-networking','--disable-gpu',
-                    '--user-data-dir='+directory,'--virtual-time-budget=4000','--dump-dom',f'http://127.0.0.1:{server.server_port}/#session-test'],capture_output=True,text=True,timeout=45)
-                if result.returncode or '<p id="trajectory-controls-test">PASS</p>' not in result.stdout:
-                    detail=re.search(r'<p id="trajectory-controls-test">(.*?)</p>',result.stdout)
-                    raise AssertionError(detail[1] if detail else result.stderr[-2000:])
+            with sync_playwright() as driver:
+                browser=driver.chromium.launch(executable_path=chrome,headless=True,args=['--no-sandbox'])
+                try:
+                    tab=browser.new_page()
+                    tab.goto(f'http://127.0.0.1:{server.server_port}/?trajectory-results=%2Fdebug#session-test',wait_until='domcontentloaded')
+                    tab.wait_for_function('document.getElementById("trajectory-controls-test")?.textContent',timeout=30000)
+                    result=tab.locator('#trajectory-controls-test').inner_text()
+                    assert result=='PASS',result
+                finally:browser.close()
         finally:server.shutdown();thread.join()
     print('Trajectory controls passed: multiple sequences, all scans, per-sequence formats, batch submission, explicit results, CPU placement.')
 

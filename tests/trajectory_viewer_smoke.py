@@ -1,15 +1,15 @@
 """Exercise trajectory layers and bounded PLY uploads in Chrome."""
 import argparse
 from pathlib import Path
-import re
-import subprocess
 import tempfile
+from playwright.sync_api import sync_playwright
 
 
 def run(chrome, standalone=False):
     web = Path(__file__).resolve().parents[1]/'web'
     prelude = r'''<script>
 const uploads=[];let failMapRead=false;
+localStorage.setItem('blk-trajectory-viewer-v1',JSON.stringify({common:{'point-style':'round-points',size:1},views:{}}));
 const original=WebGL2RenderingContext.prototype.bufferData;
 WebGL2RenderingContext.prototype.bufferData=function(target,data,usage){
     const size=typeof data==='number'?data:data.byteLength;
@@ -49,6 +49,17 @@ addEventListener('load',async()=>{
         check(v.stats().segments.tls_gt===2,'Rejected GT scan was bridged by a line');
         document.getElementById('path-tls_gt').checked=false;v.render();
         check(JSON.stringify(v.stats().visibleTrajectories)===JSON.stringify(['estimate_0']),'Trajectory toggle failed');
+        const camera=JSON.stringify(v.camera()), mapUploads=uploads.filter(n=>n===1048576*12).length;
+        scene.preview=true;
+        scene.trajectories[0].rows.push([.5,4,0,0]);
+        scene.quality.push({index:5,accepted:true});
+        await v.refresh();v.render();
+        check(v.stats().segments.tls_gt===3,'Live trajectory did not grow');
+        check(JSON.stringify(v.camera())===camera,'Live update moved the camera');
+        check(!document.getElementById('path-tls_gt').checked,'Live update reset a trajectory toggle');
+        check(uploads.filter(n=>n===1048576*12).length===mapUploads,'Live update reuploaded an unchanged map');
+        check(document.getElementById('trajectory-summary').textContent.includes('Auto-updating'),'Missing live status');
+        check(await v.refresh()===false,'Unchanged scene was rebuilt');
         document.getElementById('map').value='none';document.getElementById('map').dispatchEvent(new Event('change'));v.render();
         check(v.stats().map===''&&v.stats().displayed===0,'Hide map failed');
         document.getElementById('map').value='tls_gt';document.getElementById('map').dispatchEvent(new Event('change'));
@@ -87,14 +98,21 @@ addEventListener('load',async()=>{
     html = html.replace('</body>', checks+'</body>')
     with tempfile.TemporaryDirectory(prefix='blk-trajectory-viewer-') as directory:
         root = Path(directory); page = root/'test.html'; page.write_text(html)
-        result = subprocess.run([chrome,'--headless','--no-sandbox','--no-first-run','--disable-background-networking',
-            '--use-angle=swiftshader','--enable-unsafe-swiftshader','--user-data-dir='+str(root/'profile'),
-            '--virtual-time-budget=15000','--dump-dom',page.as_uri()+'?job=test'],capture_output=True,text=True,timeout=60)
-        if result.returncode or '<p id="trajectory-test">PASS</p>' not in result.stdout:
-            detail = re.search(r'<p id="trajectory-test">(.*?)</p>',result.stdout)
-            (Path('/tmp')/'blk-trajectory-test-dom.html').write_text(result.stdout)
-            raise AssertionError(detail[1] if detail else result.stderr[-2000:])
-    print('Trajectory viewer passed: complete chunk uploads, paths, map switching, point styles.')
+        # Real browser time avoids virtual-time starvation around recurring fetches.
+        with sync_playwright() as driver:
+            browser = driver.chromium.launch(executable_path=chrome, headless=True,
+                args=['--no-sandbox','--use-angle=swiftshader','--enable-unsafe-swiftshader'])
+            try:
+                tab = browser.new_page(viewport={'width':1000,'height':700})
+                errors = []
+                tab.on('pageerror', lambda error: errors.append(str(error)))
+                tab.goto(page.as_uri()+'?job=test', wait_until='domcontentloaded')
+                tab.wait_for_function('document.getElementById("trajectory-test")?.textContent', timeout=30000)
+                assert tab.locator('#trajectory-test').inner_text() == 'PASS', tab.locator('#trajectory-test').inner_text()
+                assert not errors, errors
+            finally:
+                browser.close()
+    print('Trajectory viewer passed: complete uploads, live updates, camera, paths and map switching.')
 
 
 if __name__=='__main__':

@@ -123,8 +123,6 @@ def main():
                 assert editor.locator('#x').is_disabled()
                 assert page.locator('#additional-log').evaluate('(e)=>e.closest("details")===null')
                 assert page.locator('#additional-log').evaluate('(e)=>e.scrollHeight>e.clientHeight && Math.abs(e.scrollHeight-e.clientHeight-e.scrollTop)<3')
-                screenshot=repo/'build/notes/placement-fix/additional-tab.png'
-                page.screenshot(path=str(screenshot),full_page=True)
                 assert source.read_bytes()==before
                 # Attempt to use the old output is rejected, as is a modified reference digest.
                 failure=page.evaluate("""async directory => {

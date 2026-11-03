@@ -85,6 +85,12 @@
   - Withhold three complete scans from KISS training; individually refine them at 1 cm and verify direct TLS evidence and agreement within 15 cm / 3°.
   - Validate supplied transforms by the same tests; reuse only a validated initialization bound to the job's input/map provenance.
   - Weak individual geometry requires a full-rank shared training fit and independent held-out checks before initialization can pass.
+  - If all local initialization windows fail, try whole-sequence map-to-map KISS at 1 / 0.5 / 0.3 m.
+    - Build a 30 cm proposal map from the input scans and their estimated poses; works with every supported scan format.
+    - Exclude complete validation scans from this map. Decode and voxelize training scans in parallel, with CPU/RAM limits and deterministic point selection.
+    - Check the proposed transform in local windows using the same independent 1 cm refinement and validation; also try coarse refinement of the map proposal.
+    - Stop at the first certified local anchor. Whole-map alignment never substitutes for per-scan 1 cm fitting or changes acceptance thresholds.
+    - Reuse the saved proposal map only when its input binding and file hash match; successful local initialization does not build it.
   - Refine initialization candidates against the 10 cm index with point-to-plane ICP and a 5 cm Huber scale: 80 / 40 / 20 cm gates, up to 15 iterations per stage.
     - Native C++ execution reuses the exact nearest-neighbor index and scratch buffers across scans; matching, weighted matrix accumulation, and line-search costs run in parallel.
     - Retain sensor-centered updates, truncated weak directions, 30 cm / 0.1 rad per-step limits, and fixed-correspondence line search at scales 1 / ½ / ¼ / ⅛.
@@ -206,10 +212,11 @@
   - `ground_truth_trajectory.partial.tum` and **In progress** viewer layers expose partial fitting results; remove the partial TUM when the final result is published.
 - **Diagnostics:** `baseline/`, `recovery/quality.jsonl`, `recovery/attempts.jsonl`, `input_quality.json`, `provenance.json`.
 - **Reusable tracking:** `tracking/quality.jsonl`, `tracking/candidate_trajectory.tum`, and their hashed completion receipt.
-- **Live job state:** monitored jobs read `job_status.json`; a saved viewer can remain available while recovery is running or queued.
-  - Opening a parent folder includes unfinished monitored jobs even before their first viewer snapshot or final TUM exists.
+- **Live job state:** explicitly opened results read `job_status.json`; a saved viewer can remain available while recovery is running or queued.
+  - Choose a result folder or files in **Saved results**; background campaigns are not automatically added to the app.
+  - Opening a parent folder includes unfinished jobs even before their first viewer snapshot or final TUM exists.
   - Saved-result imports without live status are labeled `saved`; only a completed worker is labeled `completed`.
-  - Background controllers register configurations through `/api/trajectory/monitor` and refresh status timestamps; missing or stale progress is shown as interrupted.
+  - Background workers refresh status timestamps; missing or stale progress is shown as interrupted.
 - **Browser links:** keep the complete local URL, including `#` and its session key, when opening it in another browser.
   - `execution.jsonl`: source/native hashes and package versions for each run or resume.
 - **Maps:** `tls_gt_10cm.ply`, `estimate_0_10cm.ply`, additional `estimate_N_10cm.ply` when supplied.

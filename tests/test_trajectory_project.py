@@ -16,6 +16,20 @@ from test_trajectory import fixture
 
 
 class ProjectTests(unittest.TestCase):
+    def test_public_filename_is_fixed_and_symlinks_are_not_overwritten(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);source=root/'candidate.tum'
+            source.write_text('1 0 0 0 0 0 0 1\n')
+            # Old campaign configuration must not change the public filename.
+            publish_trajectory({'trajectory_filename':'unexpected.tum'},source,root)
+            public=root/'ground_truth_trajectory.tum'
+            self.assertEqual(public.read_bytes(),source.read_bytes())
+            self.assertFalse((root/'unexpected.tum').exists())
+            public.unlink();public.symlink_to(source)
+            with self.assertRaisesRegex(ValueError,'symbolic link'):
+                publish_trajectory({},source,root)
+            self.assertEqual(source.read_text(),'1 0 0 0 0 0 0 1\n')
+
     def test_all_scans_keeps_irregular_and_faster_than_10hz_timestamps(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);config=fixture(root)

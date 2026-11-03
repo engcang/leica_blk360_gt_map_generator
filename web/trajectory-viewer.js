@@ -41,13 +41,23 @@ window.ViewerPreferences = {async open(scope)
     return api;
 }};
 
-window.blkTrajectoryScene = async function()
+let trajectorySceneSignature = '';
+window.blkTrajectoryScene = async function(refresh = false)
 {
     const id = new URLSearchParams(location.search).get('job');
     if (!id) throw Error('Open this viewer from Generate trajectory.');
-    const response = await fetch(`/api/trajectory/${encodeURIComponent(id)}/viewer`, {headers:{'X-Session-Token':window.blkTrajectoryToken}});
+    const response = await fetch(`/api/trajectory/${encodeURIComponent(id)}/viewer`, {cache:'no-store', headers:{'X-Session-Token':window.blkTrajectoryToken}});
     if (!response.ok) throw Error('Cannot open trajectory result ('+response.status+').');
     const scene = await response.json();
+    const signature = JSON.stringify(scene);
+    if (refresh && signature === trajectorySceneSignature) return null;
+    trajectorySceneSignature = signature;
+    const selectedMap = document.getElementById('map').value;
+    const selectedPaths = new Map([...document.querySelectorAll('#trajectory-paths input')].map(el => [el.id, el.checked]));
+    document.getElementById('map').replaceChildren();
+    document.getElementById('trajectory-paths').replaceChildren();
+    document.getElementById('trajectory-quality-table').replaceChildren();
+    for (const el of document.querySelectorAll('[data-trajectory-map-control]')) el.remove();
     document.querySelector('h1').textContent = scene.name;
     document.title = scene.name+' · BLK Studio';
     const cfg = {settings_scope:'trajectory', sequence:scene.name, maps:{}, styles:{}, transforms:{},
@@ -85,8 +95,11 @@ window.blkTrajectoryScene = async function()
         cfg.maps.none = {count:0,bounds,color_bounds:bounds};
         cfg.default_map = 'none';
     }
-    document.getElementById('color-by').value = 'solid';
-    document.getElementById('solid').value = '#ffffff';
+    if (!refresh)
+    {
+        document.getElementById('color-by').value = 'solid';
+        document.getElementById('solid').value = '#ffffff';
+    }
     for (const layer of scene.trajectories)
     {
         if (!layer.rows.length) continue;
@@ -100,6 +113,7 @@ window.blkTrajectoryScene = async function()
         cfg.path_bounds[layer.key] = [low, high];
         const label = document.createElement('label'); label.className = 'check';
         const check = document.createElement('input'); check.type = 'checkbox'; check.checked = true; check.id = 'path-'+layer.key;
+        check.checked = selectedPaths.get(check.id) ?? true;
         const color = document.createElement('i'); color.style.background = layer.color;
         label.append(check, color, document.createTextNode(layer.label));
         document.getElementById('trajectory-paths').append(label);
@@ -108,12 +122,13 @@ window.blkTrajectoryScene = async function()
     for (const [key, style] of Object.entries(cfg.styles)) if (!style.control)
     {
         const hidden = document.createElement('input'); hidden.type = 'checkbox'; hidden.hidden = true; hidden.id = 'map-style-'+key;
+        hidden.dataset.trajectoryMapControl = '';
         document.body.append(hidden); style.control = hidden.id;
     }
     const accepted = quality.filter(q => q.accepted);
     const rms = accepted.map(q => q.plane_rms_m).filter(Number.isFinite).sort((a,b) => a-b);
     const skipped = scene.input_quality?.skipped_scan_intervals?.length || 0;
-    document.getElementById('trajectory-summary').textContent = `${accepted.length.toLocaleString()} / ${quality.length.toLocaleString()} accepted poses`+(rms.length ? ` · median residual ${(rms[Math.floor(rms.length/2)]*100).toFixed(2)} cm` : '')+` · ${skipped} skipped scans`;
+    document.getElementById('trajectory-summary').textContent = `${accepted.length.toLocaleString()} / ${quality.length.toLocaleString()} accepted poses`+(rms.length ? ` · median residual ${(rms[Math.floor(rms.length/2)]*100).toFixed(2)} cm` : '')+` · ${skipped} skipped scans`+(scene.preview ? ' · In progress · Auto-updating' : '');
     const reasons = new Map();
     for (const q of quality.filter(q => !q.accepted)) reasons.set(q.reason, (reasons.get(q.reason) || 0)+1);
     const table = document.createElement('table');
@@ -123,5 +138,6 @@ window.blkTrajectoryScene = async function()
         label.textContent = String(reason || 'Unresolved').replaceAll('_',' '); value.textContent = count.toLocaleString(); row.append(label,value); table.append(row);
     }
     document.getElementById('trajectory-quality-table').append(table);
+    if (refresh && [...mapSelect.options].some(option => option.value === selectedMap)) mapSelect.value = selectedMap;
     return cfg;
 };

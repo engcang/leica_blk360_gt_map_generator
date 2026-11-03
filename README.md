@@ -200,6 +200,7 @@
   - **CPU threads:** total batch budget; Auto adapts parallel sequences and per-sequence threads to CPU and available memory.
   - KISS initialization → 1 cm Open3D point-to-plane + Tukey localization → recovery of rejected intervals.
     - Initialize with short scan windows; validate supplied transforms and fresh KISS candidates with independent 1 cm TLS fits.
+    - If local initialization fails, try whole-sequence map-to-map KISS; withhold validation scans and require the same independent 1 cm checks before tracking.
     - Track from the last accepted pose using SLAM relative motion; KISS is not repeated for every scan.
   - Every accepted pose passes 1 cm fitting and held-out validation; imported baseline poses are initial guesses for the same refinement.
   - Recovery: reuse or initialize the end pose → reverse tracking → local submap fitting for remaining gaps.

@@ -250,27 +250,6 @@ namespace blk_core
             return {{"ok",true},{"ids",ids}};
         }
 
-        void monitor(const nlohmann::json &config)
-        {
-            const auto path = std::filesystem::canonical(std::filesystem::u8path(config.at("output_directory").get<std::string>()));
-            const auto progress = readJson(path / "job_status.json");
-            if (!progress.at("status").is_string() || !progress.at("updated_unix").is_number())
-                throw std::runtime_error("Invalid trajectory progress file");
-            std::lock_guard<std::mutex> lock(mutex_);
-            for (auto &job : state_["jobs"])
-                if (!job.value("inspect", false) && job.at("output_directory") == path.u8string())
-                {
-                    if (job.value("status", "") == "running" && !job.value("managed_externally", false))
-                        throw std::runtime_error("This output already has an app-managed worker");
-                    job["managed_externally"] = true;
-                    save();
-                    return;
-                }
-            state_["jobs"].push_back({{"id", newId()}, {"name", config.value("name", "Trajectory")},
-                {"output_directory", path.u8string()}, {"config", config}, {"status", "queued"}, {"managed_externally", true}});
-            save();
-        }
-
         nlohmann::json viewer(const std::string &id)
         {
             std::lock_guard<std::mutex> lock(mutex_);

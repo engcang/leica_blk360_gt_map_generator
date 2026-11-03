@@ -14,7 +14,9 @@ from trajectory_local_submaps import LocalSubmaps
 def geometry(supported=True):
     return dict(geometry_supported=supported, observable_directions=6, points=100,
                 scaled_information_matrix=np.eye(6).tolist(), coverage_20cm=.9,
-                inlier_distance_mse_m2=.001)
+                inlier_distance_mse_m2=.001, plane_rms_m=.02,
+                inlier_precision_5cm=.9, inlier_precision_10cm=.98,
+                context_map_supported=supported)
 
 
 class SubmapShortCircuitTests(unittest.TestCase):
@@ -42,22 +44,22 @@ class SubmapShortCircuitTests(unittest.TestCase):
         with patch('trajectory_local_submaps.voxel', side_effect=lambda p, _:p):
             return recovery.validate_seed(anchor, train, validators, np.eye(4), 'before_anchor', 1.)
 
-    def test_nonconverged_fit_never_queries_validation_or_fits_witnesses(self):
+    def test_nonconverged_fit_stops_after_precheck_without_fitting_witnesses(self):
         parts = self.setup_seed(converged=False)
         self.assertIsNone(self.validate(parts))
-        parts[0].fine.quality.assert_not_called(); parts[0].fit.assert_not_called()
+        self.assertEqual(parts[0].fine.quality.call_count,1); parts[0].fit.assert_not_called()
 
-    def test_rejected_temporal_agreement_precedes_geometric_validation(self):
+    def test_rejected_temporal_agreement_precedes_postfit_validation(self):
         other = np.eye(4); other[0, 3] = .501
         parts = self.setup_seed(context=[other])
         self.assertIsNone(self.validate(parts))
-        parts[0].fine.quality.assert_not_called(); parts[0].fit.assert_not_called()
+        self.assertEqual(parts[0].fine.quality.call_count,1); parts[0].fit.assert_not_called()
 
     def test_failed_seed_keeps_independent_fits_needed_by_later_tracking(self):
         parts = self.setup_seed(predictions=(False, False, True))
         self.assertIsNone(self.validate(parts))
         self.assertEqual(parts[0].fit.call_count, 3)
-        self.assertEqual(parts[0].fine.quality.call_count, 5)
+        self.assertEqual(parts[0].fine.quality.call_count, 6)
 
     def test_one_bad_prediction_does_not_suppress_two_good_witnesses(self):
         parts = self.setup_seed(predictions=(False, True, True))
@@ -81,7 +83,7 @@ class SubmapShortCircuitTests(unittest.TestCase):
                           optimizer_information=dict(observable_directions=6))
         recovery.fine.align.side_effect = [(np.eye(4),unfinished),(np.eye(4),converged)]
         np.testing.assert_array_equal(self.validate(parts),np.eye(4))
-        self.assertEqual([c.kwargs['iterations'] for c in recovery.fine.align.call_args_list],[60,180])
+        self.assertEqual([c.kwargs['iterations'] for c in recovery.fine.align.call_args_list],[60,60])
         self.assertTrue(all(c.kwargs['distances']==(.1,) for c in recovery.fine.align.call_args_list))
 
     def test_disjoint_anchor_constraints_skip_dense_submap_work(self):

@@ -142,6 +142,23 @@ def checkpoint_baseline(output, rows):
     temporary.replace(output/'candidate_trajectory.tum')
 
 
+def initialization_tracking_seed(output):
+    """Reuse a certified individual pose, not an unverified global transform."""
+    from trajectory_initialization import INITIALIZATION_PROTOCOL
+    from trajectory_validation import map_rooted, context_map_supported
+    saved = json.loads((output/'initial_alignment.json').read_text())
+    checks = saved.get('checks', [])
+    if (saved.get('protocol') != INITIALIZATION_PROTOCOL or not saved.get('validated')
+            or saved.get('validation_protocol') != VALIDATION_PROTOCOL
+            or len(checks) < 3 or len({q.get('index') for q in checks}) != len(checks)
+            or not all(q.get('accepted') and q.get('fine', {}).get('converged')
+                       and (map_rooted(q) or context_map_supported(q)) for q in checks)):
+        return None
+    # Shared-transform-only initialization does not certify an individual fit.
+    anchor = next((q for q in checks if q.get('index') == saved.get('anchor_index')), None)
+    return dict(anchor) if anchor is not None else None
+
+
 def baseline(config, source, cache, output, indices, workers, progress, on_checkpoint=None):
     output.mkdir(exist_ok=True)
     matcher = Matcher(cache, workers)
@@ -149,6 +166,7 @@ def baseline(config, source, cache, output, indices, workers, progress, on_check
     fine = FineMatcher(cache, workers, result_cache=output/'fine_requests')
     try:
         A = validated_initialize(config, source, matcher, fine, output, indices, workers, progress)
+        initialization_seed = initialization_tracking_seed(output)
     except BaseException:
         fine.close()
         raise
@@ -179,6 +197,19 @@ def baseline(config, source, cache, output, indices, workers, progress, on_check
         stream = resources.enter_context(path.open('a', buffering=1))
         resources.callback(fine.close)
         for scan in source.iter_scans(scan_indices=[i for i in indices if int(i) not in done]):
+            reseeded = False
+            # Initialization can succeed in the middle of a sequence. A stale
+            # earlier fit must not hide that independently verified TLS anchor.
+            # Keep a healthy track; only restart a lost track when it reaches
+            # the certified window (also after resuming past that window).
+            if (lost and initialization_seed is not None
+                    and initialization_seed['timestamp'] <= scan.timestamp
+                    and (last_quality is None or
+                         last_quality['timestamp'] < initialization_seed['timestamp'])):
+                last_quality = initialization_seed
+                last_T = rigid(last_quality['T_map_from_base'])
+                last_F = source.pose([last_quality['timestamp']])[0]
+                reseeded = True
             initial = A@scan.frontend_T if last_T is None else last_T@np.linalg.inv(last_F)@scan.frontend_T
             failed = None
             if lost or last_quality is None or scan.timestamp-last_quality['timestamp'] > .5:
@@ -188,6 +219,8 @@ def baseline(config, source, cache, output, indices, workers, progress, on_check
             T, q = fit_scan(fine, scan, captured) if failed is None else (captured,failed)
             correction = difference(T, initial)
             q['stage'] = 'forward_fine'
+            if reseeded:
+                q['initialization_seed_index'] = initialization_seed['index']
             if last_quality is not None:
                 limits = bridge_limits(source, last_quality['timestamp'], scan.timestamp)
                 if correction[0] > limits[0] or correction[1] > limits[1]:
@@ -203,7 +236,7 @@ def baseline(config, source, cache, output, indices, workers, progress, on_check
                 recent.append(candidate)
             accepted_count += len(confirm_partial_views(recent, source, reference=last_quality))
             latest = next((r for r in recent if r['accepted']), None)
-            if latest is not None:
+            if latest is not None and (last_quality is None or latest['timestamp'] >= last_quality['timestamp']):
                 last_T = np.asarray(latest['T_map_from_base'])
                 last_F = source.pose([latest['timestamp']])[0]
                 last_quality = latest

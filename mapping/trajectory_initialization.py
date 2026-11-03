@@ -31,6 +31,7 @@ def initialize(config, source, matcher, fine, output, indices, workers, progress
     supplied = rigid(supplied) if supplied is not None else None
     hypotheses = []
     targets = {}
+    windows = []
     starts = source.timestamps[np.asarray(indices, int)]
     # Short windows do not bake whole-sequence SLAM drift into a rigid cloud.
     elapsed = starts-starts[0]
@@ -111,6 +112,9 @@ def initialize(config, source, matcher, fine, output, indices, workers, progress
             if len(scans) < 3:
                 continue
             anchor = min(scans, key=lambda s:abs(s.timestamp-center))
+            windows.append(dict(indices=[s.index for s in scans], anchor=anchor.index,
+                                checks=[anchor.index]+[s.index for s in scans
+                                    if s.index != anchor.index][:2]))
             if supplied is not None:
                 A = check(scans, anchor, supplied@anchor.frontend_T, 'supplied-validated')
                 supplied = None
@@ -141,4 +145,35 @@ def initialize(config, source, matcher, fine, output, indices, workers, progress
                         return A
                 except (ValueError, RuntimeError) as exc:
                     record(dict(origin='kiss', anchor_index=anchor.index, validated=False, error=str(exc)))
-    raise ValueError('No initial location passed independent 1 cm TLS validation; inspect alignment_diagnostics.json')
+    # A local window can be ambiguous even when the complete mapped route has
+    # distinctive structure. Reserve the validation scans before building that
+    # map, and reuse exactly the individual 1 cm certification above.
+    if windows:
+        from trajectory_map_initialization import initialize_from_map
+        withheld = {i for window in windows for i in window['checks']}
+
+        def validate_map(candidate, origin):
+            for window in windows:
+                scans = []
+                for index in window['indices']:
+                    try:
+                        scans.append(source.scan(index))
+                    except PoseGap:
+                        continue
+                by_index = {s.index:s for s in scans}
+                if not all(i in by_index for i in window['checks']):
+                    continue
+                anchor = by_index[window['anchor']]
+                progress(f'Validating whole-map initialization at 1 cm: scan {anchor.index}')
+                verified = check(scans, anchor, candidate@anchor.frontend_T, origin,
+                                 [by_index[i] for i in window['checks']])
+                if verified is not None:
+                    return verified
+            return None
+
+        verified = initialize_from_map(source, matcher, fine, output, indices, withheld,
+                                       workers, progress, validate_map, record)
+        if verified is not None:
+            return verified
+    raise ValueError('Neither local nor whole-map initialization passed independent 1 cm TLS validation; '
+                     'inspect alignment_diagnostics.json')

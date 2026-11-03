@@ -137,15 +137,22 @@ function panBy(dx,dy){
     center=add(center,add(scale(b.right,-dx*units),scale(b.up,dy*units)));
 }
 const paths={};
+const endpoints={};
+function rebuildPaths(){
+for(const path of Object.values(paths))gl.deleteBuffer(path.buffer);
+for(const buffer of Object.values(endpoints))gl.deleteBuffer(buffer);
+for(const key of Object.keys(paths))delete paths[key];
+for(const key of Object.keys(endpoints))delete endpoints[key];
 for(const [key,rows] of Object.entries(cfg.trajectories)){const a=[],breaks=new Set(cfg.trajectory_break_before?.[key]||[]);for(let i=1;i<rows.length;i++){if(breaks.has(i)||rows[i][0]-rows[i-1][0]>(cfg.trajectory_gap_s?.[key]??.25))continue;for(const [t,side] of [[0,-1],[1,-1],[1,1],[0,-1],[1,1],[0,1]])a.push(...rows[i-1].slice(1),...rows[i].slice(1),t,side);}const b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(a),gl.STATIC_DRAW);paths[key]={buffer:b,count:a.length/8};}
 // Endpoints use the same saved poses and alignment transform as their trajectory.
-const endpoints={};
 for(const [key,rows] of Object.entries(cfg.trajectories)){
     if(!rows.length)continue;
     const buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);
     gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([...rows[0].slice(1),...rows[rows.length-1].slice(1)]),gl.STATIC_DRAW);
     endpoints[key]=buffer;
 }
+}
+rebuildPaths();
 const endpointLegend=document.createElement('div');
 endpointLegend.textContent='○ Start · □ End (trajectory color)';
 $('legend').appendChild(endpointLegend);
@@ -342,5 +349,25 @@ window.blkTrajectoryViewer.preferences=preferences;
 window.blkTrajectoryViewer.camera=()=>({yaw,pitch,orthographic,orthographicScale,fovDegrees:50,eye:basis().eye,center:center.slice(),distance,extent:cloudExtent(),orbitAtEye,focusSamples:focusCount});
 palette();updatePointStyle();fit(pathBounds());
 loadMap($('map').value==='none'?'':$('map').value);
+
+// Replace only changed scene data. Keep the camera, map buffer and user controls.
+window.blkTrajectoryViewer.refresh=async()=>{
+    const previousMap=JSON.stringify(cfg.maps[mapKey]);
+    const next=await window.blkTrajectoryScene(true);
+    if(!next)return false;
+    Object.assign(cfg,next);
+    rebuildPaths();
+    for(const item of Object.values(cfg.styles))$(item.control).addEventListener('input',drawSoon);
+    preferences.bind([],Object.values(cfg.styles).map(s=>s.control));
+    if(mapKey&&previousMap!==JSON.stringify(cfg.maps[mapKey]))await loadMap(mapKey);
+    drawSoon();
+    return true;
+};
+async function pollTrajectory(){
+    try{if(!document.hidden&&!lost)await window.blkTrajectoryViewer.refresh();}
+    catch(e){console.warn('Trajectory update will retry:',e.message);}
+    setTimeout(pollTrajectory,15000);
+}
+setTimeout(pollTrajectory,15000);
 
 })().catch(error=>{document.getElementById('error').hidden=false;document.getElementById('error').textContent=error.message;});

@@ -6,6 +6,8 @@ import sys
 import tempfile
 import time
 import unittest
+import http.server
+import threading
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'mapping'))
@@ -21,6 +23,9 @@ config=json.loads(Path(args[args.index('--config')+1]).read_text())
 out=Path(config['output']);out.mkdir(exist_ok=True)
 report=Path(args[args.index('--report')+1])
 phase='baseline' if '--baseline-only' in args else 'recovery'
+if phase=='baseline' and config.get('fail_baseline'):
+ save_json(report,dict(status='failed',stage='No initial alignment'))
+ raise SystemExit(1)
 with Path(config['events']).open('a') as f:f.write(json.dumps(dict(name=config['name'],phase=phase))+'\\n')
 if phase=='baseline':
  b=out/'baseline';b.mkdir(exist_ok=True)
@@ -40,6 +45,45 @@ else:
 
 
 class CampaignTests(unittest.TestCase):
+ def test_failed_initialization_does_not_hold_other_sequences_when_enabled(self):
+  with tempfile.TemporaryDirectory() as directory:
+   root=Path(directory);batch=root/'batch';batch.mkdir();(root/'mapping').mkdir()
+   for name in ('trajectory_stages.py','trajectory_io.py','parallel_runtime.py'):
+    (root/'mapping'/name).symlink_to(ROOT/'mapping'/name)
+   (root/'.venv/bin').mkdir(parents=True);(root/'.venv/bin/python').symlink_to(sys.executable)
+   (root/'.venv/pyvenv.cfg').write_bytes((ROOT/'.venv/pyvenv.cfg').read_bytes())
+   (root/'.venv/lib').symlink_to(ROOT/'.venv/lib',target_is_directory=True)
+   worker=root/'mapping/trajectory_worker.py';worker.write_text(WORKER)
+   shared=root/'shared';shared.mkdir();save_json(shared/'map.json',{});(shared/'fine_1cm').mkdir()
+   jobs=[]
+   for i in range(2):
+    config=batch/f'config{i}.json';output=batch/f'job{i}'
+    save_json(config,dict(output=str(output),name=str(i),events=str(batch/'events.jsonl'),fail_baseline=i==0))
+    jobs.append(dict(sequence=str(i),output=str(output),cache=str(batch/f'cache{i}'),
+                     shared_map_cache=str(shared),config=str(config),map_sha256='a'))
+   save_json(batch/'plan.json',dict(root=str(root),jobs=jobs,max_concurrent=2,threads_per_job=1,
+       correspondence_backend='python',correspondence_library='unused',continue_after_failed_baseline=True))
+   save_json(batch/'recovery_ready.json',dict(validated=True,source_sha256={'mapping/trajectory_worker.py':digest(worker)}))
+   requests=[]
+   class Studio(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+     requests.append(self.path);self.send_response(200);self.end_headers();self.wfile.write(b'{}')
+    def log_message(self,*args):pass
+   with http.server.ThreadingHTTPServer(('127.0.0.1',0),Studio) as server:
+    thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    session=root/'install/projects/default/session.json';session.parent.mkdir(parents=True)
+    save_json(session,dict(port=server.server_port,token='unselected-studio'))
+    try:
+     subprocess.run([sys.executable,str(ROOT/'scripts/run_trajectory_campaign.py'),'--batch',str(batch)],
+                    stdout=subprocess.DEVNULL,check=True,timeout=40)
+    finally:server.shutdown();thread.join()
+   self.assertEqual(requests,[], 'A background campaign must not connect itself to an installed Studio')
+   state=json.loads((batch/'status.json').read_text())
+   self.assertEqual(state['counts']['failed'],1)
+   self.assertEqual(state['counts']['completed'],1)
+   events=[json.loads(row) for row in (batch/'events.jsonl').read_text().splitlines()]
+   self.assertEqual([e['phase'] for e in events],['baseline','recovery'])
+
  def test_all_baselines_finish_before_validated_recovery_and_completed_restart_is_idle(self):
   with tempfile.TemporaryDirectory() as directory:
    root=Path(directory);batch=root/'batch';batch.mkdir();(root/'mapping').mkdir()

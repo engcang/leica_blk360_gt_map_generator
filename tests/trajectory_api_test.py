@@ -87,11 +87,16 @@ def run(executable):
             progress=Path(pending['output_directory'])/'job_status.json'
             def update(status,age=0):
                 progress.write_text(json.dumps(dict(status=status,stage='Live '+status,updated_unix=time.time()-age)))
-            update('queued');api('trajectory/monitor',{'config':pending})
+            update('queued')
+            try:api('trajectory/monitor',{'config':pending})
+            except urllib.error.HTTPError as error:assert error.code==404
+            else:raise AssertionError('Retired automatic monitoring endpoint is still available')
+            assert all(j['output_directory']!=pending['output_directory'] for j in api('trajectory')['jobs'])
+            api('trajectory/open',{'path':pending['output_directory']})
             external=api('trajectory')['jobs'][-1]
             assert external['status']=='queued' and not external['viewer_available']
             update('running');assert api('trajectory')['jobs'][-1]['status']=='running'
-            api('trajectory/monitor',{'config':pending})
+            api('trajectory/open',{'path':pending['output_directory']})
             assert sum(j['output_directory']==pending['output_directory'] for j in api('trajectory')['jobs'])==1
             update('running',1000);assert api('trajectory')['jobs'][-1]['status']=='interrupted'
             try:api('trajectory/start',{'resume_id':external['id']})
@@ -100,7 +105,7 @@ def run(executable):
             update('completed',1000);assert api('trajectory')['jobs'][-1]['status']=='completed'
             status=Path(config['output_directory'])/'job_status.json'
             status.write_text(json.dumps(dict(status='running',stage='Global recovery',updated_unix=time.time())))
-            api('trajectory/monitor',{'config':config})
+            api('trajectory/open',{'path':config['output_directory']})
             current=next(j for j in api('trajectory')['jobs'] if j['id']==job['id'])
             assert current['status']=='running' and current['viewer_available'] and current['stage']=='Global recovery'
             api('shutdown',{});assert process.wait(timeout=15)==0

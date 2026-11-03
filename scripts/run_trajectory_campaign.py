@@ -1,4 +1,4 @@
-"""Run the authorized eight fresh trajectories with bounded concurrency."""
+"""Run a planned trajectory batch with bounded concurrency and live status."""
 from pathlib import Path
 import fcntl
 import json
@@ -9,7 +9,6 @@ import signal
 import subprocess
 import sys
 import time
-import urllib.request
 
 import argparse
 parser = argparse.ArgumentParser(description=__doc__)
@@ -34,7 +33,7 @@ signal.signal(signal.SIGTERM, stop)
 signal.signal(signal.SIGINT, stop)
 lock = (BATCH/'controller.lock').open('a+')
 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-active, states, registered = {}, {}, set()
+active, states = {}, {}
 started = time.time()
 
 def read(path, default=None):
@@ -59,6 +58,11 @@ def seed_cache(job):
         # temporary files plus atomic replace. Native sessions/locks stay private.
         fine.symlink_to(shared/'fine_1cm', target_is_directory=True)
     names = ('points.npy', 'normals.npy', 'normal_valid.npy', 'tls_10cm.ply')
+    if all((shared/name).is_file() for name in names):
+        for name in names:
+            if not (cache/name).exists():
+                os.link(shared/name, cache/name)
+        return
     for other in PLAN['jobs']:
         donor = Path(other['cache'])
         if other['map_sha256'] != job['map_sha256'] or donor == cache:
@@ -68,26 +72,6 @@ def seed_cache(job):
                 if not (cache/name).exists():
                     os.link(donor/name, cache/name)
             break
-
-def register_apps():
-    for app in ('build/local/app', 'install'):
-        session = read(ROOT/app/'projects/default/session.json')
-        if not session:
-            continue
-        for job in PLAN['jobs']:
-            key = (app, session.get('token'), job['sequence'])
-            if key in registered:
-                continue
-            try:
-                request = urllib.request.Request(
-                    f"http://127.0.0.1:{session['port']}/api/trajectory/monitor",
-                    data=json.dumps({'config':read(Path(job['config']))}).encode(),
-                    headers={'Content-Type':'application/json', 'X-Session-Token':session['token']})
-                with urllib.request.urlopen(request, timeout=2) as response:
-                    response.read()
-                registered.add(key)
-            except (OSError, ValueError):
-                break
 
 def recovery_ready():
     release = read(BATCH/args.release)
@@ -179,11 +163,13 @@ for job in PLAN['jobs']:
         pending.append(job)
     heartbeat(job)
 snapshot()
-last_register = 0
 try:
     while (pending or active or recoveries) and not STOP:
         queue, phase = pending, 'forward'
-        if (not pending and all(state.get('baseline_ready') for state in states.values())
+        baseline_terminal = all(state.get('baseline_ready') or
+            (PLAN.get('continue_after_failed_baseline', False) and state.get('status') == 'failed')
+            for state in states.values())
+        if (not pending and baseline_terminal
                 and not any(item['phase'] == 'forward' for item in active.values()) and recovery_ready()):
             queue, phase = recoveries, 'recovery'
         while queue and len(active) < PLAN['max_concurrent'] and not STOP:
@@ -230,14 +216,13 @@ try:
                 print(f"Finished {seq}: {states[seq]['status']} after {elapsed:.1f}s", flush=True)
         for job in pending:
             heartbeat(job)
-        if not pending and not active and any(not state.get('baseline_ready') for state in states.values()):
+        if (not pending and not active and not PLAN.get('continue_after_failed_baseline', False)
+                and any(not state.get('baseline_ready') for state in states.values())):
             for job in recoveries:
                 heartbeat(job, stage='Recovery held: an initial 1 cm fitting job failed; inspect its report')
             snapshot()
             break
         snapshot()
-        if time.time()-last_register >= 30:
-            register_apps();last_register=time.time()
         if pending or active or recoveries:
             time.sleep(5)
 finally:

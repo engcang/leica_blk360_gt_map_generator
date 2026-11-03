@@ -217,11 +217,6 @@ namespace blk_core
                 const auto body = nlohmann::json::parse(request.body);
                 reply(response, trajectory_.open(body.contains("paths") ? body.at("paths").get<std::vector<std::string>>() : std::vector<std::string>{body.at("path").get<std::string>()}, registration_.snapshot().at("python").get<std::string>()));
             });
-            server_.Post("/api/trajectory/monitor", [this](const httplib::Request &request, httplib::Response &response)
-            {
-                trajectory_.monitor(nlohmann::json::parse(request.body).at("config"));
-                reply(response, {{"ok", true}});
-            });
             server_.Get("/api/trajectory/([0-9a-f]{32})/viewer", [this](const httplib::Request &request, httplib::Response &response)
             {
                 auto scene = trajectory_.viewer(request.matches[1]);

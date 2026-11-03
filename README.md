@@ -3,8 +3,10 @@
 - Convert supported BLK360 G1 scans to full-resolution PLY through a local web app.
 - Register overlapping scans, review alignment, and generate maps or standalone 3D HTML.
 - Preserve original files in place; C++17 core, no ROS, MIT license.
+### You may also want to check out [this document](https://mason-eungchang.notion.site/How-to-generate-the-ground-truth-point-cloud-map-with-Leica-BLK-360-G1-40006f42af3c80b6bfa2c48e98578303?source=copy_link)
 
 <br>
+
 
 ## Install and run
 

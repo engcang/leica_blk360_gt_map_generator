@@ -178,7 +178,7 @@ const axes=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,axes);gl.bufferData(g
 function pointsUniforms(m,model=identity){gl.useProgram(pointProgram);gl.uniformMatrix4fv(pu.model,false,model);gl.uniformMatrix4fv(pu.mvp,false,m);gl.uniform1i(pu.lut,0);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,texture);gl.enableVertexAttribArray(0);gl.disableVertexAttribArray(1);gl.disableVertexAttribArray(2);}
 function lines(buffer,count,color,m,first=0){pointsUniforms(m);gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.vertexAttribPointer(0,3,gl.FLOAT,false,12,0);gl.uniform1i(pu.single,1);gl.uniform1i(pu.circles,0);gl.uniform3fv(pu.solid,color);gl.uniform1f(pu.alpha,1);gl.drawArrays(gl.LINES,first,count);}
 function pointStyle(){return $('point-style')?.value||'round-points';}
-function worldPointSize(){const v=Number($('size-m')?.value);return Number.isFinite(v)&&v>0?Math.min(5,v):.1;}
+function worldPointSize(){const v=Number($('size-m')?.value);return Number.isFinite(v)&&v>0?Math.min(5,v):.03;}
 function updatePointStyle(){
     const flat=pointStyle()==='flat-squares';
     if($('size-m-control'))$('size-m-control').hidden=!flat;

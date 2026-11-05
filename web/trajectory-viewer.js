@@ -42,6 +42,72 @@ window.ViewerPreferences = {async open(scope)
 }};
 
 let trajectorySceneSignature = '';
+function showTrajectoryEvaluation(scene)
+{
+    const panel = document.getElementById('trajectory-evaluation'), evaluation = scene.evaluation;
+    panel.replaceChildren(); panel.hidden = !evaluation;
+    if (!evaluation) return;
+    const heading = document.createElement('h2'); heading.textContent = 'Evaluation'; panel.append(heading);
+    const note = document.createElement('p'); note.className = 'help evaluation-note'; panel.append(note);
+    if (!scene.trajectory_sha256 || evaluation.gt_sha256 !== scene.trajectory_sha256)
+    { note.textContent = 'Evaluation needs updating for this trajectory.'; return; }
+    if (evaluation.status === 'pending_input')
+    { note.textContent = 'Evaluation pending.'; return; }
+    const value = (v, digits = 3, suffix = '') => Number.isFinite(v) ? v.toFixed(digits)+suffix : '—';
+    for (const result of evaluation.estimates || [])
+    {
+        const label = document.createElement('p'); label.className = 'evaluation-label';
+        label.textContent = result.label || 'SLAM'; panel.append(label);
+        const metrics = document.createElement('dl'); metrics.className = 'evaluation-metrics'; panel.append(metrics);
+        const metric = (name, text) =>
+        {
+            const item = document.createElement('div'), term = document.createElement('dt'), number = document.createElement('dd');
+            term.textContent = name; number.textContent = text; item.append(term, number); metrics.append(item);
+        };
+        metric('ATE RMSE', value(result.ate_rmse_m, 3, ' m'));
+        metric('Rotation RMSE', value(result.rotation_rmse_deg, 3, '°'));
+        const c = result.chamfer;
+        if (c?.status === 'completed')
+        {
+            metric('Untruncated Chamfer RMS', value(c.untruncated_symmetric_rms_m, 4, ' m'));
+            for (const [threshold, label] of [['0.05', '5 cm'], ['0.10', '10 cm']])
+            {
+                const p = c.slam_to_tls?.inliers?.[threshold]?.coverage;
+                const r = c.tls_to_slam?.inliers?.[threshold]?.coverage;
+                const valid = [p, r].every(v => Number.isFinite(v) && v >= 0 && v <= 1);
+                const score = valid ? (p+r > 0 ? 2*p*r/(p+r) : 0) : null;
+                metric(`F-score @${label}`, value(score === null ? null : score*100, 1, '%'));
+            }
+            const table = document.createElement('table'); table.className = 'evaluation-coverage'; panel.append(table);
+            const caption = document.createElement('caption'); caption.textContent = 'Map coverage'; table.append(caption);
+            const head = table.createTHead().insertRow();
+            for (const text of ['Distance', 'SLAM → TLS', 'TLS → SLAM'])
+            {
+                const th = document.createElement('th'); th.scope = 'col'; th.textContent = text; head.append(th);
+            }
+            const body = table.createTBody();
+            const row = (label, values) =>
+            {
+                const tr = body.insertRow(), th = document.createElement('th'); th.scope = 'row'; th.textContent = label; tr.append(th);
+                for (const text of values) { const td = tr.insertCell(); td.textContent = text; }
+            };
+            const directions = [c.slam_to_tls, c.tls_to_slam];
+            for (const [threshold, label] of [['0.05', '<5 cm'], ['0.10', '<10 cm'], ['0.30', '<30 cm']])
+                row(label, directions.map(direction =>
+                {
+                    const coverage = direction?.inliers?.[threshold]?.coverage;
+                    return value(Number.isFinite(coverage) ? coverage*100 : null, 1, '%');
+                }));
+            row('p95', directions.map(direction => value(direction?.p95_m, 3, ' m')));
+        }
+        else
+        {
+            const status = document.createElement('p'); status.className = 'evaluation-status';
+            status.textContent = `Chamfer: ${c?.progress_label || c?.status || 'Not computed'}`; panel.append(status);
+        }
+    }
+    note.textContent = '1 cm evaluation · TLS reference';
+}
 window.blkTrajectoryScene = async function(refresh = false)
 {
     const id = new URLSearchParams(location.search).get('job');
@@ -52,6 +118,7 @@ window.blkTrajectoryScene = async function(refresh = false)
     const signature = JSON.stringify(scene);
     if (refresh && signature === trajectorySceneSignature) return null;
     trajectorySceneSignature = signature;
+    showTrajectoryEvaluation(scene);
     const selectedMap = document.getElementById('map').value;
     const selectedPaths = new Map([...document.querySelectorAll('#trajectory-paths input')].map(el => [el.id, el.checked]));
     document.getElementById('map').replaceChildren();

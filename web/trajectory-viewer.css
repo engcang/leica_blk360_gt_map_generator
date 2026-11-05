@@ -3,3 +3,23 @@
 
 /* Match the BLK Studio point-cloud viewer. */
 html,body{background:#0e1722;color:#e5eef8}header{padding:12px 20px;background:#0e1722}h1{font-size:24px;margin:4px 0 8px}aside{width:250px;background:#182330;border-color:#354e6b}select,button,input[type=number]{background:#233449;border-color:#58718e;border-radius:5px}#viewport{min-height:420px}#trajectory-summary{color:#acbdd0;font-size:12px}#trajectory-quality{font-size:12px;margin-top:6px}#trajectory-quality-table{max-height:120px;overflow:auto}#trajectory-quality table{border-collapse:collapse}#trajectory-quality th,#trajectory-quality td{padding:4px 18px 4px 0;text-align:left}#settings-status:empty{display:none}
+
+aside{width:330px;padding:16px 20px}h2{font-size:14px;letter-spacing:.05em}label{font-size:14px;line-height:1.5}.help{font-size:13px}select,input[type=number],button{padding:9px;font-size:14px}header>a,#trajectory-summary,#trajectory-quality{font-size:14px}button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid #8bd3ff;outline-offset:2px}
+#trajectory-evaluation{border-top:1px solid #40536a;margin:22px 0;padding-top:8px}
+#trajectory-evaluation h2{font-size:17px;text-transform:none;letter-spacing:0;color:#e5eef8;margin-bottom:6px}
+#trajectory-evaluation .evaluation-note{margin:4px 0 16px;color:#b8c8d9}
+#trajectory-evaluation .evaluation-label{font-size:14px;line-height:1.5;margin:16px 0 10px;color:#c7d9eb}
+.evaluation-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0 0 16px}
+.evaluation-metrics>div{padding:11px 10px;background:#223246;border:1px solid #3a506b;border-radius:7px}
+.evaluation-metrics dt{font-size:12px;line-height:1.5;color:#c0cfdf}
+.evaluation-metrics dd{font-size:20px;line-height:1.5;letter-spacing:-.02em;font-weight:600;font-variant-numeric:tabular-nums;margin:4px 0 0;white-space:nowrap}
+#trajectory-evaluation table{width:100%;border-collapse:collapse;font-size:14px;line-height:1.5}
+#trajectory-evaluation caption{text-align:left;font-size:14px;font-weight:600;margin-bottom:8px}
+#trajectory-evaluation th{font-weight:400;text-align:left;color:#c0cfdf}
+#trajectory-evaluation td{text-align:right;font-variant-numeric:tabular-nums}
+#trajectory-evaluation th,#trajectory-evaluation td{padding:9px 4px;border-bottom:1px solid #34475d;vertical-align:middle}
+#trajectory-evaluation thead th{font-size:12px;text-align:right;white-space:nowrap}
+#trajectory-evaluation thead th:first-child{text-align:left}
+#trajectory-evaluation tbody tr:last-child{border-top:2px solid #40536a}
+.evaluation-status{font-size:14px;line-height:1.6;color:#c7d9eb}
+@media(max-width:650px){aside{width:285px;padding:12px}h1{font-size:20px}.help{font-size:12px}.evaluation-metrics dd{font-size:18px}}

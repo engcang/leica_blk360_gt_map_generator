@@ -74,6 +74,7 @@ const add=(a,b)=>a.map((v,i)=>v+b[i]),sub=(a,b)=>a.map((v,i)=>v-b[i]),scale=(a,t
 function multiply(a,b){const o=new Float32Array(16);for(let c=0;c<4;c++)for(let r=0;r<4;r++)for(let k=0;k<4;k++)o[c*4+r]+=a[k*4+r]*b[c*4+k];return o;}
 let center=[0,0,0],sceneCenter=[0,0,0],distance=100,orthographicScale=100,radius=50;
 let yaw=-Math.PI/4,pitch=Math.PI/5,orthographic=false,orbitAtEye=false;
+let orbitPivot=null,orbitDepth=0,panDistance=distance;
 // This small CPU sample is only for choosing the pivot. Rendering retains ALL points.
 const maxFocusPoints=200000;
 let focusPoints=new Float32Array(),focusCount=0,focusStride=1;
@@ -87,7 +88,7 @@ function cloudExtent(){const b=selected().bounds;return Math.max(.001,...sub(b[1
 function nearClip(){return Math.max(.0001,Math.min(cloudExtent()*.0001,distance*.01));}
 function matrix(){const {eye,f,right:r,up:u}=basis(),v=new Float32Array([r[0],u[0],-f[0],0,r[1],u[1],-f[1],0,r[2],u[2],-f[2],0,-dot(r,eye),-dot(u,eye),dot(f,eye),1]);const aspect=Math.max(1,canvas.clientWidth)/Math.max(1,canvas.clientHeight),near=nearClip(),far=Math.max(distance,norm(sub(eye,sceneCenter)))+cloudExtent()*4+10;let p;if(orthographic){const h=orthographicScale*tanHalfFov,w=h*aspect;p=new Float32Array([1/w,0,0,0,0,1/h,0,0,0,0,-2/(far-near),0,0,0,-(far+near)/(far-near),1]);}else{const fov=1/tanHalfFov;p=new Float32Array([fov/aspect,0,0,0,0,fov,0,0,0,0,(far+near)/(near-far),-1,0,0,2*far*near/(near-far),0]);}return multiply(p,v);}
 function fittedDistance(){const aspect=Math.max(1,canvas.clientWidth)/Math.max(1,canvas.clientHeight);return radius/Math.sin(Math.atan(tanHalfFov*Math.min(1,aspect)))*1.08;}
-function fit(bounds,resetScale=false){if(resetScale)savedOrthoScale=null;center=scale(add(bounds[0],bounds[1]),.5);sceneCenter=center.slice();radius=Math.max(.001,norm(sub(bounds[1],bounds[0]))*.5);distance=fittedDistance();orthographicScale=orthographic&&savedOrthoScale?radius*savedOrthoScale:distance;orbitAtEye=false;buildGrid();drawSoon();}
+function fit(bounds,resetScale=false){if(resetScale)savedOrthoScale=null;center=scale(add(bounds[0],bounds[1]),.5);sceneCenter=center.slice();radius=Math.max(.001,norm(sub(bounds[1],bounds[0]))*.5);distance=fittedDistance();orthographicScale=orthographic&&savedOrthoScale?radius*savedOrthoScale:distance;panDistance=distance;orbitAtEye=false;orbitPivot=null;buildGrid();drawSoon();}
 function sampleFocusPoints(xyz,start){
     for(let point=Math.ceil(start/focusStride)*focusStride;point<start+xyz.length/3;point+=focusStride){
         const src=(point-start)*3,dst=focusCount*3;
@@ -95,45 +96,52 @@ function sampleFocusPoints(xyz,start){
         focusCount++;
     }
 }
-function focusView(){
+function focusView(pan=false){
     const b=basis(),height=Math.max(1,canvas.clientHeight);
     const searchRadius=Math.max(16,Math.min(canvas.clientWidth,height)*.04),near=nearClip();
-    const m=modelFor(mapKey),limit=searchRadius*searchRadius;
+    const limit=searchRadius*searchRadius;
     let best=limit,depth=null;
-    // Hidden/transparent maps cannot supply a surface. Ignore points behind the eye.
-    if(mapKey&&Number($('alpha').value)>0){
-        for(let i=0;i<focusCount*3;i+=3){
-            const px=focusPoints[i],py=focusPoints[i+1],pz=focusPoints[i+2];
-            const x=m[0]*px+m[4]*py+m[8]*pz+m[12]-b.eye[0];
-            const y=m[1]*px+m[5]*py+m[9]*pz+m[13]-b.eye[1];
-            const z=m[2]*px+m[6]*py+m[10]*pz+m[14]-b.eye[2];
-            const forward=x*b.f[0]+y*b.f[1]+z*b.f[2];
-            if(forward<=near)continue;
-            const pixels=height/(2*(orthographic?orthographicScale:forward)*tanHalfFov);
-            const sx=(x*b.right[0]+y*b.right[1]+z*b.right[2])*pixels;
-            const sy=(x*b.up[0]+y*b.up[1]+z*b.up[2])*pixels;
-            const screenDistance=sx*sx+sy*sy;
-            if(screenDistance>limit)continue;
-            if(depth===null||screenDistance<best-1||(Math.abs(screenDistance-best)<=1&&forward<depth)){
-                best=screenDistance;depth=forward;
-            }
+    function consider(px,py,pz,m){
+        const x=m[0]*px+m[4]*py+m[8]*pz+m[12]-b.eye[0];
+        const y=m[1]*px+m[5]*py+m[9]*pz+m[13]-b.eye[1];
+        const z=m[2]*px+m[6]*py+m[10]*pz+m[14]-b.eye[2];
+        const forward=x*b.f[0]+y*b.f[1]+z*b.f[2];
+        if(forward<=near)return;
+        const pixels=height/(2*(orthographic?orthographicScale:forward)*tanHalfFov);
+        const sx=(x*b.right[0]+y*b.right[1]+z*b.right[2])*pixels;
+        const sy=(x*b.up[0]+y*b.up[1]+z*b.up[2])*pixels;
+        const screenDistance=sx*sx+sy*sy;
+        if(screenDistance>limit)return;
+        if(depth===null||screenDistance<best-1||(Math.abs(screenDistance-best)<=1&&forward<depth)){
+            best=screenDistance;depth=forward;
         }
     }
-    orbitAtEye=depth===null;
-    // Empty space changes orbit behavior, not the scale of a pan. Resetting
-    // this to <=1m made right/middle drags nearly stop until a surface was hit.
-    if(depth!==null)distance=depth;
-    // Use only the depth on the center ray; choosing the point itself shifts the image.
-    center=add(b.eye,scale(b.f,distance));
+    // Only visible geometry supplies the pivot. When no map is displayed, use
+    // the checked trajectories so the trajectories-only viewer behaves identically.
+    const mapVisible=mapKey&&Number($('alpha').value)>0&&focusCount>0;
+    if(mapVisible){
+        const m=modelFor(mapKey);
+        for(let i=0;i<focusCount*3;i+=3)consider(focusPoints[i],focusPoints[i+1],focusPoints[i+2],m);
+    }else{
+        const shown=Object.entries(cfg.trajectories).filter(([key])=>$(style(key).control).checked);
+        const count=shown.reduce((n,[,rows])=>n+rows.length,0),stride=Math.max(1,Math.ceil(count/200000));
+        for(const [key,rows] of shown){const m=modelFor(key);for(let i=0;i<rows.length;i+=stride)consider(...rows[i].slice(1),m);}
+    }
+    // A pointer press must not change the camera or orthographic scale.
+    if(pan){if(depth!==null)panDistance=depth;return;}
+    orbitAtEye=depth===null&&!orthographic;
+    orbitDepth=depth??(orthographic?distance:0);
+    orbitPivot=add(b.eye,scale(b.f,orbitDepth));
 }
 function orbit(dx,dy){
-    const eye=orbitAtEye?basis().eye:null,height=Math.max(1,canvas.clientHeight);
+    if(!orbitPivot)focusView();
+    const height=Math.max(1,canvas.clientHeight);
     yaw-=dx*Math.PI/height;
     pitch=Math.max(-Math.PI/2+.001,Math.min(Math.PI/2-.001,pitch+dy*Math.PI/height));
-    if(eye)center=add(eye,scale(basis().f,distance));
+    center=add(orbitPivot,scale(basis().f,distance-orbitDepth));
 }
 function panBy(dx,dy){
-    const b=basis(),units=2*(orthographic?orthographicScale:distance)*tanHalfFov/Math.max(1,canvas.clientHeight);
+    const b=basis(),units=2*(orthographic?orthographicScale:panDistance)*tanHalfFov/Math.max(1,canvas.clientHeight);
     center=add(center,add(scale(b.right,-dx*units),scale(b.up,dy*units)));
 }
 const paths={};
@@ -305,7 +313,7 @@ let drag=null;
 canvas.oncontextmenu=e=>e.preventDefault();
 canvas.onpointerdown=e=>{
     if(drag||e.button>2)return;
-    e.preventDefault();focusView();
+    e.preventDefault();focusView(e.button===1||e.button===2||e.shiftKey);
     drag={id:e.pointerId,x:e.clientX,y:e.clientY,pan:e.button===1||e.button===2||e.shiftKey};
     canvas.setPointerCapture(e.pointerId);canvas.focus({preventScroll:true});drawSoon();
 };

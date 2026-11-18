@@ -25,7 +25,8 @@
         active = false,
         settle = 0,
         frame = 0,
-        orbitAtEye = false,
+        orbitPivot = null,
+        orbitDepth = 0,
         panDistance = 10;
     let rgbMode = false;
     const camera = {
@@ -283,7 +284,7 @@
         camera.distance = radius / Math.sin(Math.atan(tanHalf * Math.min(1, aspect))) * 1.08;
         camera.orthographicScale = camera.distance;
         panDistance = camera.distance;
-        orbitAtEye = false;
+        orbitPivot = null;
         requestDraw();
     }
 
@@ -383,7 +384,7 @@
 
     function focusView()
     {
-        // Change only the pivot depth along the center ray; never jump the eye or view direction.
+        // Pick a depth on the center ray without changing the eye, projection or pan scale.
         const b = basis(), eye = cameraEye(), height = c.clientHeight,
             radius = Math.max(16, Math.min(c.clientWidth, height) * .04),
             visible = shown(), stride = Math.max(1, Math.ceil(visible / 200000)),
@@ -409,21 +410,17 @@
                 depth = forward;
             }
         }
-        orbitAtEye = depth === null;
-        camera.distance = depth === null ? Math.max(.01, Math.min(camera.distance, 1)) : depth;
-        camera.target = eye.map((value, index) => value - b.back[index] * camera.distance);
+        orbitDepth = depth ?? (camera.projection === 'orthographic' || !visible ? camera.distance : 0);
+        orbitPivot = eye.map((value, index) => value - b.back[index] * orbitDepth);
     }
 
     function orbit(dx, dy)
     {
-        const eye = orbitAtEye ? cameraEye() : null;
+        if (!orbitPivot) focusView();
         camera.azimuth -= dx * Math.PI / c.clientHeight;
         camera.elevation = Math.max(-Math.PI / 2 + .001, Math.min(Math.PI / 2 - .001, camera.elevation + dy * Math.PI / c.clientHeight));
-        if (eye)
-        {
-            const back = basis().back;
-            camera.target = eye.map((value, index) => value - back[index] * camera.distance);
-        }
+        const back = basis().back;
+        camera.target = orbitPivot.map((value, index) => value + back[index] * (orbitDepth - camera.distance));
         $('view').selectedIndex = -1;
     }
 

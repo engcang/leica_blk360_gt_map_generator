@@ -1,3 +1,53 @@
+function createPlacementNavigation({canvas,camera,items,visible,cache,poseMatrix,multiply,basis,heightLimit,orthographic})
+{
+    let pivot=null,depth=0;
+    return {
+        begin()
+        {
+            const b=basis(),eye=camera.target.map((v,i)=>v+b.back[i]*camera.distance);
+            const height=Math.max(1,canvas.clientHeight),radius=Math.max(16,Math.min(canvas.clientWidth,height)*.04);
+            const scans=[];
+            for(const index of visible())
+            {
+                const item=items()[index],entry=item&&cache.get(item.id);
+                if(entry)for(const scan of entry.scans)if(scan.focusPoints?.length)
+                    scans.push({scan,model:multiply(poseMatrix(item.pose),scan.base)});
+            }
+            const count=scans.reduce((n,{scan})=>n+scan.focusPoints.length/3,0);
+            const stride=Math.max(1,Math.ceil(count/200000)),limit=heightLimit(),ortho=orthographic();
+            let best=radius*radius,found=null;
+            for(const {scan,model:m} of scans)for(let i=0;i<scan.focusPoints.length;i+=3*stride)
+            {
+                const p=scan.focusPoints,px=p[i],py=p[i+1],pz=p[i+2];
+                const zWorld=m[2]*px+m[6]*py+m[10]*pz+m[14];
+                if(limit!==null&&zWorld>limit)continue;
+                const x=m[0]*px+m[4]*py+m[8]*pz+m[12]-eye[0];
+                const y=m[1]*px+m[5]*py+m[9]*pz+m[13]-eye[1],z=zWorld-eye[2];
+                const forward=-(x*b.back[0]+y*b.back[1]+z*b.back[2]);
+                if(forward<=.001)continue;
+                const scale=height/(2*(ortho?camera.distance:forward)*Math.tan(25*Math.PI/180));
+                const sx=(x*b.right[0]+y*b.right[1]+z*b.right[2])*scale;
+                const sy=(x*b.up[0]+y*b.up[1]+z*b.up[2])*scale,screenDistance=sx*sx+sy*sy;
+                if(screenDistance>radius*radius)continue;
+                if(found===null||screenDistance<best-1||(Math.abs(screenDistance-best)<=1&&forward<found))
+                {best=screenDistance;found=forward;}
+            }
+            // Keep the eye and projection unchanged when picking the surface. Empty
+            // perspective views rotate in place instead of swinging around a remote map.
+            depth=found??(ortho||!count?camera.distance:0);
+            pivot=eye.map((v,i)=>v-b.back[i]*depth);
+        },
+        orbit()
+        {
+            if(!pivot)return;
+            const back=basis().back;
+            // distance also controls orthographic scale. Keep it intact and move
+            // the camera around the picked depth through the equivalent target.
+            camera.target=pivot.map((v,i)=>v+back[i]*(depth-camera.distance));
+        }
+    };
+}
+
 (() =>
 {
     'use strict';
@@ -244,7 +294,9 @@
                 for(const info of item.scans)
                 {
                     const count=Math.ceil(info.points/stride);if(!Number.isSafeInteger(count)||count<1)throw Error('Invalid source point count');
-                    const scan={base:fromRows(info.base),buffer:gl.createBuffer(),count,loaded:0,min:[Infinity,Infinity,Infinity],max:[-Infinity,-Infinity,-Infinity]};entry.scans.push(scan);
+                    const scan={base:fromRows(info.base),buffer:gl.createBuffer(),count,loaded:0,min:[Infinity,Infinity,Infinity],max:[-Infinity,-Infinity,-Infinity],focusPoints:[]};entry.scans.push(scan);
+                    // A small navigation-only sample; displayed points and saved poses are unchanged.
+                    const focusStride=Math.max(1,Math.ceil(count/4096));
                     gl.bindBuffer(gl.ARRAY_BUFFER,scan.buffer);gl.bufferData(gl.ARRAY_BUFFER,count*16,gl.STATIC_DRAW);
                     if(gl.getError()!==gl.NO_ERROR)throw Error('Not enough graphics memory. Choose a lower display density.');
                     for(let start=0;start<count;start+=262144)
@@ -254,6 +306,8 @@
                         const bytes=await response.arrayBuffer();if(version!==generation)return;
                         const block=new Float32Array(bytes);if(block.length!==Math.min(262144,count-start)*4)throw Error('Incomplete sampled PLY response');
                         gl.bindBuffer(gl.ARRAY_BUFFER,scan.buffer);gl.bufferSubData(gl.ARRAY_BUFFER,start*16,block);
+                        for(let p=Math.ceil(start/focusStride)*focusStride;p<start+block.length/4;p+=focusStride)
+                        {const i=(p-start)*4;scan.focusPoints.push(block[i],block[i+1],block[i+2]);}
                         for(let i=0;i<block.length;i+=4)
                         {
                             for(let axis=0;axis<3;axis++){scan.min[axis]=Math.min(scan.min[axis],block[i+axis]);scan.max[axis]=Math.max(scan.max[axis],block[i+axis]);}
@@ -438,6 +492,8 @@
         const t=(z-origin[2])/direction[2];return add(origin,direction,t);
     }
     canvas.oncontextmenu=e=>e.preventDefault();
+    const navigation=createPlacementNavigation({canvas,camera,items:()=>items,visible,cache,poseMatrix,multiply,basis,
+        heightLimit:()=>heightCut,orthographic:()=>$('projection').value==='orthographic'});
     canvas.onpointerdown=e=>
     {
         if(e.button>2||!items.length)return;e.preventDefault();
@@ -446,6 +502,7 @@
         if(locked&&mode!=='pan'&&mode!=='orbit')return;
         if(mode!=='pan'&&mode!=='orbit'&&selected===0){$('save-status').textContent='Select another item; the first item is the fixed anchor.';return;}
         if(mode!=='pan'&&mode!=='orbit')remember();
+        if(mode==='orbit')navigation.begin();
         drag={id:e.pointerId,x,y,mode};canvas.setPointerCapture(e.pointerId);canvas.focus();requestDraw();
     };
     canvas.onpointermove=e=>
@@ -453,7 +510,7 @@
         if(!drag||drag.id!==e.pointerId)return;
         const rect=canvas.getBoundingClientRect(),x=e.clientX-rect.left,y=e.clientY-rect.top,dx=x-drag.x,dy=y-drag.y,k=e.shiftKey ? .1 : 1,b=basis();
         if(drag.mode==='pan')camera.target=camera.target.map((v,i)=>v+(-dx*b.right[i]+dy*b.up[i])*units());
-        else if(drag.mode==='orbit'){camera.azimuth-=dx*Math.PI/canvas.clientHeight*.5;camera.elevation=Math.max(-Math.PI/2+.001,Math.min(Math.PI/2-.001,camera.elevation+dy*Math.PI/canvas.clientHeight*.5));}
+        else if(drag.mode==='orbit'){camera.azimuth-=dx*Math.PI/canvas.clientHeight*.5;camera.elevation=Math.max(-Math.PI/2+.001,Math.min(Math.PI/2-.001,camera.elevation+dy*Math.PI/canvas.clientHeight*.5));navigation.orbit();}
         else
         {
             const pose=items[selected].pose;

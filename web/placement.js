@@ -1,4 +1,4 @@
-function createPlacementNavigation({canvas,camera,items,visible,cache,poseMatrix,multiply,basis,heightLimit,orthographic})
+function createPlacementNavigation({canvas,camera,items,visible,cache,poseMatrix,multiply,basis,heightLimit,heightLowerLimit,orthographic})
 {
     let pivot=null,depth=0;
     return {
@@ -14,13 +14,13 @@ function createPlacementNavigation({canvas,camera,items,visible,cache,poseMatrix
                     scans.push({scan,model:multiply(poseMatrix(item.pose),scan.base)});
             }
             const count=scans.reduce((n,{scan})=>n+scan.focusPoints.length/3,0);
-            const stride=Math.max(1,Math.ceil(count/200000)),limit=heightLimit(),ortho=orthographic();
+            const stride=Math.max(1,Math.ceil(count/200000)),limit=heightLimit(),lower=heightLowerLimit(),ortho=orthographic();
             let best=radius*radius,found=null;
             for(const {scan,model:m} of scans)for(let i=0;i<scan.focusPoints.length;i+=3*stride)
             {
                 const p=scan.focusPoints,px=p[i],py=p[i+1],pz=p[i+2];
                 const zWorld=m[2]*px+m[6]*py+m[10]*pz+m[14];
-                if(limit!==null&&zWorld>limit)continue;
+                if((limit!==null&&zWorld>limit)||(lower!==null&&zWorld<lower))continue;
                 const x=m[0]*px+m[4]*py+m[8]*pz+m[12]-eye[0];
                 const y=m[1]*px+m[5]*py+m[9]*pz+m[13]-eye[1],z=zWorld-eye[2];
                 const forward=-(x*b.back[0]+y*b.back[1]+z*b.back[2]);
@@ -62,7 +62,7 @@ function createPlacementNavigation({canvas,camera,items,visible,cache,poseMatrix
     let items = [], selected = 1, reference = 0, loading = false, generation = 0, controller = null;
     let drag = null, frame = 0, extent = 10, locked = false;
     let initialFitView = null;
-    let interactionMode = 'view', heightCut = null;
+    let interactionMode = 'view', heightCut = null, heightLower = null;
     const visualized = new Set();
     let showPrevious = true;
     let visibilityAnchor = null;
@@ -114,12 +114,12 @@ function createPlacementNavigation({canvas,camera,items,visible,cache,poseMatrix
     }
     const rgbMode = Boolean(window.BLK_RGB);
     const program=gl.createProgram();
-    gl.attachShader(program,shader(gl.VERTEX_SHADER,'attribute vec4 point;uniform mat4 mvp;uniform float size,clipZ,clipEnabled;uniform vec4 heightRow;varying float intensity,visible;varying vec3 rgb;void main(){gl_Position=mvp*vec4(point.xyz,1.0);gl_PointSize=size;intensity=point.w;rgb=vec3(floor(point.w/65536.),mod(floor(point.w/256.),256.),mod(point.w,256.))/255.;visible=clipEnabled<.5||dot(heightRow,vec4(point.xyz,1.0))<=clipZ?1.:0.;}'));
+    gl.attachShader(program,shader(gl.VERTEX_SHADER,'attribute vec4 point;uniform mat4 mvp;uniform float size,clipZ,clipEnabled,clipLower,clipLowerEnabled;uniform vec4 heightRow;varying float intensity,visible;varying vec3 rgb;void main(){gl_Position=mvp*vec4(point.xyz,1.0);gl_PointSize=size;intensity=point.w;rgb=vec3(floor(point.w/65536.),mod(floor(point.w/256.),256.),mod(point.w,256.))/255.;float z=dot(heightRow,vec4(point.xyz,1.0));visible=(clipEnabled<.5||z<=clipZ)&&(clipLowerEnabled<.5||z>=clipLower)?1.:0.;}'));
     gl.attachShader(program,shader(gl.FRAGMENT_SHADER,'precision mediump float;varying float intensity,visible;varying vec3 rgb;uniform vec2 range;void main(){if(visible<.5)discard;vec2 q=gl_PointCoord-.5;if(dot(q,q)>.25)discard;float t=clamp((intensity-range.x)/max(1.,range.y-range.x),0.,1.);gl_FragColor=vec4('+(rgbMode?'rgb':'mix(vec3(.18,.3,.42),vec3(.95,.97,1.),t)')+',1.);}'));
     gl.linkProgram(program);
     if(!gl.getProgramParameter(program,gl.LINK_STATUS)) throw Error(gl.getProgramInfoLog(program));
     const uniforms={mvp:gl.getUniformLocation(program,'mvp'),size:gl.getUniformLocation(program,'size'),range:gl.getUniformLocation(program,'range')};
-    for(const name of ['clipZ','clipEnabled','heightRow'])uniforms[name]=gl.getUniformLocation(program,name);
+    for(const name of ['clipZ','clipEnabled','clipLower','clipLowerEnabled','heightRow'])uniforms[name]=gl.getUniformLocation(program,name);
     const attr=gl.getAttribLocation(program,'point');
     gl.enable(gl.DEPTH_TEST);gl.clearColor(.055,.09,.13,1);
     function requestDraw(){if(!frame)frame=requestAnimationFrame(draw);}
@@ -173,6 +173,8 @@ function createPlacementNavigation({canvas,camera,items,visible,cache,poseMatrix
                 gl.uniform4f(uniforms.heightRow,model[2],model[6],model[10],model[14]);
                 gl.uniform1f(uniforms.clipZ,heightCut===null?0:heightCut);
                 gl.uniform1f(uniforms.clipEnabled,heightCut===null?0:1);
+                gl.uniform1f(uniforms.clipLower,heightLower??0);
+                gl.uniform1f(uniforms.clipLowerEnabled,heightLower===null?0:1);
                 gl.uniform1f(uniforms.size,1.5*dpr);gl.uniform2f(uniforms.range,entry.low,entry.high);
                 // Use a strided GPU view while dragging so the subset still covers each complete scan.
                 gl.vertexAttribPointer(attr,4,gl.FLOAT,false,16*stride,0);
@@ -218,26 +220,44 @@ function createPlacementNavigation({canvas,camera,items,visible,cache,poseMatrix
     {
         const {min,max}=bounds();
         const ready=Number.isFinite(min[2])&&Number.isFinite(max[2]);
-        $('height-cut').disabled=$('height-value').disabled=$('height-enabled').disabled=!ready;
+        for(const prefix of ['height','height-lower'])
+            for(const suffix of ['cut','value','enabled'])$(prefix+'-'+suffix).disabled=!ready;
         if(!ready)return;
-        const low=Math.floor(Math.min(min[2],heightCut??min[2])*100)/100;
-        const high=Math.ceil(Math.max(max[2],heightCut??max[2])*100)/100;
-        $('height-cut').min=low;$('height-cut').max=Math.max(low+.01,high);
-        const value=heightCut===null?high:heightCut;
-        $('height-cut').value=value;$('height-value').value=value.toFixed(2);
-        $('height-enabled').checked=heightCut!==null;
-        $('height-status').textContent=heightCut===null?'All heights':`Hide above Z = ${heightCut.toFixed(2)} m (placement frame)`;
+        const low=Math.floor(Math.min(min[2],heightLower??min[2],heightCut??min[2])*100)/100;
+        const high=Math.ceil(Math.max(max[2],heightCut??max[2],heightLower??max[2])*100)/100;
+        for(const [prefix,value,fallback] of [['height',heightCut,high],['height-lower',heightLower,low]])
+        {
+            const slider=$(prefix+'-cut');slider.min=low;slider.max=Math.max(low+.01,high);
+            slider.value=value??fallback;$(prefix+'-value').value=(value??fallback).toFixed(2);
+            $(prefix+'-enabled').checked=value!==null;
+        }
+        $('height-status').textContent=heightCut===null&&heightLower===null?'All heights':
+            `${heightLower===null?'':heightLower.toFixed(2)+' m ≤ '}Z${heightCut===null?'':' ≤ '+heightCut.toFixed(2)+' m'} (placement frame)`;
         document.body.dataset.heightCut=heightCut===null?'all':String(heightCut);
+        document.body.dataset.heightLower=heightLower===null?'all':String(heightLower);
     }
-    function setHeight(value)
+    function setHeight(value,lower=false)
     {
-        if(value!==null&&(!Number.isFinite(value)||Math.abs(value)>1e6))return;
-        heightCut=value;updateHeightControls();requestDraw();
+        if(value!==null&&(!Number.isFinite(value)||Math.abs(value)>1e6)){updateHeightControls();return;}
+        if(lower)
+        {
+            heightLower=value;
+            if(value!==null&&heightCut!==null&&value>heightCut)heightCut=value;
+        }
+        else
+        {
+            heightCut=value;
+            if(value!==null&&heightLower!==null&&value<heightLower)heightLower=value;
+        }
+        updateHeightControls();requestDraw();
     }
-    $('height-cut').oninput=e=>setHeight(Number(e.target.value));
-    $('height-value').onchange=e=>{if(e.target.value!=='')setHeight(Number(e.target.value));};
-    $('height-enabled').onchange=e=>setHeight(e.target.checked?Number($('height-value').value):null);
-    $('height-all').onclick=()=>setHeight(null);
+    for(const [prefix,lower] of [['height',false],['height-lower',true]])
+    {
+        $(prefix+'-cut').oninput=e=>setHeight(Number(e.target.value),lower);
+        $(prefix+'-value').onchange=e=>{if(e.target.value!=='')setHeight(Number(e.target.value),lower);else updateHeightControls();};
+        $(prefix+'-enabled').onchange=e=>setHeight(e.target.checked?Number($(prefix+'-value').value):null,lower);
+    }
+    $('height-all').onclick=()=>{heightLower=null;setHeight(null);};
     function setInteractionMode(mode)
     {
         if(drag)
@@ -493,7 +513,7 @@ function createPlacementNavigation({canvas,camera,items,visible,cache,poseMatrix
     }
     canvas.oncontextmenu=e=>e.preventDefault();
     const navigation=createPlacementNavigation({canvas,camera,items:()=>items,visible,cache,poseMatrix,multiply,basis,
-        heightLimit:()=>heightCut,orthographic:()=>$('projection').value==='orthographic'});
+        heightLimit:()=>heightCut,heightLowerLimit:()=>heightLower,orthographic:()=>$('projection').value==='orthographic'});
     canvas.onpointerdown=e=>
     {
         if(e.button>2||!items.length)return;e.preventDefault();

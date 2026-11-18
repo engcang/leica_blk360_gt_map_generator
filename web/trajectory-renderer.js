@@ -16,17 +16,19 @@ const style=key=>cfg.styles[key];
 const error=e=>{console.error(e);$('error').hidden=false;$('error').textContent=String(e.message||e);};
 const gl=canvas.getContext('webgl2',{antialias:true,alpha:false,preserveDrawingBuffer:true});
 if(!gl){error('WebGL 2 is required. Open this file in a browser with hardware acceleration enabled.');return;}
+let heightLower=null,heightUpper=null;
+const visibleHeight=()=>[heightLower??-1e30,heightUpper??1e30];
 let lost=false;canvas.addEventListener('webglcontextlost',e=>{e.preventDefault();lost=true;error('Graphics context was lost. Close other graphics tabs and reload.');});
 function program(vs,fs){const p=gl.createProgram();for(const [kind,src] of [[gl.VERTEX_SHADER,vs],[gl.FRAGMENT_SHADER,fs]]){const s=gl.createShader(kind);gl.shaderSource(s,src);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw Error(gl.getShaderInfoLog(s));gl.attachShader(p,s);gl.deleteShader(s);}gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(p));return p;}
 const pointProgram=program(`#version 300 es
 precision highp float;
 layout(location=0) in vec3 p;
 uniform mat4 mvp;uniform mat4 model;uniform float pointSize;uniform int axis;
-out float value;
-void main(){vec3 w=(model*vec4(p,1.0)).xyz;gl_Position=mvp*vec4(w,1.0);gl_PointSize=pointSize;value=axis==0?w.x:(axis==1?w.y:w.z);}`,`#version 300 es
+out float value;out float worldZ;
+void main(){vec3 w=(model*vec4(p,1.0)).xyz;gl_Position=mvp*vec4(w,1.0);gl_PointSize=pointSize;value=axis==0?w.x:(axis==1?w.y:w.z);worldZ=w.z;}`,`#version 300 es
 precision highp float;
-in float value;uniform sampler2D lut;uniform vec2 range;uniform vec3 solid;uniform float alpha;uniform bool single;uniform bool circles;out vec4 frag;
-void main(){if(circles && length(gl_PointCoord-0.5)>0.5)discard;float t=clamp((value-range.x)/max(range.y-range.x,0.000001),0.0,1.0);frag=vec4(single?solid:texture(lut,vec2(t,0.5)).rgb,alpha);}`);
+in float value;in float worldZ;uniform vec2 heightRange;uniform sampler2D lut;uniform vec2 range;uniform vec3 solid;uniform float alpha;uniform bool single;uniform bool circles;out vec4 frag;
+void main(){if(worldZ<heightRange.x||worldZ>heightRange.y)discard;if(circles && length(gl_PointCoord-0.5)>0.5)discard;float t=clamp((value-range.x)/max(range.y-range.x,0.000001),0.0,1.0);frag=vec4(single?solid:texture(lut,vec2(t,0.5)).rgb,alpha);}`);
 // Flat Squares: one shared quad per point, facing the camera, with a physical side length.
 // Instancing keeps the original XYZ buffer; there are no per-point CPU geometry copies.
 const squareProgram=program(`#version 300 es
@@ -34,7 +36,7 @@ precision highp float;
 layout(location=0) in vec3 p;layout(location=1) in vec2 corner;
 uniform mat4 mvp;uniform mat4 model;uniform vec3 cameraRight;uniform vec3 cameraUp;uniform vec3 cameraEye;uniform bool isOrthographic;
 uniform float sizeMeters;uniform int axis;
-out float value;
+out float value;out float worldZ;
 void main(){
     vec3 w=(model*vec4(p,1.0)).xyz;
     vec3 right=cameraRight,up=cameraUp;
@@ -46,11 +48,11 @@ void main(){
     }
     vec3 billboard=w+sizeMeters*(corner.x*right+corner.y*up);
     gl_Position=mvp*vec4(billboard,1.0);
-    value=axis==0?w.x:(axis==1?w.y:w.z);
+    value=axis==0?w.x:(axis==1?w.y:w.z);worldZ=w.z;
 }`,`#version 300 es
 precision highp float;
-in float value;uniform sampler2D lut;uniform vec2 range;uniform vec3 solid;uniform float alpha;uniform bool single;out vec4 frag;
-void main(){float t=clamp((value-range.x)/max(range.y-range.x,0.000001),0.0,1.0);frag=vec4(single?solid:texture(lut,vec2(t,0.5)).rgb,alpha);}`);
+in float value;in float worldZ;uniform vec2 heightRange;uniform sampler2D lut;uniform vec2 range;uniform vec3 solid;uniform float alpha;uniform bool single;out vec4 frag;
+void main(){if(worldZ<heightRange.x||worldZ>heightRange.y)discard;float t=clamp((value-range.x)/max(range.y-range.x,0.000001),0.0,1.0);frag=vec4(single?solid:texture(lut,vec2(t,0.5)).rgb,alpha);}`);
 const squareVAO=gl.createVertexArray(),squareCorners=gl.createBuffer();
 gl.bindVertexArray(squareVAO);gl.bindBuffer(gl.ARRAY_BUFFER,squareCorners);
 gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-.5,-.5,.5,-.5,.5,.5,-.5,-.5,.5,.5,-.5,.5]),gl.STATIC_DRAW);
@@ -59,13 +61,13 @@ gl.bindVertexArray(null);
 const lineProgram=program(`#version 300 es
 precision highp float;
 layout(location=0) in vec3 a;layout(location=1) in vec3 b;layout(location=2) in vec2 corner;
-uniform mat4 mvp;uniform vec2 viewport;uniform float width;
-void main(){vec4 p=mvp*vec4(a,1),q=mvp*vec4(b,1);vec2 d=q.xy/max(q.w,0.00001)-p.xy/max(p.w,0.00001);float len=length(d);vec2 normal=len>0.0000001?vec2(-d.y,d.x)/len:vec2(0,1);vec4 c=mix(p,q,corner.x);c.xy+=normal*corner.y*width/viewport*c.w;gl_Position=c;}`,`#version 300 es
-precision highp float;uniform vec3 color;out vec4 frag;void main(){frag=vec4(color,1);}`);
+uniform mat4 mvp;uniform mat4 model;uniform vec2 viewport;uniform float width;out float worldZ;
+void main(){worldZ=(model*vec4(mix(a,b,corner.x),1)).z;vec4 p=mvp*vec4(a,1),q=mvp*vec4(b,1);vec2 d=q.xy/max(q.w,0.00001)-p.xy/max(p.w,0.00001);float len=length(d);vec2 normal=len>0.0000001?vec2(-d.y,d.x)/len:vec2(0,1);vec4 c=mix(p,q,corner.x);c.xy+=normal*corner.y*width/viewport*c.w;gl_Position=c;}`,`#version 300 es
+precision highp float;in float worldZ;uniform vec2 heightRange;uniform vec3 color;out vec4 frag;void main(){if(worldZ<heightRange.x||worldZ>heightRange.y)discard;frag=vec4(color,1);}`);
 const loc=(p,n)=>gl.getUniformLocation(p,n),pu={},lu={},su={};
-for(const n of ['mvp','model','pointSize','axis','lut','range','solid','alpha','single','circles'])pu[n]=loc(pointProgram,n);
-for(const n of ['mvp','viewport','width','color'])lu[n]=loc(lineProgram,n);
-for(const n of ['mvp','model','cameraRight','cameraUp','cameraEye','isOrthographic','sizeMeters','axis','lut','range','solid','alpha','single'])su[n]=loc(squareProgram,n);
+for(const n of ['mvp','model','pointSize','axis','lut','range','heightRange','solid','alpha','single','circles'])pu[n]=loc(pointProgram,n);
+for(const n of ['mvp','model','viewport','width','color','heightRange'])lu[n]=loc(lineProgram,n);
+for(const n of ['mvp','model','cameraRight','cameraUp','cameraEye','isOrthographic','sizeMeters','axis','lut','range','heightRange','solid','alpha','single'])su[n]=loc(squareProgram,n);
 const rgb=h=>h.match(/[a-f\d]{2}/gi).map(x=>parseInt(x,16)/255);
 const palettes={turbo:['#30123b','#4145ab','#4675ed','#39a2fc','#1bcfd4','#24eca6','#61fc6c','#a4fc3c','#d1e834','#f3c63a','#fe9b2d','#f36315','#d93806','#ae1801','#7a0403'],viridis:['#440154','#482878','#3e4989','#31688e','#26828e','#1f9e89','#35b779','#6ece58','#b5de2b','#fde725'],plasma:['#0d0887','#46039f','#7201a8','#9c179e','#bd3786','#d8576b','#ed7953','#fb9f3a','#fdca26','#f0f921'],rainbow:['#6500ff','#006dff','#00ddff','#00e75b','#a5ef00','#ffe600','#ff7300','#ee0000'],gray:['#20252b','#ffffff']};
 const texture=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,texture);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
@@ -104,7 +106,9 @@ function focusView(pan=false){
     function consider(px,py,pz,m){
         const x=m[0]*px+m[4]*py+m[8]*pz+m[12]-b.eye[0];
         const y=m[1]*px+m[5]*py+m[9]*pz+m[13]-b.eye[1];
-        const z=m[2]*px+m[6]*py+m[10]*pz+m[14]-b.eye[2];
+        const worldZ=m[2]*px+m[6]*py+m[10]*pz+m[14];
+        if((heightLower!==null&&worldZ<heightLower)||(heightUpper!==null&&worldZ>heightUpper))return;
+        const z=worldZ-b.eye[2];
         const forward=x*b.f[0]+y*b.f[1]+z*b.f[2];
         if(forward<=near)return;
         const pixels=height/(2*(orthographic?orthographicScale:forward)*tanHalfFov);
@@ -183,8 +187,8 @@ function drawEndpoints(m,ratio){
 let gridBuffer=gl.createBuffer(),gridCount=0,gridSpacing=10;
 function buildGrid(){const extent=Math.max(radius*1.2,2),rough=extent/10,power=10**Math.floor(Math.log10(rough));gridSpacing=[1,2,5,10].map(x=>x*power).find(x=>x>=rough);const a=[],x0=Math.floor((center[0]-extent)/gridSpacing)*gridSpacing,x1=Math.ceil((center[0]+extent)/gridSpacing)*gridSpacing,y0=Math.floor((center[1]-extent)/gridSpacing)*gridSpacing,y1=Math.ceil((center[1]+extent)/gridSpacing)*gridSpacing;for(let x=x0;x<=x1+gridSpacing*.01;x+=gridSpacing)a.push(x,y0,0,x,y1,0);for(let y=y0;y<=y1+gridSpacing*.01;y+=gridSpacing)a.push(x0,y,0,x1,y,0);gl.bindBuffer(gl.ARRAY_BUFFER,gridBuffer);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(a),gl.STATIC_DRAW);gridCount=a.length/3;$('grid-scale').textContent=`Grid ${gridSpacing.toLocaleString()} m · Z up`;}
 const axes=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,axes);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([0,0,0,5,0,0,0,0,0,0,5,0,0,0,0,0,0,5]),gl.STATIC_DRAW);
-function pointsUniforms(m,model=identity){gl.useProgram(pointProgram);gl.uniformMatrix4fv(pu.model,false,model);gl.uniformMatrix4fv(pu.mvp,false,m);gl.uniform1i(pu.lut,0);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,texture);gl.enableVertexAttribArray(0);gl.disableVertexAttribArray(1);gl.disableVertexAttribArray(2);}
-function lines(buffer,count,color,m,first=0){pointsUniforms(m);gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.vertexAttribPointer(0,3,gl.FLOAT,false,12,0);gl.uniform1i(pu.single,1);gl.uniform1i(pu.circles,0);gl.uniform3fv(pu.solid,color);gl.uniform1f(pu.alpha,1);gl.drawArrays(gl.LINES,first,count);}
+function pointsUniforms(m,model=identity){gl.useProgram(pointProgram);gl.uniform2fv(pu.heightRange,visibleHeight());gl.uniformMatrix4fv(pu.model,false,model);gl.uniformMatrix4fv(pu.mvp,false,m);gl.uniform1i(pu.lut,0);gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,texture);gl.enableVertexAttribArray(0);gl.disableVertexAttribArray(1);gl.disableVertexAttribArray(2);}
+function lines(buffer,count,color,m,first=0){pointsUniforms(m);gl.uniform2f(pu.heightRange,-1e30,1e30);gl.bindBuffer(gl.ARRAY_BUFFER,buffer);gl.vertexAttribPointer(0,3,gl.FLOAT,false,12,0);gl.uniform1i(pu.single,1);gl.uniform1i(pu.circles,0);gl.uniform3fv(pu.solid,color);gl.uniform1f(pu.alpha,1);gl.drawArrays(gl.LINES,first,count);}
 function pointStyle(){return $('point-style')?.value||'round-points';}
 function worldPointSize(){const v=Number($('size-m')?.value);return Number.isFinite(v)&&v>0?Math.min(5,v):.03;}
 function updatePointStyle(){
@@ -214,6 +218,7 @@ displayed=0;if(mapKey&&mapBuffers.length&&loaded){
         pointsUniforms(m,modelFor(mapKey));gl.uniform1f(pu.pointSize,Number($('size').value)*ratio);
         gl.uniform1i(pu.circles,1);
     }
+    gl.uniform2fv(u.heightRange,visibleHeight());
     gl.uniform1f(u.alpha,alpha);gl.uniform1i(u.axis,{x:0,y:1,z:2}[$('color-by').value]??2);
     gl.uniform1i(u.single,$('color-by').value==='solid');gl.uniform3fv(u.solid,rgb($('solid').value));
     gl.uniform2f(u.range,Number($('color-min').value),Number($('color-max').value));
@@ -226,7 +231,7 @@ displayed=0;if(mapKey&&mapBuffers.length&&loaded){
     if(flat)gl.bindVertexArray(null);
     gl.depthMask(true);
 }
-gl.disable(gl.DEPTH_TEST);gl.disable(gl.BLEND);gl.useProgram(lineProgram);gl.uniformMatrix4fv(lu.mvp,false,m);gl.uniform2f(lu.viewport,w,h);gl.uniform1f(lu.width,2.3*ratio);for(const [key,p] of Object.entries(paths)){if(!$(style(key).control).checked)continue;gl.uniformMatrix4fv(lu.mvp,false,multiply(m,modelFor(key)));gl.uniform1f(lu.width,style(key).width*dpr());gl.bindBuffer(gl.ARRAY_BUFFER,p.buffer);for(let k=0;k<3;k++){gl.enableVertexAttribArray(k);gl.vertexAttribPointer(k,k===2?2:3,gl.FLOAT,false,32,k*12);}gl.uniform3fv(lu.color,rgb(style(key).color));gl.drawArrays(gl.TRIANGLES,0,p.count);}drawEndpoints(m,ratio);updateStatus();}
+gl.disable(gl.DEPTH_TEST);gl.disable(gl.BLEND);gl.useProgram(lineProgram);gl.uniform2fv(lu.heightRange,visibleHeight());gl.uniformMatrix4fv(lu.mvp,false,m);gl.uniform2f(lu.viewport,w,h);gl.uniform1f(lu.width,2.3*ratio);for(const [key,p] of Object.entries(paths)){if(!$(style(key).control).checked)continue;gl.uniformMatrix4fv(lu.model,false,modelFor(key));gl.uniformMatrix4fv(lu.mvp,false,multiply(m,modelFor(key)));gl.uniform1f(lu.width,style(key).width*dpr());gl.bindBuffer(gl.ARRAY_BUFFER,p.buffer);for(let k=0;k<3;k++){gl.enableVertexAttribArray(k);gl.vertexAttribPointer(k,k===2?2:3,gl.FLOAT,false,32,k*12);}gl.uniform3fv(lu.color,rgb(style(key).color));gl.drawArrays(gl.TRIANGLES,0,p.count);}drawEndpoints(m,ratio);updateStatus();}
 function drawSoon(){if(!queued){queued=true;requestAnimationFrame(render);}}
 function autoRange(){if(!colorRangeAuto){drawSoon();return;}const axis={x:0,y:1,z:2}[$('color-by').value]??2,b=worldBounds(selected().color_bounds,mapKey||cfg.default_map);$('color-min').value=b[0][axis].toFixed(2);$('color-max').value=Math.max(b[1][axis],b[0][axis]+.01).toFixed(2);drawSoon();}
 async function readRange(url,start,end,signal){
@@ -299,6 +304,31 @@ async function loadMap(key){
         mapBuffers.length=0;error(e);drawSoon();
     }}
 }
+function updateHeightControls(){
+    const bounds=[...Object.entries(cfg.maps).map(([key,map])=>worldBounds(map.bounds,key)),
+        ...Object.entries(cfg.path_bounds).map(([key,b])=>worldBounds(b,key))];
+    const lows=bounds.map(b=>b[0][2]).filter(Number.isFinite),highs=bounds.map(b=>b[1][2]).filter(Number.isFinite);
+    const low=Math.floor(Math.min(...(lows.length?lows:[0]),heightLower??Infinity,heightUpper??Infinity)*100)/100;
+    const high=Math.ceil(Math.max(...(highs.length?highs:[1]),heightLower??-Infinity,heightUpper??-Infinity)*100)/100;
+    for(const [side,value,fallback] of [['lower',heightLower,low],['upper',heightUpper,high]]){
+        const slider=$('z-'+side+'-range');slider.min=low;slider.max=Math.max(low+.01,high);slider.value=value??fallback;
+        $('z-'+side).value=(value??fallback).toFixed(2);$('z-'+side+'-enabled').checked=value!==null;
+    }
+}
+function setHeight(value,lower){
+    if(value!==null&&(!Number.isFinite(value)||Math.abs(value)>1e6)){updateHeightControls();return;}
+    if(lower){heightLower=value;if(value!==null&&heightUpper!==null&&value>heightUpper)heightUpper=value;}
+    else{heightUpper=value;if(value!==null&&heightLower!==null&&value<heightLower)heightLower=value;}
+    updateHeightControls();drawSoon();
+}
+for(const side of ['lower','upper']){
+    const lower=side==='lower';
+    $('z-'+side+'-range').oninput=e=>setHeight(Number(e.target.value),lower);
+    $('z-'+side).onchange=e=>{if(e.target.value!=='')setHeight(Number(e.target.value),lower);else updateHeightControls();};
+    $('z-'+side+'-enabled').onchange=e=>setHeight(e.target.checked?Number($('z-'+side).value):null,lower);
+}
+$('height-all').onclick=()=>{heightLower=heightUpper=null;updateHeightControls();drawSoon();};
+updateHeightControls();
 $('map').onchange=()=>loadMap($('map').value==='none'?'':$('map').value);
 $('point-style')?.addEventListener('change',updatePointStyle);
 $('size-m')?.addEventListener('input',()=>{if($('size-m').checkValidity())drawSoon();});
@@ -364,6 +394,7 @@ window.blkTrajectoryViewer.refresh=async()=>{
     const next=await window.blkTrajectoryScene(true);
     if(!next)return false;
     Object.assign(cfg,next);
+    updateHeightControls();
     rebuildPaths();
     for(const item of Object.values(cfg.styles))$(item.control).addEventListener('input',drawSoon);
     preferences.bind([],Object.values(cfg.styles).map(s=>s.control));

@@ -11,6 +11,14 @@
 <label id="palette-label">Color scheme<select id="palette"><option value="turbo">Turbo</option><option value="viridis">Viridis</option><option value="plasma">Plasma</option><option value="rainbow">Rainbow</option><option value="gray">Grayscale</option></select></label>
 <label id="solid-label" hidden>Point color<input id="solid" type="color" value="#caddea"></label>
 <div id="range-controls"><div class="pair"><label>Color min<input id="color-min" type="number" step="0.1"></label><label>Color max<input id="color-max" type="number" step="0.1"></label></div><button id="auto-color">Auto color range</button><div id="colorbar"></div></div>
+<section id="height-controls" aria-label="Visible height range">
+<h2>Height cut</h2>
+<label class="check"><input id="z-lower-enabled" type="checkbox">Hide below Z (m)</label>
+<input id="z-lower" type="number" step="0.01" aria-label="Minimum visible Z in metres"><input id="z-lower-range" type="range" step="any" aria-label="Minimum visible height">
+<label class="check"><input id="z-upper-enabled" type="checkbox">Hide above Z (m)</label>
+<input id="z-upper" type="number" step="0.01" aria-label="Maximum visible Z in metres"><input id="z-upper-range" type="range" step="any" aria-label="Maximum visible height">
+<button id="height-all" type="button">Show all heights</button>
+</section>
 <label>Background<input id="background" type="color" value="#0e1722"></label>
 <h2>Trajectories & view</h2>
 <div id="trajectory-paths"></div>

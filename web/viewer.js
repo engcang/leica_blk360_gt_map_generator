@@ -39,7 +39,7 @@
         },
         fov = 50 * Math.PI / 180,
         tanHalf = Math.tan(fov / 2),
-        clip = $('clip');
+        clip = $('clip'), clipLower = $('clip-lower');
     const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 
     function basis()
@@ -116,10 +116,10 @@
         if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw Error(gl.getProgramInfoLog(p));
         return p;
     }
-    const points = program(`attribute vec4 point;uniform mat4 mvp;uniform float size,clipZ,rgbMode;uniform vec2 intensityRange;varying vec3 rgb;varying float visible;void main(){gl_Position=mvp*vec4(point.xyz,1.0);gl_PointSize=size;visible=point.z<=clipZ?1.0:0.0;float v=clamp((point.w-intensityRange.x)/max(1.0,intensityRange.y-intensityRange.x),0.0,1.0);rgb=rgbMode>.5?vec3(floor(point.w/65536.0),mod(floor(point.w/256.0),256.0),mod(point.w,256.0))/255.0:mix(vec3(.18,.3,.42),vec3(.95,.97,1.0),v);}`, `precision mediump float;varying vec3 rgb;varying float visible;void main(){if(visible<.5)discard;vec2 p=gl_PointCoord-vec2(.5);if(dot(p,p)>.25)discard;gl_FragColor=vec4(rgb,1.0);}`);
+    const points = program(`attribute vec4 point;uniform mat4 mvp;uniform float size,clipZ,clipLower,rgbMode;uniform vec2 intensityRange;varying vec3 rgb;varying float visible;void main(){gl_Position=mvp*vec4(point.xyz,1.0);gl_PointSize=size;visible=point.z>=clipLower&&point.z<=clipZ?1.0:0.0;float v=clamp((point.w-intensityRange.x)/max(1.0,intensityRange.y-intensityRange.x),0.0,1.0);rgb=rgbMode>.5?vec3(floor(point.w/65536.0),mod(floor(point.w/256.0),256.0),mod(point.w,256.0))/255.0:mix(vec3(.18,.3,.42),vec3(.95,.97,1.0),v);}`, `precision mediump float;varying vec3 rgb;varying float visible;void main(){if(visible<.5)discard;vec2 p=gl_PointCoord-vec2(.5);if(dot(p,p)>.25)discard;gl_FragColor=vec4(rgb,1.0);}`);
     const lineProgram = program('attribute vec3 position;attribute vec3 colour;uniform mat4 mvp;varying vec3 rgb;void main(){gl_Position=mvp*vec4(position,1.0);rgb=colour;}', 'precision mediump float;varying vec3 rgb;void main(){gl_FragColor=vec4(rgb,1.0);}');
     const u = {};
-    for (const n of ['mvp', 'size', 'clipZ', 'intensityRange', 'rgbMode']) u[n] = gl.getUniformLocation(points, n);
+    for (const n of ['mvp', 'size', 'clipZ', 'clipLower', 'intensityRange', 'rgbMode']) u[n] = gl.getUniformLocation(points, n);
     const pointAttr = gl.getAttribLocation(points, 'point'),
         linePos = gl.getAttribLocation(lineProgram, 'position'),
         lineCol = gl.getAttribLocation(lineProgram, 'colour'),
@@ -236,6 +236,7 @@
         gl.uniformMatrix4fv(u.mvp, false, b.mvp);
         gl.uniform1f(u.size, Number($('size').value) * dpr);
         gl.uniform1f(u.clipZ, Number(clip.value) + .00001);
+        gl.uniform1f(u.clipLower, Number(clipLower.value) - .00001);
         gl.uniform2f(u.intensityRange, ilow, ihigh);
         gl.uniform1f(u.rgbMode, rgbMode ? 1 : 0);
         const displayed = shown();
@@ -252,7 +253,7 @@
         document.body.dataset.interacting = String(active);
         document.body.dataset.projection = camera.projection;
         const density = $('density').selectedOptions[0].textContent;
-        $('densityStatus').textContent = displayed.toLocaleString('en-US') + ' / ' + count.toLocaleString('en-US') + ' points displayed · selected: ' + density + (active && displayed < Math.ceil(count / Number($('density').value)) ? ' · temporarily reduced while navigating' : '') + (Number(clip.value) < max[2] - 1e-6 ? ' · Z clipping enabled' : '');
+        $('densityStatus').textContent = displayed.toLocaleString('en-US') + ' / ' + count.toLocaleString('en-US') + ' points displayed · selected: ' + density + (active && displayed < Math.ceil(count / Number($('density').value)) ? ' · temporarily reduced while navigating' : '') + (Number(clip.value) < max[2] - 1e-6 || Number(clipLower.value) > min[2] + 1e-6 ? ' · Z clipping enabled' : '');
         $('cameraStatus').textContent = 'Target [' + camera.target.map(v => v.toFixed(2)).join(', ') + '] m · Distance ' + camera.distance.toFixed(2) + ' m · XY grid (Z=0): ' + gridStep.toPrecision(2) + ' m · scanner-local axes';
     }
 
@@ -295,8 +296,7 @@
         camera.projection = 'perspective';
         $('projection').value = 'perspective';
         $('view').value = 'oblique';
-        clip.value = clip.max;
-        $('clipvalue').textContent = 'All';
+        resetHeight();
         fit();
     }
 
@@ -342,11 +342,11 @@
             if (gl.getError() !== gl.NO_ERROR) throw Error(`Not enough GPU memory for ${count.toLocaleString('en-US')} points (${(count * 16 / 1e9).toFixed(2)} GB). Generate a 3 cm PLY in Review and manage.`);
         }
         makeGrid();
-        clip.min = min[2];
-        clip.max = max[2];
-        clip.step = 'any';
-        clip.value = max[2];
-        $('clipvalue').textContent = 'All';
+        for (const slider of [clipLower, clip])
+        {
+            slider.min = min[2];slider.max = max[2];slider.step = 'any';
+        }
+        resetHeight();
         fit();
         draw();
     }
@@ -389,12 +389,12 @@
             radius = Math.max(16, Math.min(c.clientWidth, height) * .04),
             visible = shown(), stride = Math.max(1, Math.ceil(visible / 200000)),
             near = Math.max(.0001, Math.min(extent * .0001, camera.distance * .01)),
-            zLimit = Number(clip.value) + .00001;
+            zLimit = Number(clip.value) + .00001, zLower = Number(clipLower.value) - .00001;
         let best = radius * radius, depth = null;
         for (let point = 0; point < visible; point += stride)
         {
             const index = point * 4;
-            if (data[index + 2] > zLimit) continue;
+            if (data[index + 2] > zLimit || data[index + 2] < zLower) continue;
             const x = data[index] - eye[0], y = data[index + 1] - eye[1], z = data[index + 2] - eye[2],
                 forward = -(x * b.back[0] + y * b.back[1] + z * b.back[2]);
             if (forward <= near) continue;
@@ -434,11 +434,11 @@
             visible = shown(), stride = Math.max(1, Math.ceil(visible / 200000)),
             aspect = c.clientWidth / c.clientHeight,
             near = Math.max(.0001, Math.min(extent * .0001, camera.distance * .01)),
-            zLimit = Number(clip.value) + .00001;
+            zLimit = Number(clip.value) + .00001, zLower = Number(clipLower.value) - .00001;
         for (let point = 0; point < visible; point += stride)
         {
             const index = point * 4;
-            if (data[index + 2] > zLimit) continue;
+            if (data[index + 2] > zLimit || data[index + 2] < zLower) continue;
             const offset = [data[index] - eye[0], data[index + 1] - eye[1], data[index + 2] - eye[2]],
                 depth = -dot(offset, b.back);
             if (depth <= near) continue;
@@ -482,11 +482,23 @@
         requestDraw();
     };
     for (const id of ['size', 'grid', 'density']) $(id).oninput = requestDraw;
-    clip.oninput = () =>
+    function heightLabels()
     {
-        $('clipvalue').textContent = Number(clip.value).toFixed(2) + ' m';
-        requestDraw();
+        $('clipvalue').textContent = Number(clip.value) >= max[2] ? 'All' : Number(clip.value).toFixed(2) + ' m';
+        $('clip-lower-value').textContent = Number(clipLower.value) <= min[2] ? 'All' : Number(clipLower.value).toFixed(2) + ' m';
+    }
+    function resetHeight()
+    {
+        clip.value = clip.max;clipLower.value = clipLower.min;
+        heightLabels();requestDraw();
+    }
+    for (const slider of [clipLower, clip]) slider.oninput = () =>
+    {
+        if (Number(clipLower.value) > Number(clip.value))
+            (slider === clipLower ? clip : clipLower).value = slider.value;
+        heightLabels();requestDraw();
     };
+    $('height-all').onclick = resetHeight;
     c.oncontextmenu = e => e.preventDefault();
     c.onpointerdown = e =>
     {
